@@ -563,63 +563,46 @@ fn configure_system() {
     // --- CLOUDFLARED CONFIGURATION ---
     println!("   🔧 Configuring Cloudflared (DNS Proxy)...");
     
-    // 1. Write the Config File
-    let cf_config = "proxy-dns: true\nproxy-dns-upstream:\n  - https://1.1.1.1/dns-query\n  - https://1.0.0.1/dns-query\nproxy-dns-port: 53\nproxy-dns-address: 127.0.0.1\n";
-    let _ = Command::new("sudo").args(["mkdir", "-p", "/etc/cloudflared"]).status();
-    
-    let local_cf_conf = "./config.yml";
-    if fs::write(local_cf_conf, cf_config).is_ok() {
-        let _ = Command::new("sudo").args(["install", "-m", "644", local_cf_conf, "/etc/cloudflared/config.yml"]).status();
-        let _ = fs::remove_file(local_cf_conf);
+    // 1. Ensure package is installed (failsafe)
+    let _ = Command::new("sudo").args(["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"]).status();
+
+    // 2. Configure TOML to use Cloudflare
+    let dns_conf = "/etc/dnscrypt-proxy/dnscrypt-proxy.toml";
+    if Path::new(dns_conf).exists() {
+        // Uncomment server_names = ['cloudflare']
+        let _ = Command::new("sudo")
+            .args(["sed", "-i", "s/^# server_names = \\['cloudflare'\\]/server_names = ['cloudflare']/", dns_conf])
+            .status();
+        // Ensure it listens on localhost (usually default, but good to ensure)
+        let _ = Command::new("sudo")
+            .args(["sed", "-i", "s/^listen_addresses = \\['127.0.0.1:53'\\]/listen_addresses = ['127.0.0.1:53', '[::1]:53']/", dns_conf])
+            .status();
     }
 
-    // 2. Create the Service File
-    let cf_service_content = r#"[Unit]
-Description=Cloudflared DNS over HTTPS Proxy
-After=network.target
+    // 3. Enable the service
+    run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"]);
 
-[Service]
-ExecStart=/usr/bin/cloudflared --config /etc/cloudflared/config.yml
-Restart=on-failure
-User=root
+    // 4. Clean up old Cloudflared artifacts if they exist
+    let _ = Command::new("sudo").args(["systemctl", "disable", "--now", "cloudflared-dns"]).status();
+    let _ = Command::new("sudo").args(["rm", "-f", "/etc/systemd/system/cloudflared-dns.service"]).status();
+    let _ = Command::new("sudo").args(["systemctl", "daemon-reload"]).status();
 
-[Install]
-WantedBy=multi-user.target
-"#;
-
-    let local_cf_svc = "./cloudflared-dns.service";
-    if fs::write(local_cf_svc, cf_service_content).is_ok() {
-        let _ = Command::new("sudo").args(["install", "-m", "644", local_cf_svc, "/etc/systemd/system/cloudflared-dns.service"]).status();
-        let _ = fs::remove_file(local_cf_svc);
-    }
-
-    // 3. Enable it
-    run_cmd("sudo", &["systemctl", "daemon-reload"]);
-    // Disable the default 'cloudflared' service if installed by pacman to avoid conflicts
-    let _ = Command::new("sudo").args(["systemctl", "disable", "--now", "cloudflared"]).status();
-    // Enable our custom service
-    run_cmd("sudo", &["systemctl", "enable", "cloudflared-dns.service"]);
-    println!("   🔧 Configuring Session Environment (PATH)...");
+    // --- ENVIRONMENT & LOGIND ---
+    println!("    🔧 Configuring Session Environment (PATH)...");
     let env_dir = dirs::home_dir().unwrap().join(".config/environment.d");
     let env_file = env_dir.join("99-cargo-path.conf");
 
-    // Create dir if missing
     if fs::create_dir_all(&env_dir).is_ok() {
-        // We write the variable assignment directly
         let content = "PATH=$HOME/.cargo/bin:$PATH\n";
-        
-        if let Err(e) = fs::write(&env_file, content) {
-            eprintln!("   ⚠️ Failed to write environment.d config: {}", e);
-        } else {
-            println!("   ✅ Global PATH configured for Wayland.");
-        }
+        let _ = fs::write(&env_file, content);
     }
-    println!("   🔧 Configuring Logind...");
+    
+    println!("    🔧 Configuring Logind...");
     let logind_conf = "/etc/systemd/logind.conf";
     run_cmd("sudo", &["sed", "-i", "s/#KillUserProcesses=no/KillUserProcesses=yes/", logind_conf]);
     run_cmd("sudo", &["sed", "-i", "s/KillUserProcesses=no/KillUserProcesses=yes/", logind_conf]);
 
-    println!("   🔧 Configuring Greetd...");
+    println!("    🔧 Configuring Greetd...");
     let greetd_config = r#"
 [terminal]
 vt = 1
@@ -627,31 +610,19 @@ vt = 1
 command = "tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
 user = "greeter"
 "#;
-    // SECURE FIX: Write to local dir (we own it) instead of /tmp (race condition)
     let _ = fs::write("./greetd_config.toml", greetd_config);
     run_cmd("sudo", &["mv", "./greetd_config.toml", "/etc/greetd/config.toml"]);
-    // 1. Disable competitors FIRST to free up the symlink
-    // We use status() and ignore errors because these might not be installed
     let _ = Command::new("sudo").args(["systemctl", "disable", "gdm", "sddm", "lightdm"]).status();
-
-    // 2. Enable Greetd with --force to overwrite /etc/systemd/system/display-manager.service
     run_cmd("sudo", &["systemctl", "enable", "--force", "greetd.service"]);
-    println!("   🔧 Setting Shell to Zsh...");
-    let user = std::env::var("USER").unwrap_or_else(|_| {
-        eprintln!("⚠️  Could not detect $USER, defaulting to root");
-        "root".to_string()
-    });
-    let _ = Command::new("sudo").args(["chsh", "-s", "/usr/bin/zsh", &user]).output();
-    println!("   ✨ Setting up Tmux Plugin Manager...");
-    let tpm_dir = dirs::home_dir().unwrap().join(".tmux/plugins/tpm");
     
+    println!("    🔧 Setting Shell to Zsh...");
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+    let _ = Command::new("sudo").args(["chsh", "-s", "/usr/bin/zsh", &user]).output();
+    
+    println!("    ✨ Setting up Tmux Plugin Manager...");
+    let tpm_dir = dirs::home_dir().unwrap().join(".tmux/plugins/tpm");
     if !tpm_dir.exists() {
-        let _ = Command::new("git")
-            .args(["clone", "https://github.com/tmux-plugins/tpm", tpm_dir.to_str().unwrap()])
-            .status();
-        println!("   ✅ TPM installed. (Press Prefix + I inside Tmux to install plugins)");
-    } else {
-        println!("   ℹ️  TPM already exists.");
+        let _ = Command::new("git").args(["clone", "https://github.com/tmux-plugins/tpm", tpm_dir.to_str().unwrap()]).status();
     }
 }
 
@@ -962,6 +933,7 @@ text_on = "󰅟"
 class_on = "on"
 text_off = "⚠︎"
 class_off = "off"
+service_name = "dnscrypt-proxy"
 resolv_content_on = "nameserver 127.0.0.1"
 resolv_content_off = "nameserver 1.1.1.1\nnameserver 1.0.0.1"
 bar_process_name = "waybar"

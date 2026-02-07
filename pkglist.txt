@@ -99,7 +99,6 @@ fastfetch
 neovim
 networkmanager
 network-manager-applet
-cloudflared
 discord
 tigervnc
 mpv
@@ -111,3 +110,4 @@ system-config-printer
 cups-pdf
 zsh-autosuggestions
 zsh-syntax-highlighting
+dnscrypt-proxy

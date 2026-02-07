@@ -89,7 +89,7 @@ text_on = "󰅟"  # Example: "ON" or an icon
 class_on = "on"
 text_off = "⚠︎" # Example: "OFF" or an icon
 class_off = "off"
-
+service_name = "dnscrypt-proxy"
 # For cf-toggle.rs (root)
 resolv_content_on = "nameserver 127.0.0.1"
 resolv_content_off = "nameserver 1.1.1.1\nnameserver 1.0.0.1"

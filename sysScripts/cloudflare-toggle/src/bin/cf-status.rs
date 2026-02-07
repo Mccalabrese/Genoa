@@ -20,6 +20,7 @@ struct Config {
     resolv_content_off: String,
     bar_process_name: String,
     bar_signal_num: i32,
+    service_name: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -45,7 +46,7 @@ fn main() -> Result<()> {
     // systemctl is-active returns "active" (exit code 0) or "inactive" (exit code 3/4).
     let service_active = Command::new("systemctl")
         .arg("is-active")
-        .arg("cloudflared-dns")
+        .arg(&config.as_ref().map_or("dnscrypt-proxy", |c| &c.service_name))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);

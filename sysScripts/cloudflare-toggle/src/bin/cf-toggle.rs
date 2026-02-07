@@ -32,6 +32,7 @@ struct Config {
     resolv_content_off: String,  // e.g. "nameserver 1.1.1.1"
     bar_process_name: String,    // "waybar"
     bar_signal_num: i32,         // Signal offset
+    service_name: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -62,7 +63,7 @@ fn run_as_user() -> Result<()> {
     // Check current service status to toggle it
     let is_running = Command::new("systemctl")
         .arg("is-active")
-        .arg("cloudflared-dns")
+        .arg(&config.service_name)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -80,6 +81,7 @@ fn run_as_user() -> Result<()> {
     let status = Command::new("pkexec")
         .arg(self_exe)
         .arg(mode)
+        .arg(&config.service_name)
         .arg(content_on)
         .arg(content_off)
         .status()
@@ -103,13 +105,13 @@ fn run_as_user() -> Result<()> {
 /// The privileged worker.
 /// This function only runs when `pkexec` invokes this binary.
 /// It has permission to write to /etc/ and control systemd.
-fn run_as_root(mode: &str, content_on: &str, content_off: &str) -> Result<()> {
+fn run_as_root(mode: &str, service_name: &str, content_on: &str, content_off: &str) -> Result<()> {
     if mode == "--start" {
         // Enable service
         Command::new("systemctl")
             .arg("enable")
             .arg("--now")
-            .arg("cloudflared-dns")
+            .arg(service_name)
             .status()?
             .success()
             .then_some(())
@@ -124,7 +126,7 @@ fn run_as_root(mode: &str, content_on: &str, content_off: &str) -> Result<()> {
         Command::new("systemctl")
             .arg("disable")
             .arg("--now")
-            .arg("cloudflared-dns")
+            .arg(service_name)
             .status()?
             .success()
             .then_some(())
@@ -142,23 +144,28 @@ fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
     // Detect Mode based on arguments
-    // If arguments exist, we assume we are the child process running as Root.
+    // Argument order from run_as_user:
+    // [0]: binary_path
+    // [1]: mode (--start / --stop)
+    // [2]: service_name
+    // [3]: content_on
+    // [4]: content_off
+
     if args.len() > 1 {
         let mode = &args[1];
-        // Simple validation to ensure we are in the expected state
-        if mode != "--start" && mode != "--stop" {
-            if args.len() < 4 {
-                eprintln!("Internal Error: Missing arguments for root mode.");
-                return Ok(());
-            }
-            let content_on = &args[2];
-            let content_off = &args[3];
-            run_as_root(mode, content_on, content_off)
-        } else {
-            let content_on = args.get(2).context("Missing content_on")?;
-            let content_off = args.get(3).context("Missing content_off")?;
-            run_as_root(mode, content_on, content_off)
+
+        // Safety check: verify we have enough arguments
+        if args.len() < 5 {
+            eprintln!("Internal Error: Missing arguments for root mode.");
+            // We return Ok here to avoid panic, but the operation fails silently.
+            return Ok(());
         }
+
+        let service_name = &args[2];
+        let content_on = &args[3];
+        let content_off = &args[4];
+
+        run_as_root(mode, service_name, content_on, content_off)
     } else {
         // No arguments? We are the user clicking the button.
         run_as_user()

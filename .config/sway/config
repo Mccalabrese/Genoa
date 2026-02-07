@@ -34,7 +34,7 @@ default_border pixel 2
 # smart_borders on # Optional: Hides borders if only one window
 # Prevent redraws when idle (reduces GPU wakeups)
 output * max_render_time 3
-
+seat seat0 xcursor_theme Adwaita 24
 # Input Settings
 input * {
     repeat_rate 30

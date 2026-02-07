@@ -8,6 +8,8 @@
 # XDG Specs
 export XDG_SESSION_TYPE=wayland
 export XDG_MENU_PREFIX=arch-
+export XCURSOR_SIZE=24
+export XCURSOR_THEME=Adwaita
 
 # QT Variables
 export QT_AUTO_SCREEN_SCALE_FACTOR=1
