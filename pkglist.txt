@@ -52,7 +52,6 @@ pipewire
 pipewire-pulse
 pipewire-alsa
 pipewire-jack
-wireplumber
 pavucontrol
 sof-firmware
 playerctl
@@ -111,3 +110,4 @@ cups-pdf
 zsh-autosuggestions
 zsh-syntax-highlighting
 dnscrypt-proxy
+wireplumber

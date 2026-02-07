@@ -195,25 +195,37 @@ EOF
                 echo "Fetching remote..."
                 git fetch origin main
 
-                # Check if we are behind
-                if ! git diff --quiet HEAD..origin/main -- sysScripts; then
-                    echo -e "\n✨ Updates detected in sysScripts!"
+                # 1. SURGICAL CHECK
+                # We check if the local 'sysScripts' folder matches the remote 'sysScripts' folder EXACTLY.
+                # We DO NOT check commit history (HEAD), because we aren't pulling the whole repo.
+                # If they differ, we force update ONLY sysScripts.
+                
+                SCRIPTS_DIFF=0
+                if ! git diff --quiet origin/main -- sysScripts; then
+                    SCRIPTS_DIFF=1
+                fi
+                
+                # Check pkglist.txt too
+                if ! git diff --quiet origin/main -- pkglist.txt; then
+                    SCRIPTS_DIFF=1
+                fi
+
+                if [ $SCRIPTS_DIFF -eq 1 ]; then
+                    echo -e "\n✨ Updates detected in Tools or Package List!"
+
+                    # 2. SURGICAL UPDATE
+                    # We use 'checkout' to force the local files to match remote.
+                    # We DO NOT run 'git pull', so user configs in .config/ remain untouched.
                     
-                    # FORCE RESET sysScripts to match remote
-                    # This fixes the "Cargo.lock" and "chmod" issues automatically.
-                    # We ONLY reset sysScripts, preserving their .config setup in the root.
-                    echo "🧹 Cleaning local artifacts in sysScripts..."
-                    git checkout origin/main -- sysScripts
-                    
-                    echo "✨ Syncing..."
-                    git pull origin main
+                    echo "🧹 Force-syncing sysScripts & pkglist.txt..."
+                    git checkout origin/main -- sysScripts pkglist.txt
 
                     echo "🔨 Recompiling Toolchain..."
                     cd sysScripts
                     for dir in */; do
                         if [ -f "$dir/Cargo.toml" ]; then
                             echo "   >> Compiling $dir..."
-                            # We use --locked to prevent Cargo.lock from changing again and triggering this loop next time
+                            # --locked ensures we use the exact dependencies from the lockfile
                             (cd "$dir" && cargo install --path . --force --quiet --locked)
                         fi
                     done
