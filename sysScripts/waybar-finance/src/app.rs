@@ -1,6 +1,8 @@
 use ratatui::widgets::ListState;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::Sender;
+use crate::ui::AppEvent;
 
 use crate::network::{FinnhubQuote, YahooSearchResult};
 use crate::app::InputMode::Normal;
@@ -171,5 +173,54 @@ impl App {
             None => 0,
         };
         self.search_state.select(Some(i));
+    }
+    ///Handles adding a stock and triggers data fetch
+    pub fn handle_confirm_selection(&mut self, tx: &Sender<AppEvent>, client: &reqwest::Client) {
+        let new_symbol = if let Some(idx) = self.search_state.selected() {
+            self.search_results[idx].symbol.clone()
+        } else {
+            self.input.trim().to_uppercase()
+        };
+
+        if new_symbol.is_empty() { return; }
+
+        if self.stocks.contains(&new_symbol) {
+            self.message = format!("{} exists!", new_symbol);
+            self.message_color = Color::Yellow;
+        } else {
+            self.stocks.push(new_symbol.clone());
+            self.state.select(Some(self.stocks.len() - 1));
+            self.message = format!("Added {}", new_symbol);
+            self.message_color = Color::Green;
+            
+            // Trigger background work
+            self.trigger_fetch(new_symbol, tx, client);
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx_clone.send(AppEvent::SaveConfig).await;
+            });
+        }
+
+        self.input.clear();
+        self.search_results.clear();
+        self.input_mode = InputMode::Normal;
+    }
+
+    /// Centralized fetch logic to avoid code duplication
+    pub fn trigger_fetch(&self, symbol: String, tx: &Sender<AppEvent>, client: &reqwest::Client) {
+        let client = client.clone();
+        let tx = tx.clone();
+        let api_key = self.api_key.clone().unwrap_or_default();
+
+        tokio::spawn(async move {
+            let q_res = crate::network::fetch_quote(&client, &symbol, &api_key).await;
+            let _ = tx.send(AppEvent::QuoteFetched(symbol.clone(), q_res)).await;
+
+            let h_res = crate::network::fetch_history(&client, &symbol, &api_key).await;
+            let _ = tx.send(AppEvent::HistoryFetched(symbol.clone(), h_res)).await;
+
+            let d_res = crate::network::fetch_details(&client, &symbol, &api_key).await;
+            let _ = tx.send(AppEvent::DetailsFetched(symbol, d_res)).await;
+        });
     }
 }

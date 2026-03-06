@@ -14,8 +14,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use crate::app::{App, InputMode, StockDetails, MarketStatus};
-use crate::config::save_config;
-use crate::network::{fetch_quote, fetch_details, fetch_history, FinnhubQuote, YahooSearchResult};
+use crate::network::{FinnhubQuote, YahooSearchResult};
 
 /// Internal events for the application event loop.
 pub enum AppEvent {
@@ -25,6 +24,8 @@ pub enum AppEvent {
     Input(crossterm::event::Event),
     SearchResultsFetched(Vec<YahooSearchResult>),
     MarketFetched(Result<MarketStatus>),
+    SaveConfig,
+    SearchRequest(String),
     Tick,
 }
 /// The main TUI run loop.
@@ -33,270 +34,177 @@ pub enum AppEvent {
 /// 2. Spawns a background task for Ticks (updates).
 /// 3. Main loop listens to the channel and updates the UI state.
 pub async fn run_tui(client: &reqwest::Client, app: &mut App) -> Result<()> {
+    // --- Setup Terminal ---
+    enable_raw_mode()?;
     let mut stdout = stdout();
     stdout.execute(EnterAlternateScreen)?;
-    enable_raw_mode()?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    //Channel for communication between background tasks and the main UI thread
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    terminal.clear()?;
-    // Heartbeat - 250ms redraw
+
+    // Bounded channel (100) prevents memory overflow
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(100);
+
+    // --- Background Tasks ---
+    
+    // 1. Tick Task
     let tx_tick = tx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
         loop {
             interval.tick().await;
-            if tx_tick.send(AppEvent::Tick).is_err() {
-                break;
-            }
+            if tx_tick.send(AppEvent::Tick).await.is_err() { break; }
         }
     });
-    // Input Listener - Runs in a blocking thread to capture crossterm events
-    // without freezing the async runtime.
-    let tx_iput = tx.clone();
+
+    // 2. Input Task
+    let tx_input = tx.clone();
     tokio::task::spawn_blocking(move || {
         loop {
             if let Ok(event) = crossterm::event::read() {
-                if tx_iput.send(AppEvent::Input(event)).is_err() {
-                    break;
-                }
+                if futures::executor::block_on(tx_input.send(AppEvent::Input(event))).is_err() { break; }
             }
         }
     });
-    let client_clone = client.clone();
-    let tx_clone = tx.clone();
+
+    // 3. Debounce Search Task
+    // We create a specific channel just for search strings
+    let (search_tx, mut search_rx) = tokio::sync::mpsc::channel::<String>(10);
+    let tx_search_res = tx.clone();
+    let client_search = client.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(180));
-        loop {
-            interval.tick().await;
-            match crate::network::fetch_market_status(&client_clone).await {
-                Ok(status) => {
-                    let _ = tx_clone.send(AppEvent::MarketFetched(Ok(status)));
-                }
-                Err(e) => {
-                    let _ = tx_clone.send(AppEvent::MarketFetched(Err(e)));
+        while let Some(query) = search_rx.recv().await {
+            // Wait for user to stop typing
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            
+            // Only search if it's the latest query in the pipe
+            let mut latest_query = query;
+            while let Ok(newer) = search_rx.try_recv() {
+                latest_query = newer;
+            }
+
+            if latest_query.len() > 1 {
+                if let Ok(results) = crate::network::search_ticker(&client_search, &latest_query).await {
+                    let _ = tx_search_res.send(AppEvent::SearchResultsFetched(results)).await;
                 }
             }
         }
     });
-    //Main Event Loop
-    loop {
-        // Render current state
-        terminal.draw(|frame| {
-            ui(frame, app);
-        })?;
-        // Wait for next event
-        if let Some(event) = rx.recv().await {
-            match event {
-                AppEvent::Tick => {
-                    //just let the loop spin, no action
-                }
-                AppEvent::MarketFetched(res) => {
-                    match res {
-                        Ok(status) => app.market_status = Some(status),
-                        Err(e) => eprintln!("Market status fetch error: {}", e),
+
+    // --- Main Loop ---
+    // Wrapped in a block so cleanup always runs
+    let result = async {
+        loop {
+            terminal.draw(|frame| ui(frame, app))?;
+
+            if let Some(event) = rx.recv().await {
+                match event {
+                    AppEvent::Tick => {}
+                    AppEvent::SaveConfig => {
+                        let cfg = app.to_config();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = crate::config::save_config(&cfg);
+                        });
                     }
-                }
-                AppEvent::QuoteFetched(sym, res) => {
-                    match res {
-                        Ok(q) => {
+                    AppEvent::MarketFetched(Ok(status)) => {
+                        app.market_status = Some(status);
+                    }
+                    AppEvent::QuoteFetched(sym, res) => {
+                        if let Ok(q) = res {
                             app.current_quote = Some(q);
                             app.message = format!("Updated {}", sym);
-                            app.message_color = Color::Red;
-                        }
-                        Err(e) => {
-                            app.message = format!("Error: {}", e);
-                            app.message_color = Color::Red;
+                            app.message_color = Color::Cyan;
                         }
                     }
-                }
-                AppEvent::HistoryFetched(_sym, res) => {
-                    match res {
-                        Ok(h) => app.stock_history = Some(h),
-                        Err(_) => app.stock_history = None,
+                    AppEvent::SearchResultsFetched(results) => {
+                        app.search_results = results;
+                        app.search_state.select(if app.search_results.is_empty() { None } else { Some(0) });
                     }
-                }
-                AppEvent::DetailsFetched(sym, res) => {
-                    match res {
-                        Ok(d) => app.details = Some(d),
-                        Err(e) => {
-                            app.details = None;
-                            app.message = format!("Details fetch failed for {}: {}", sym, e);
-                            app.message_color = Color::Red;
+                    AppEvent::Input(crossterm::event::Event::Key(key)) => {
+                        if key.kind == KeyEventKind::Press {
+                            handle_keys(app, key.code, &tx, &search_tx, client).await;
                         }
                     }
-                }
-                AppEvent::Input(event) => {
-                    // Route input based on active mode (Normal vs Editing vs KeyEntry)
-                    match event {
-                        crossterm::event::Event::Paste(pasted_text) => {
-                            app.input.push_str(&pasted_text);
-                            app.message = "Pasted text".to_string();
-                            app.message_color = Color::Yellow;
-                        }
-                        crossterm::event::Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                            match app.input_mode {
-                                InputMode::KeyEntry => match key_event.code {
-                                    KeyCode::Char(c) => {
-                                        app.input.push(c);
-                                    }
-                                    KeyCode::Backspace => {
-                                        app.input.pop();
-                                    }
-                                    KeyCode::Enter => {
-                                        let key = app.input.trim().to_string();
-                                        if !key.is_empty() {
-                                            // 1. Save to App State
-                                            app.api_key = Some(key);
-            
-                                            // 2. Reset UI
-                                            app.input.clear();
-                                            app.input_mode = InputMode::Normal;
-                                            app.message = "API Key Saved! Press 'q' to quit.".to_string();
-                                            app.message_color = Color::Green;
-            
-                                            // 3. Save to Disk IMMEDIATELY
-                                            if let Err(e) = save_config(&app.to_config()) {
-                                                app.message = format!("Failed to save config: {}", e);
-                                                app.message_color = Color::Red;
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Esc => {
-                                        app.should_quit = true;
-                                    }
-                                    _ => {}
-                                    },
-                                    InputMode::Normal => match key_event.code {
-                                    KeyCode::Char('q') => app.should_quit = true,
-                                    KeyCode::Char('a') => {
-                                        app.input_mode = InputMode::Editing;
-                                        app.message = "Enter Symbol...".to_string();
-                                        app.message_color = Color::Yellow;
-                                    }
-                                    KeyCode::Down => app.next(),
-                                    KeyCode::Up => app.previous(),
-                                    KeyCode::Enter => {
-                                        if let Some(selected) = app.state.selected() {
-                                            let new_symbol = app.stocks[selected].clone();
-                                            if let Some(api_key) = &app.api_key {
-                                                let symbol = new_symbol.clone();
-                                                let client_clone = client.clone();
-                                                let api_key_clone = api_key.clone();
-                                                let tx_clone = tx.clone();
-                                                
-                                                app.message = format!("Fetching {}...", symbol);
-                                                app.message_color = Color::Cyan;
-                                                // Trigger Async Data Fetch
-                                                // We spawn this so the UI doesn't freeze while waiting for HTTP
-                                                tokio::spawn(async move {
-                                                    let q_res = fetch_quote(&client_clone, &symbol, &api_key_clone).await;
-                                                    let _ = tx_clone.send(AppEvent::QuoteFetched(symbol.clone(), q_res));
-                                                    
-                                                    let h_res = fetch_history(&client_clone, &symbol, &api_key_clone).await;
-                                                    let _ = tx_clone.send(AppEvent::HistoryFetched(symbol.clone(), h_res));
-
-                                                    let d_res = fetch_details(&client_clone, &symbol, &api_key_clone).await;
-                                                    let _ = tx_clone.send(AppEvent::DetailsFetched(symbol.clone(), d_res));
-                                                });
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Char('d') | KeyCode::Delete => app.delete(),
-                                    _ => {}
-                                },
-                                InputMode::Editing => match key_event.code {
-                                    KeyCode::Enter => {
-                                        let new_symbol = app.input.trim().to_uppercase();
-                                        if !new_symbol.is_empty() {
-                                            if app.stocks.contains(&new_symbol) {
-                                                app.message = format!("{} exists!", new_symbol);
-                                                app.message_color = Color::Yellow;
-                                                app.input.clear();
-                                                app.input_mode = InputMode::Normal;
-                                            } else if let Some(api_key) = &app.api_key {
-                                                let client_clone = client.clone();
-                                                let api_key_clone = api_key.clone();
-                                                let tx_clone = tx.clone();
-                                                let symbol = new_symbol.clone();
-
-                                                app.message = format!("Adding {}...", symbol);
-                                                app.stocks.push(symbol.clone());
-                                                app.state.select(Some(app.stocks.len() - 1));
-                                                app.input.clear();
-                                                app.input_mode = InputMode::Normal;
-                                                // Trigger Async Data Fetch
-                                                // We spawn this so the UI doesn't freeze while waiting for HTTP
-                                                tokio::spawn(async move {
-                                                    let q_res = fetch_quote(&client_clone, &symbol, &api_key_clone).await;
-                                                    let _ = tx_clone.send(AppEvent::QuoteFetched(symbol.clone(), q_res));
-                                                    
-                                                    let h_res = fetch_history(&client_clone, &symbol, &api_key_clone).await;
-                                                    let _ = tx_clone.send(AppEvent::HistoryFetched(symbol.clone(), h_res));
-
-                                                    let d_res = fetch_details(&client_clone, &symbol, &api_key_clone).await;
-                                                    let _ = tx_clone.send(AppEvent::DetailsFetched(symbol.clone(), d_res));
-                                                });
-                                            }
-                                        }
-                                    }
-                                    KeyCode::Esc => {
-                                        app.input.clear();
-                                        app.input_mode = InputMode::Normal;
-                                        app.message = "Ready".to_string();
-                                        app.message_color = Color::Gray;
-                                    }
-                                    KeyCode::Char(c) => {
-                                        app.input.push(c);
-                                        //trigger search
-                                        let query = app.input.clone();
-                                        let client_clone = client.clone();
-                                        let tx_clone = tx.clone();
-                                        // Trigger Async Data Fetch
-                                        // We spawn this so the UI doesn't freeze while waiting for HTTP
-                                        tokio::spawn(async move {
-                                            if query.len() > 1 {
-                                                if let Ok(results) = crate::network::search_ticker(&client_clone, &query).await {
-                                                    let _ = tx_clone.send(AppEvent::SearchResultsFetched(results));
-                                                }
-                                            }
-                                        });
-                                    }
-                                    KeyCode::Backspace => { app.input.pop(); }
-                                    KeyCode::Down => app.next_search(),
-                                    KeyCode::Up => app.previous_search(),
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                AppEvent::SearchResultsFetched(results) => {
-                    app.message = format!("Fetched {} results", results.len());
-                    app.message_color = Color::Cyan;
-                    app.search_results = results;
-                    if !app.search_results.is_empty() {
-                        app.search_state.select(Some(0));
-                    } else {
-                        app.search_state.select(None);
-                    }
+                    AppEvent::HistoryFetched(_, Ok(h)) => app.stock_history = Some(h),
+                    AppEvent::DetailsFetched(_, Ok(d)) => app.details = Some(d),
+                    _ => {}
                 }
             }
+            if app.should_quit { break; }
         }
-        if app.should_quit {
-            terminal.backend_mut().execute(LeaveAlternateScreen)?;
-            disable_raw_mode()?;
-            //save new config
-            save_config(&app.to_config())?;
-            std::process::exit(0);
+        Ok::<(), anyhow::Error>(())
+    }.await;
+
+    // --- Cleanup Restoration ---
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    
+    // One last save on exit
+    let _ = crate::config::save_config(&app.to_config());
+    
+    result
+}
+async fn handle_keys(
+    app: &mut App, 
+    code: KeyCode, 
+    tx: &tokio::sync::mpsc::Sender<AppEvent>,
+    search_tx: &tokio::sync::mpsc::Sender<String>,
+    client: &reqwest::Client
+) {
+    match app.input_mode {
+        InputMode::Normal => match code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Char('a') => {
+                app.input_mode = InputMode::Editing;
+                app.input.clear();
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                app.delete();
+                let _ = tx.send(AppEvent::SaveConfig).await;
+            }
+            KeyCode::Enter => {
+                if let Some(sel) = app.state.selected() {
+                    let sym = app.stocks[sel].clone();
+                    app.trigger_fetch(sym, tx, client);
+                }
+            }
+            KeyCode::Up => app.previous(),
+            KeyCode::Down => app.next(),
+            _ => {}
+        },
+        InputMode::Editing => match code {
+            KeyCode::Esc => app.input_mode = InputMode::Normal,
+            KeyCode::Enter => {
+                app.handle_confirm_selection(tx, client);
+            }
+            KeyCode::Char(c) => {
+                app.input.push(c);
+                let _ = search_tx.send(app.input.clone()).await;
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+                let _ = search_tx.send(app.input.clone()).await;
+            }
+            KeyCode::Up => app.previous_search(),
+            KeyCode::Down => app.next_search(),
+            _ => {}
+        },
+        InputMode::KeyEntry => {
+            if code == KeyCode::Enter && !app.input.is_empty() {
+                app.api_key = Some(app.input.trim().to_string());
+                app.input_mode = InputMode::Normal;
+                let _ = tx.send(AppEvent::SaveConfig).await;
+            } else if let KeyCode::Char(c) = code {
+                app.input.push(c);
+            } else if code == KeyCode::Backspace {
+                app.input.pop();
+            }
         }
     }
 }
-
 /// TUI layout helper: Create a centered rectangle with given percentage width and height
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let percent_x = percent_x.clamp(0, 100);
+    let percent_y = percent_y.clamp(0, 100);
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -305,7 +213,6 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_y) / 2),
         ])
         .split(r);
-
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
