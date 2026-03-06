@@ -10,7 +10,7 @@
 use std::rc::Rc;
 use std::cell::RefCell;
 use gtk4::prelude::*;
-use gtk4::{gdk, Application, ApplicationWindow, Box, Orientation, Align, Scale};
+use gtk4::{Application, ApplicationWindow, Box, Orientation, Align};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use serde_json::Value;
 use chrono::{Datelike, Local};
@@ -30,7 +30,6 @@ pub fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(final_width)
-        .default_height(800)
         .title("My Sidebar")
         .build();
 
@@ -84,18 +83,10 @@ pub fn build_ui(app: &Application) {
             
             // 1. Startup Grace Period: 
             // Sway needs more time than Hyprland. Bump to 1500ms.
-            if launch_time.elapsed().as_millis() < 1500 { 
+            if launch_time.elapsed().as_millis() < 2000 { 
                 return; 
             }
 
-            // 2. "Never Active" Guard:
-            // If we NEVER got focus (e.g. spawned via keybind but mouse was elsewhere),
-            // don't close immediately. Wait for the user to click us.
-            if !*has_been_active_clone.borrow() {
-                // Optional: Force a close after a LONG timeout (e.g. 10s) if you want,
-                // but for now, let's just keep it open so you can click it.
-                return;
-            }
 
             // 3. Hover Guard:
             // If mouse is physically over the window, don't close.
@@ -371,7 +362,13 @@ pub fn build_ui(app: &Application) {
     main_box.append(&middle_box);
     main_box.append(&finance_box);
     main_box.append(&bottom_box);
-    window.set_child(Some(&main_box));
+
+    let scroll_wrapper = gtk4::ScrolledWindow::builder()
+        .child(&main_box)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vscrollbar_policy(gtk4::PolicyType::Automatic)
+        .build();
+    window.set_child(Some(&scroll_wrapper));
 
     // --- BUTTON EVENT HANDLERS ---
     //
@@ -396,20 +393,26 @@ pub fn build_ui(app: &Application) {
     });
     btn_lock.connect_clicked(move |_| { helpers::run_cmd(" pidof hyprlock || hyprlock &"); });
 
-    // Idle Inhibit Persistence
-    // Checks for a lockfile in /tmp to see if we should start "Active"
-    if std::path::Path::new("/tmp/sidebar_idle.lock").exists() {
+    // --- Idle Inhibit Persistence ---
+    // Query procps-ng for the state of our idle daemons. 
+    // A suspended process (SIGSTOP) will have a 'T' in its stat column.
+    let idle_check = helpers::get_stdout("ps -o stat= -C swayidle,hypridle");
+    
+    // If the process exists and is stopped, visually mark the button active on boot
+    if idle_check.contains('T') {
         btn_idle.add_css_class("active");
     }
+
+    // Toggle logic
     btn_idle.connect_clicked(move |btn| {
         if btn.has_css_class("active") {
+            // It's currently paused. Remove UI highlight and resume the daemon.
             btn.remove_css_class("active");
             helpers::run_cmd("pkill -CONT hypridle || pkill -CONT swayidle");
-            helpers::run_cmd("rm -f /tmp/sidebar_idle.lock");
         } else {
+            // It's running normally. Add UI highlight and pause the daemon.
             btn.add_css_class("active");
             helpers::run_cmd("pkill -STOP hypridle || pkill -STOP swayidle");
-            helpers::run_cmd("touch /tmp/sidebar_idle.lock");
         }
     });
 
@@ -541,7 +544,7 @@ pub fn build_ui(app: &Application) {
     let (status_tx, status_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let dns_o = std::process::Command::new("sh").arg("-c").arg("$HOME/.cargo/bin/cf-status").output().ok();
-        let air_o = std::process::Command::new("rfkill").arg("list").arg("all").output().ok();
+        let air_o = std::process::Command::new("rfkill").arg("list").arg("wlan").output().ok();
         let mute_o = std::process::Command::new("sh").arg("-c").arg("wpctl get-volume @DEFAULT_AUDIO_SINK@").output().ok();
         let bright_o = std::process::Command::new("brightnessctl").arg("i").arg("-m").output().ok();
         let _ = status_tx.send((dns_o, air_o, mute_o, bright_o));

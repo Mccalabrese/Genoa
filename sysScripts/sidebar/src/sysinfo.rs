@@ -6,7 +6,7 @@
 
 use gtk4::prelude::*;
 use gtk4::{Box, Label, Orientation, Align};
-use std::process::Command;
+use crate::helpers::get_stdout;
 
 /// Builds the System Info card widget.
 /// Returns a GTK Box containing labeled rows of system data.
@@ -86,21 +86,4 @@ pub fn build() -> Box {
     container
 }
 
-/// Executes a shell command and returns its trimmed stdout.
-/// Handles both simple commands (e.g., "hostname") and complex piped commands (e.g., "sh -c ...").
-/// Returns "N/A" on failure instead of panicking to keep the UI stable.
-fn get_stdout(cmd: &str) -> String {
-    let output = if cmd.contains('\'') {
-        // Handle complex piped commands by invoking the shell directly
-        Command::new("sh").arg("-c").arg(cmd).output()
-    } else {
-        // Handle simple commands directly (cleaner process tree)
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        Command::new(parts[0]).args(&parts[1..]).output()
-    };
 
-    match output {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        Err(_) => "N/A".to_string(),
-    }
-}

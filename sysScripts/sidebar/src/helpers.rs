@@ -211,3 +211,21 @@ pub fn run_cmd(cmd: &str) {
         .arg(cmd)
         .spawn();
 }
+/// Executes a shell command and returns its trimmed stdout.
+/// Handles both simple commands (e.g., "hostname") and complex piped commands (e.g., "sh -c ...").
+/// Returns "N/A" on failure instead of panicking to keep the UI stable.
+pub fn get_stdout(cmd: &str) -> String {
+    let output = if cmd.contains('\'') {
+        // Handle complex piped commands by invoking the shell directly
+        std::process::Command::new("sh").arg("-c").arg(cmd).output()
+    } else {
+        // Handle simple commands directly (cleaner process tree)
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        std::process::Command::new(parts[0]).args(&parts[1..]).output()
+    };
+
+    match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(_) => "N/A".to_string(),
+    }
+}
