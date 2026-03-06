@@ -53,7 +53,7 @@ const AMD_PACKAGES: &[&str] = &[
 // AUR
 const AUR_PACKAGES: &[&str] = &[
     "zoom", "slack-desktop", "ledger-live-bin", 
-    "visual-studio-code-bin", "pinta", "ttf-victor-mono", "ytmdesktop-bin", 
+    "visual-studio-code-bin", "pinta", "ttf-victor-mono", "pear-desktop-bin", 
     "librewolf-bin",
 ];
 // ---------- Main Execution ------_-------
