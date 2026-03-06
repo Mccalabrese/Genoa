@@ -49,7 +49,7 @@
 
 "custom/ytm": {
 	"format": " ",
-	"on-click": "pear-desktop",
+	"on-click": "youtube-music",
 	"tooltip": true,
 	"tooltip-format": "Youtube Music",
 },
