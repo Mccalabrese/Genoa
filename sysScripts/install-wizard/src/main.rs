@@ -139,7 +139,7 @@ fn main() {
     
     // 1. Sync Standard & AUR Packages
     println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
-    let common_pkgs = load_packages_from_file("pkglist.txt");
+    let mut common_pkgs = load_packages_from_file("pkglist.txt");
 
     let ignored_pkgs = get_ignored_packages();
     common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
