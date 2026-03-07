@@ -59,14 +59,22 @@ const AUR_PACKAGES: &[&str] = &[
 // ---------- Main Execution ------_-------
 
 // ---------- Main Execution -----------------
+// ---------- Main Execution -----------------
 fn main() {
+    // 🚨 PREVENT FATAL ROOT EXECUTION 🚨
+    // If run with sudo, home_dir() points to /root, which breaks dotfiles and cargo paths.
+    if std::env::var("USER").unwrap_or_default() == "root" || std::env::var("SUDO_USER").is_ok() {
+        eprintln!("{}", "❌ CRITICAL ERROR: Do not run this script as root or with sudo!".red().bold());
+        eprintln!("Please run it as your standard Wayland user.");
+        eprintln!("The script is designed to safely elevate privileges internally when needed.");
+        std::process::exit(1);
+    }
     // 0. Parse Arguments
     let args: Vec<String> = std::env::args().collect();
     let refresh_mode = args.contains(&"--refresh-configs".to_string());
 
     if refresh_mode {
         println!("{}", "🔄 Running in CONFIG REFRESH MODE".magenta().bold());
-        // Quick sudo check
         let status = Command::new("sudo").arg("-v").status().unwrap();
         if !status.success() { eprintln!("{}", "❌ Sudo required.".red()); std::process::exit(1); }
     } else {
@@ -78,22 +86,17 @@ fn main() {
         let status = Command::new("sudo").arg("-v").status().expect("Failed to sudo");
         if !status.success() { std::process::exit(1); }
 
-        // 1. Conflict Resolution (Restored)
         println!("\n{}", "⚔️  Resolving Audio Conflicts (Removing jack2)...".yellow());
         let _ = Command::new("sudo").args(["pacman", "-Rdd", "--noconfirm", "jack2"])
             .stdout(Stdio::null()).stderr(Stdio::null()).status();
 
-        // 2. Install Common Packages (Restored Package Loading)
-        println!("\n{}", "📦 Installing Packages...".blue().bold());
-        let mut common_pkgs = load_packages_from_file("pkglist.txt");
-        
-        // 3. GPU Drivers (Restored Checkpoint & Exit Logic)
+        // GPU Drivers Checkpoint & Exit Logic
         let state_file = dirs::home_dir().unwrap().join(".cache/rust_installer_drivers_done");
 
         if state_file.exists() {
             println!("\n{}", "✅ Drivers already installed (Checkpoint found). Skipping to prevent crash.".green());
         } else {
-            println!("\n{}", "🔍 Detecting GPU Hardware...".blue().bold());
+            println!("\n{}", "🔍 Detecting GPU Hardware & Installing Base Drivers...".blue().bold());
             let gpu = detect_gpu();
             match gpu {
                 GpuVendor::Nvidia => {
@@ -109,47 +112,38 @@ fn main() {
                 GpuVendor::Unknown => println!("   ⚠️  No dedicated GPU detected."),
             }
 
-            // CHECKPOINT & EXIT (Restored)
             let is_gui = std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("DISPLAY").is_ok();
             
             if is_gui {
                 println!("\n{}", "⚠️  GRAPHICS DRIVERS INSTALLED".yellow().bold());
                 println!("We must reboot to load the new kernel modules safely.");
                 
-                // Create checkpoint
                 if let Ok(mut file) = fs::File::create(&state_file) {
                     writeln!(file, "Drivers installed successfully.").unwrap();
                 }
                 
                 println!("{}", "✅ Checkpoint saved. Please REBOOT and RUN THIS SCRIPT AGAIN.".green().bold());
-                
-                let should_reboot = inquire::Confirm::new("Reboot now?")
-                    .with_default(true)
-                    .prompt()
-                    .unwrap_or(true);
-
-                if should_reboot {
-                    let _ = Command::new("sudo").arg("reboot").status();
-                }
-                
-                // STOP HERE to prevent crash
+                let should_reboot = inquire::Confirm::new("Reboot now?").with_default(true).prompt().unwrap_or(true);
+                if should_reboot { let _ = Command::new("sudo").arg("reboot").status(); }
                 std::process::exit(0); 
             }
         }
-
-        // 5. Rust Setup (Restored)
-        println!("\n{}", "🦀 Setting up Rust & Building Tools...".blue().bold());
+        
+        println!("\n{}", "🦀 Setting up Rust (rustup)...".blue().bold());
         let _ = Command::new("rustup").args(["default", "stable"]).status();
     }
 
     // ==========================================
     //  SHARED LOGIC (Runs on Install AND Refresh)
     // ==========================================
-
-
+    
     // 1. Sync Standard & AUR Packages
     println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
     let common_pkgs = load_packages_from_file("pkglist.txt");
+
+    let ignored_pkgs = get_ignored_packages();
+    common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
+
     if common_pkgs.is_empty() {
          println!("   ⚠️  No packages found in pkglist.txt.");
     } else {
@@ -164,33 +158,33 @@ fn main() {
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
     println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
+    // GUARANTEE Rust toolchain is loaded and set to stable (fixes GUI launcher bug)
+    let _ = Command::new("rustup")
+        .args(["default", "stable"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     build_custom_apps();
-    println!("\n{}", "⚙️  Applying System Configurations...".blue().bold());
 
-    // 1. Clean Up Sessions (Remove Gnome/UWSM junk)
+    println!("\n{}", "⚙️  Applying System Configurations...".blue().bold());
     optimize_pacman_config(); 
 
-    // 2. Refresh GPU Configs (SAFETY CHECKED)
-    // Only touch hardware configs if we actually have the hardware.
-    // This is vital for the Updater.
+    // 3. Hardware Enforcement
     let current_gpu = detect_gpu();
     let is_nvidia = current_gpu == GpuVendor::Nvidia;
+    
     if is_nvidia {
         if is_turing_gpu() {
-            enforce_turing_kernel();
-        }        
-        // regenerate modprobe rules & sway-hybrid script based on current PCI ID
+            enforce_turing_kernel(); // Nuke mainline, install LTS
+        }
         apply_nvidia_configs(); 
     }
 
-    // 3. Session Ordering (Renames Niri -> 1. Niri, Fixes Sway Exec)
     enforce_session_order(is_nvidia);
 
     // 4. Finalize
     if !refresh_mode {
         // --- FRESH INSTALL ONLY ---
-        // We DO NOT run these on update to avoid overwriting user customizations
-        
         println!("\n{}", "🔗 Linking Config Files...".blue().bold());
         link_dotfiles_and_copy_resources();
 
@@ -198,48 +192,37 @@ fn main() {
         setup_librewolf();
         setup_waybar_configs();
         setup_secrets_and_geoclue();
-        finalize_setup(); // Neovim/Tmux plugins
+        finalize_setup(); 
         
         print_logo();
         println!("\n{}", "✅ Installation Complete! Please Reboot.".green().bold());
     } else {
         // --- UPDATE MODE ---
         print_logo();
-        println!("\n{}", "✅ Configs Refreshed Successfully.".green().bold());
+        println!("\n{}", "✅ System Synced & Configs Refreshed Successfully.".green().bold());
     }
 }
-
 // --- Helper functions ---
 
 /// Reads a package list from a text file (one package per line).
 /// Ignores empty lines and comments starting with '#'.
 fn load_packages_from_file(filename: &str) -> Vec<String> {
-    // We assume the file is in the repo root (parent of sysScripts)
-    // When running "cargo run", current_dir is usually sysScripts/install-wizard
-    let current_dir = std::env::current_dir().unwrap();
-    
-    // Walk up: install-wizard -> sysScripts -> repo_root
-    let candidates = vec![
-        current_dir.join(filename),                  // Same dir
-        current_dir.join(format!("../../{}", filename)), // Two dirs up (from sysScripts/install)
-        dirs::home_dir().unwrap().join("rust-wayland-power").join(filename) // Hard fallback
-    ];
+    let repo_root = get_repo_root();
+    let path = repo_root.join(filename);
 
-    for path in candidates {
-        if path.exists() {
-            let content = fs::read_to_string(&path).unwrap_or_default();
-            return content
-                .lines()
-                .map(|line| line.trim())
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .map(|line| line.to_string())
-                .collect();
-        }
+    if path.exists() {
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        return content
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| line.to_string())
+            .collect();
     }
-    eprintln!("⚠️ Could not find package list: {}", filename);
+    
+    eprintln!("⚠️ Could not find package list at: {}", path.display());
     vec![]
 }
-
 /// Parses `lspci` output to identify GPU vendor IDs.
 /// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
 fn detect_gpu() -> GpuVendor {
@@ -1001,18 +984,46 @@ file = "~/.config/nvim/keybinds_nvim.txt"
     fs::write(&config_path, config_content).expect("Failed to write config.toml");
     println!("   ✅ Config generated at {:?}", config_path);
 }
-///Build out custom rust apps from sysScripts directory.
+/// Builds custom Rust apps using native caching. 
+/// If source files haven't changed, this takes milliseconds.
 fn build_custom_apps() {
-    let current_dir = std::env::current_dir().unwrap();
-    let sys_scripts_dir = current_dir.parent().unwrap();
+    let repo_root = get_repo_root();
+    let sys_scripts_dir = repo_root.join("sysScripts");
+    
+    // Ensure ~/.cargo/bin exists
+    let cargo_bin_dir = dirs::home_dir().unwrap().join(".cargo/bin");
+    let _ = fs::create_dir_all(&cargo_bin_dir);
 
     for app in RUST_APPS {
         let app_path = sys_scripts_dir.join(app);
         if app_path.exists() {
-            println!("   🔨 Building {}...", app);
-            let status = Command::new("cargo").arg("install").arg("--path").arg(".").current_dir(&app_path).stdout(Stdio::null()).status();
+            // Use standard build to leverage local target/ cache!
+            let status = Command::new("cargo")
+                .args(["build", "--release"])
+                .current_dir(&app_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+
             match status {
-                Ok(s) if s.success() => println!("     ✅ {}", app),
+                Ok(s) if s.success() => {
+                    let compiled_bin = app_path.join("target/release").join(app);
+                    let target_bin = cargo_bin_dir.join(app);
+                    
+                    if compiled_bin.exists() {
+                        // CRITICAL: Delete the old binary first to prevent "Text file busy" 
+                        // errors if the app (like your sidebar) is currently running in the background.
+                        if target_bin.exists() {
+                            let _ = fs::remove_file(&target_bin);
+                        }
+                        
+                        // Copy the cached or newly compiled binary into your PATH
+                        match fs::copy(&compiled_bin, &target_bin) {
+                            Ok(_) => println!("     ✅ {}", app),
+                            Err(e) => println!("     ❌ Failed to copy {}: {}", app, e),
+                        }
+                    }
+                },
                 _ => println!("     ❌ Failed to build {}", app),
             }
         } else {
@@ -1020,7 +1031,6 @@ fn build_custom_apps() {
         }
     }
 }
-
 /// Renames session files to enforce a specific order in Greetd/Tuigreet.
 /// Strategy: Move standard files (e.g. hyprland.desktop) to custom numbered files (30-hyprland.desktop).
 /// This prevents Pacman from deleting our custom config during updates while NoExtract is active.
@@ -1089,9 +1099,7 @@ fn link_dotfiles_and_copy_resources() {
         eprintln!("⚠️ Could not determine home directory. Using /tmp as fallback.");
         PathBuf::from("/tmp")
     });
-    let current_dir = std::env::current_dir().unwrap();
-    // Assuming binary is in sysScripts/install-wizard, repo root is 2 levels up
-    let repo_root = current_dir.parent().unwrap().parent().unwrap();
+    let repo_root = get_repo_root();
 
     let links = vec![
         (".tmux.conf", ".tmux.conf"), (".profile", ".profile"), (".zshrc", ".zshrc"),
@@ -1234,6 +1242,36 @@ fn enforce_turing_kernel() {
             .args(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
             .status();
     }
+}
+/// Reliably finds the root of the dotfiles repository regardless of where the binary is executed.
+fn get_repo_root() -> PathBuf {
+    // This macro captures the absolute path of the 'install-wizard' folder AT COMPILE TIME.
+    // e.g., "/home/michael/path/to/rust-wayland-power/sysScripts/install-wizard"
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    
+    // Navigate up two levels: install-wizard -> sysScripts -> repo_root
+    Path::new(manifest_dir)
+        .parent().expect("Could not find sysScripts parent")
+        .parent().expect("Could not find repo root parent")
+        .to_path_buf()
+}
+/// Reads /etc/pacman.conf and extracts any packages listed in IgnorePkg.
+fn get_ignored_packages() -> Vec<String> {
+    let mut ignored = Vec::new();
+    if let Ok(content) = fs::read_to_string("/etc/pacman.conf") {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("IgnorePkg") {
+                // Splits "IgnorePkg = pkg1 pkg2" and grabs the right side
+                if let Some(pkgs) = trimmed.split('=').nth(1) {
+                    for pkg in pkgs.split_whitespace() {
+                        ignored.push(pkg.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ignored
 }
 fn print_logo() {
 println!(r#"

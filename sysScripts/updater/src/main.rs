@@ -134,7 +134,7 @@ fn main() -> Result<()> {
 {}
 EOF
         echo -e "\n🚀 Starting System Update..."
-        
+
         # --- 1. SYSTEM UPDATE ---
         {}
         sys_exit=$?
@@ -157,36 +157,7 @@ EOF
             echo -e "\n⚠ System update failed, skipping firmware/scripts."
         fi
 
-        # --- 3. REFRESH CONFIGS & PACKAGES ---
-        if [ $sys_exit -eq 0 ]; then
-            echo -e "\n\n🔄 Refreshing Session Configs..."
-            
-            # A. Run Installer in "Refresh Mode"
-            # This handles: 
-            #   1. Deleting unwanted Gnome/UWSM sessions
-            #   2. Renaming Niri/Hyprland sessions
-            #   3. Regenerating Sway-Hybrid wrapper (if Nvidia detected)
-            INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
-            
-            if [ -f "$INSTALLER_BIN" ]; then
-                 sudo "$INSTALLER_BIN" --refresh-configs
-            else
-                 echo "⚠️ Installer binary not found. Skipping config refresh."
-                 echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
-            fi
-
-            # B. Install New Packages from Repo Root
-            PKG_FILE="$HOME/rust-wayland-power/pkglist.txt"
-            if [ -f "$PKG_FILE" ]; then
-                echo -e "\n📦 Checking for new packages in pkglist.txt..."
-                # Bash trick: grep removes comments, pacman installs differences
-                grep -v "^#" "$PKG_FILE" | sudo pacman -S --needed --noconfirm -
-            else
-                echo "⚠️ pkglist.txt not found at $PKG_FILE"
-            fi
-        fi
-
-        # --- 4. RUST TOOLS SELF-UPDATE ---
+        # --- 3. SURGICAL REPO SYNC ---
         if [ $sys_exit -eq 0 ]; then
             echo -e "\n\n🦀 Checking for Rust Script Updates..."
             if [ -d "$HOME/rust-wayland-power/.git" ]; then
@@ -195,44 +166,34 @@ EOF
                 echo "Fetching remote..."
                 git fetch origin main
 
-                # 1. SURGICAL CHECK
-                # We check if the local 'sysScripts' folder matches the remote 'sysScripts' folder EXACTLY.
-                # We DO NOT check commit history (HEAD), because we aren't pulling the whole repo.
-                # If they differ, we force update ONLY sysScripts.
-                
+                # We check if the local 'sysScripts' or 'pkglist.txt' differ from remote.
                 SCRIPTS_DIFF=0
-                if ! git diff --quiet origin/main -- sysScripts; then
-                    SCRIPTS_DIFF=1
-                fi
-                
-                # Check pkglist.txt too
-                if ! git diff --quiet origin/main -- pkglist.txt; then
-                    SCRIPTS_DIFF=1
-                fi
+                if ! git diff --quiet origin/main -- sysScripts; then SCRIPTS_DIFF=1; fi
+                if ! git diff --quiet origin/main -- pkglist.txt; then SCRIPTS_DIFF=1; fi
 
                 if [ $SCRIPTS_DIFF -eq 1 ]; then
                     echo -e "\n✨ Updates detected in Tools or Package List!"
-
-                    # 2. SURGICAL UPDATE
-                    # We use 'checkout' to force the local files to match remote.
-                    # We DO NOT run 'git pull', so user configs in .config/ remain untouched.
-                    
                     echo "🧹 Force-syncing sysScripts & pkglist.txt..."
                     git checkout origin/main -- sysScripts pkglist.txt
-
-                    echo "🔨 Recompiling Toolchain..."
-                    cd sysScripts
-                    for dir in */; do
-                        if [ -f "$dir/Cargo.toml" ]; then
-                            echo "   >> Compiling $dir..."
-                            # --locked ensures we use the exact dependencies from the lockfile
-                            (cd "$dir" && cargo install --path . --force --quiet --locked)
-                        fi
-                    done
-                    echo -e "✅ Custom tools updated."
+                    echo -e "✅ Files synced. Wizard will compile changes."
                 else
-                     echo "✔ Rust tools are up to date."
+                     echo "✔ Rust tools and packages are up to date."
                 fi
+            fi
+        fi
+
+        # --- 4. REFRESH CONFIGS & PACKAGES ---
+        if [ $sys_exit -eq 0 ]; then
+            echo -e "\n\n🔄 Applying Machine State..."
+
+            INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
+
+            if [ -f "$INSTALLER_BIN" ]; then
+                 # NOTE: Dropped 'sudo' here. Wizard elevates internally!
+                 "$INSTALLER_BIN" --refresh-configs
+            else
+                 echo "⚠️ Installer binary not found. Skipping config refresh."
+                 echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
             fi
         fi
 
@@ -243,7 +204,7 @@ EOF
         "#,
         LOGO,
         update_cmd_str
-    );
+    );  
 
     // Interactive Execution
     let status = Command::new(terminal_cmd)
