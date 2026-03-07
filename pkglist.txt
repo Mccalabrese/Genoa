@@ -12,7 +12,6 @@ man-db
 man-pages
 unzip
 tree
-linux-headers
 pciutils
 pacman-contrib
 bolt

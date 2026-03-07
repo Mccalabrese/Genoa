@@ -48,6 +48,22 @@ pub fn ui(f: &mut Frame, app: &mut App) {
 
     f.render_widget(events_list, chunks[1]);
 
+    // 4. Render Popup (If Editing)
+    if let InputMode::Editing = app.input_mode {
+        // Create a clear block to cover the background
+        let area = centered_rect(60, 20, f.size());
+        
+        // We use Clear to wipe out the calendar lines underneath the popup
+        f.render_widget(ratatui::widgets::Clear, area); 
+
+        let input_block = Paragraph::new(app.input_buffer.as_str())
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .title(" New Appointment (Press Enter to Save) "));
+        
+        f.render_widget(input_block, area);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

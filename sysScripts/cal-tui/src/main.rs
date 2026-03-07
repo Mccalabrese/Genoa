@@ -10,7 +10,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use app::App;
+use app::{App, InputMode};
 use chrono::Duration; // For moving days
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

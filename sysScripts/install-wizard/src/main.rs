@@ -85,14 +85,8 @@ fn main() {
 
         // 2. Install Common Packages (Restored Package Loading)
         println!("\n{}", "📦 Installing Packages...".blue().bold());
-        let common_pkgs = load_packages_from_file("pkglist.txt");
-        if common_pkgs.is_empty() {
-             println!("   ⚠️  No packages found in pkglist.txt.");
-        } else {
-             let pkg_refs: Vec<&str> = common_pkgs.iter().map(|s| s.as_str()).collect();
-             install_pacman_packages(&pkg_refs);
-        }
-
+        let mut common_pkgs = load_packages_from_file("pkglist.txt");
+        
         // 3. GPU Drivers (Restored Checkpoint & Exit Logic)
         let state_file = dirs::home_dir().unwrap().join(".cache/rust_installer_drivers_done");
 
@@ -143,21 +137,34 @@ fn main() {
             }
         }
 
-        // 4. AUR (Restored)
-        if !AUR_PACKAGES.is_empty() {
-            println!("\n{}", "📦 Setting up AUR...".blue().bold());
-            install_aur_packages();
-        }
-        
         // 5. Rust Setup (Restored)
         println!("\n{}", "🦀 Setting up Rust & Building Tools...".blue().bold());
         let _ = Command::new("rustup").args(["default", "stable"]).status();
-        build_custom_apps();
     }
 
     // ==========================================
     //  SHARED LOGIC (Runs on Install AND Refresh)
     // ==========================================
+
+
+    // 1. Sync Standard & AUR Packages
+    println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
+    let common_pkgs = load_packages_from_file("pkglist.txt");
+    if common_pkgs.is_empty() {
+         println!("   ⚠️  No packages found in pkglist.txt.");
+    } else {
+         let pkg_refs: Vec<&str> = common_pkgs.iter().map(|s| s.as_str()).collect();
+         install_pacman_packages(&pkg_refs);
+    }
+
+    if !AUR_PACKAGES.is_empty() {
+        println!("\n{}", "📦 Syncing AUR Packages...".blue().bold());
+        install_aur_packages();
+    }
+
+    // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
+    println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
+    build_custom_apps();
     println!("\n{}", "⚙️  Applying System Configurations...".blue().bold());
 
     // 1. Clean Up Sessions (Remove Gnome/UWSM junk)
@@ -169,6 +176,9 @@ fn main() {
     let current_gpu = detect_gpu();
     let is_nvidia = current_gpu == GpuVendor::Nvidia;
     if is_nvidia {
+        if is_turing_gpu() {
+            enforce_turing_kernel();
+        }        
         // regenerate modprobe rules & sway-hybrid script based on current PCI ID
         apply_nvidia_configs(); 
     }
@@ -340,7 +350,7 @@ fn install_nvidia_legacy_580() {
     // 2. Pin the version in pacman.conf
     println!("   🔒 Pinning NVIDIA drivers in /etc/pacman.conf...");
     let pacman_conf = "/etc/pacman.conf";
-    let ignore_line = "IgnorePkg = nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings";
+    let ignore_line = "IgnorePkg = nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings linux linux-headers linux-lts linux-lts-headers";
     
     // Check if IgnorePkg is already active
     let content = fs::read_to_string(pacman_conf).unwrap_or_default();
@@ -1195,7 +1205,36 @@ fn finalize_setup() {
         }
     }
 }
+/// Specifically enforces the LTS kernel for Turing GPUs to protect the 580 driver.
+/// It will install linux-lts and actively remove the mainline linux kernel.
+fn enforce_turing_kernel() {
+    println!("   🛡️  Turing GPU: Verifying LTS Kernel environment...");
+    
+    // 1. Ensure LTS is installed
+    let _ = Command::new("sudo")
+        .args(["pacman", "-S", "--needed", "--noconfirm", "linux-lts", "linux-lts-headers"])
+        .status();
 
+    // 2. Check if mainline is installed
+    let check_mainline = Command::new("pacman")
+        .args(["-Q", "linux"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if check_mainline.is_ok() && check_mainline.unwrap().success() {
+        println!("   🗑️  Turing GPU: Nuking mainline kernel to protect sleep states...");
+        // Remove mainline and skip dependency checks
+        let _ = Command::new("sudo")
+            .args(["pacman", "-Rdd", "--noconfirm", "linux", "linux-headers"])
+            .status();
+        
+        println!("   🏗️  Rebuilding GRUB for LTS Kernel...");
+        let _ = Command::new("sudo")
+            .args(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
+            .status();
+    }
+}
 fn print_logo() {
 println!(r#"
                                                                                                     
