@@ -552,6 +552,10 @@ fn configure_system() {
     run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"]);
     run_cmd("sudo", &["systemctl", "enable", "bolt.service"]);
 
+    // Prevent Pacman from eating the entire hard drive over time
+    println!("   🧹 Enabling automated Pacman cache cleanup...");
+    run_cmd("sudo", &["systemctl", "enable", "--now", "paccache.timer"]);
+
     // --- CLOUDFLARED CONFIGURATION ---
     println!("   🔧 Configuring dnscrypt-proxy (DNS Proxy)...");
     
