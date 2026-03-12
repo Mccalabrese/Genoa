@@ -54,15 +54,70 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             app.quit();
                             return Ok(());
                         }
-                        KeyCode::Right => app.current_date = app.current_date + Duration::days(1),
-                        KeyCode::Left => app.current_date = app.current_date - Duration::days(1),
-                        // NEW: Press 'a' to add
+                        KeyCode::Right => {
+                            app.current_date = app.current_date + Duration::days(1);
+                            app.list_state.select(None); // Clear selection on day change
+                        }
+                        KeyCode::Left => {
+                            app.current_date = app.current_date - Duration::days(1);
+                            app.list_state.select(None); // Clear selection on day change
+                        }
                         KeyCode::Char('a') => {
                             app.input_mode = InputMode::Editing;
-                            app.input_buffer.clear(); // Ready for new text
+                            app.input_buffer.clear();
+                        }
+                    
+                        // NEW: Scroll Down
+                        KeyCode::Down => {
+                            let events = app.engine.get_appointments_on_day(app.current_date);
+                            if !events.is_empty() {
+                                let i = match app.list_state.selected() {
+                                    Some(i) => if i >= events.len() - 1 { 0 } else { i + 1 }, // Loop to top
+                                    None => 0, // Start at index 0
+                                };
+                                app.list_state.select(Some(i));
+                            }
+                        }
+                    
+                        // NEW: Scroll Up
+                        KeyCode::Up => {
+                            let events = app.engine.get_appointments_on_day(app.current_date);
+                            if !events.is_empty() {
+                                let i = match app.list_state.selected() {
+                                    Some(i) => if i == 0 { events.len() - 1 } else { i - 1 }, // Loop to bottom
+                                    None => 0,
+                                };
+                                app.list_state.select(Some(i));
+                            }
+                        }
+                    
+                        // NEW: Delete
+                        KeyCode::Char('d') => {
+                            if let Some(selected_idx) = app.list_state.selected() {
+                                let events = app.engine.get_appointments_on_day(app.current_date);
+                                let num_events = events.len();
+                            
+                                // Safety check to ensure we don't crash
+                                if selected_idx < num_events {
+                                    let id_to_remove = events[selected_idx].id; // Grab the ID of the selected event
+                                    drop(events);
+                                    app.engine.remove_appointment(id_to_remove); // Delete it from memory
+                                    app.save(); // Save to disk immediately
+                                
+                                    // Adjust the cursor so it doesn't fall off the screen
+                                    if selected_idx > 0 {
+                                        app.list_state.select(Some(selected_idx - 1));
+                                    } else if num_events > 1 {
+                                        app.list_state.select(Some(0));
+                                    } else {
+                                        app.list_state.select(None); // List is now empty
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     },
+
                     InputMode::Editing => match key.code {
                         // Switch Fields
                         KeyCode::Tab => {

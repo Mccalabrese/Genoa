@@ -43,9 +43,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     };
 
     let events_list = List::new(items)
-        .block(Block::default().title(" Agenda ").borders(Borders::ALL));
+        .block(Block::default().title(" Agenda ").borders(Borders::ALL))
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol(">> ");
 
-    f.render_widget(events_list, chunks[1]);
+    f.render_stateful_widget(events_list, chunks[1], &mut app.list_state);
 
     // 4. Render Popup (If Editing)
     if app.input_mode == InputMode::Editing {

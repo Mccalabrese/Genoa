@@ -32,6 +32,11 @@ impl CalendarEngine {
         id
     }
 
+    pub fn remove_appointment(&mut self, id: u32) -> bool {
+        // Removes the item and returns true if it existed
+        self.appointments.remove(&id).is_some() 
+    }
+
     pub fn get_appointments_on_day(&self, date: NaiveDate) -> Vec<&Appointment> {
         let mut matches = Vec::new();
         for appointment in self.appointments.values() {

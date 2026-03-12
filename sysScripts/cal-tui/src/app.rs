@@ -3,6 +3,7 @@ use crate::engine::CalendarEngine;
 use std::path::PathBuf;
 use std::fs;
 use directories::ProjectDirs;
+use ratatui::widgets::ListState;
 
 #[derive(PartialEq)]
 pub enum InputMode {
@@ -27,6 +28,8 @@ pub struct App {
     pub current_date: NaiveDate, // The day selected in the UI
     pub should_quit: bool,
 
+    pub list_state: ListState,
+
     pub input_mode: InputMode,
     pub active_field: EditField,
     pub active_rec_field: RecField,
@@ -42,7 +45,7 @@ pub struct App {
 }
 
 impl App {
-    // NEW HELPER: Get the safe data path (~/.local/share/cal-tui/calendar_data.json)
+    // Get the safe data path (~/.local/share/cal-tui/calendar_data.json)
     fn get_data_path() -> String {
         if let Some(proj_dirs) = ProjectDirs::from("", "", "cal-tui") {
             let dir = proj_dirs.data_dir();
@@ -64,6 +67,7 @@ impl App {
             engine,
             current_date: Utc::now().date_naive(),
             should_quit: false,
+            list_state: ListState::default(),
             input_mode: InputMode::Normal,
             active_field: EditField::Summary,
             active_rec_field: RecField::Mon, // Start on Monday
