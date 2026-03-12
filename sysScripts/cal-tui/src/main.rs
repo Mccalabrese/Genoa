@@ -54,6 +54,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             app.quit();
                             return Ok(());
                         }
+                        KeyCode::Char('v') => {
+                            app.view_mode = if app.view_mode == ViewMode::Day {
+                                ViewMode::Week
+                            } else {
+                                ViewMode::Day
+                            };
+                            app.list_state.select(None); // Reset cursor on view change
+                        }
                         KeyCode::Right => {
                             app.current_date = app.current_date + Duration::days(1);
                             app.list_state.select(None); // Clear selection on day change

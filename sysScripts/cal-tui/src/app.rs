@@ -21,6 +21,12 @@ pub enum EditField {
 }
 
 #[derive(PartialEq)]
+pub enum ViewMode {
+    Day,
+    Week,
+}
+
+#[derive(PartialEq)]
 pub enum RecField { Mon, Tue, Wed, Thu, Fri, Sat, Sun, EndToggle, EndWeeks }
 
 pub struct App {
@@ -29,6 +35,7 @@ pub struct App {
     pub should_quit: bool,
 
     pub list_state: ListState,
+    pub view_mode: ViewMode,
 
     pub input_mode: InputMode,
     pub active_field: EditField,
@@ -67,6 +74,7 @@ impl App {
             engine,
             current_date: Utc::now().date_naive(),
             should_quit: false,
+            view_mode: ViewMode::Day,
             list_state: ListState::default(),
             input_mode: InputMode::Normal,
             active_field: EditField::Summary,
