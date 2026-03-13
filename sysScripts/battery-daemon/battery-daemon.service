@@ -1,0 +1,15 @@
+[Unit]
+Description=Battery Monitor and Auto-Shutdown Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+
+ExecStart=%h/.cargo/bin/battery-daemon
+Restart=on-failure
+RestartSec=10
+
+PassEnvironment=DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+
+[Install]
+WantedBy=default.target
