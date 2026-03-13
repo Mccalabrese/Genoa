@@ -37,7 +37,7 @@ const RUST_APPS: &[&str] = &[
     "waybar-switcher", "waybar-weather", "sway-workspace", "update-check",
     "cloudflare-toggle", "wallpaper-manager", "kb-launcher", "updater",
     "sidebar", "rfkill-manager", "clip-manager", "emoji-picker",
-    "radio-menu", "waybar-finance", "cal-tui",
+    "radio-menu", "waybar-finance", "cal-tui", "battery-daemon",
 ];
 
 // Hardware Specific: NVIDIA
@@ -192,8 +192,8 @@ fn main() {
         setup_librewolf();
         setup_waybar_configs();
         setup_secrets_and_geoclue();
-        finalize_setup(); 
-        
+        finalize_setup(); // Neovim/Tmux plugins
+        setup_battery_daemon();
         print_logo();
         println!("\n{}", "✅ Installation Complete! Please Reboot.".green().bold());
     } else {
@@ -1276,6 +1276,37 @@ fn get_ignored_packages() -> Vec<String> {
         }
     }
     ignored
+}
+// Installs the battery life warning and exectes systemctl poweroff to protect battery
+fn setup_battery_daemon() {
+    println!("   🔋 Configuring Battery Safety Daemon...");
+    
+    let home = std::env::var("HOME").expect("HOME environment variable not set");
+    let systemd_user_dir = std::path::Path::new(&home).join(".config/systemd/user");
+
+    // Make sure the ~/.config/systemd/user/ folder actually exists
+    let _ = std::fs::create_dir_all(&systemd_user_dir);
+
+    // Grab the .service file from the repo and put it in the systemd folder
+    let current_dir = std::env::current_dir().expect("Could not get current dir");
+    let service_src = current_dir.join("../battery-daemon/battery-daemon.service");
+    let service_dest = systemd_user_dir.join("battery-daemon.service");
+
+    if let Err(e) = std::fs::copy(&service_src, &service_dest) {
+        eprintln!("   ⚠️ Failed to copy battery-daemon.service: {}", e);
+    } else {
+        // Reload systemd so it sees the new file
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        
+        // Enable it for future boots AND start it right now
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "battery-daemon.service"])
+            .status();
+            
+        println!("   ✅ Battery Daemon activated.");
+    }
 }
 fn print_logo() {
 println!(r#"
