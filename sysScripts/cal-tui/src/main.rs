@@ -25,6 +25,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Initialize App
     let mut app = App::new();
 
+    // --- CLI ARGUMENT PARSER ---
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    let mut target_id: Option<u32> = None;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--date" => {
+                if i + 1 < args.len() {
+                    // Split "2026-3-12" into parts
+                    let parts: Vec<&str> = args[i + 1].split('-').collect();
+                    if parts.len() == 3 {
+                        if let (Ok(y), Ok(m), Ok(d)) = (parts[0].parse::<i32>(), parts[1].parse::<u32>(), parts[2].parse::<u32>()) {
+                            if let Some(date) = chrono::NaiveDate::from_ymd_opt(y, m, d) {
+                                app.current_date = date; // Instantly jump to this day!
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            "--select-id" => {
+                if i + 1 < args.len() {
+                    if let Ok(id) = args[i + 1].parse::<u32>() {
+                        target_id = Some(id);
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // If they passed an ID, we need to find its row index in today's agenda
+    if let Some(id) = target_id {
+        let events = app.engine.get_appointments_on_day(app.current_date);
+        // Find the position of the event with this ID
+        if let Some(index) = events.iter().position(|e| e.id == id) {
+            app.list_state.select(Some(index)); // Highlight it!
+        }
+    }
+    // ---------------------------------
+
     // 3. Run Event Loop
     let res = run_app(&mut terminal, &mut app);
 
