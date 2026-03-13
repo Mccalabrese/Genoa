@@ -15,8 +15,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3), // Header height
             Constraint::Min(0),    // Remaining space
-        ])
-        .split(f.size());
+            Constraint::Length(1), // Keyhint line
+         ])
+        .split(f.area());
 
     // 2. Render Header
     let title = format!(" 📅 Calendar TUI - {} ", app.current_date);
@@ -255,6 +256,20 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(weeks_block, popup_chunks[2]);
         }
     }
+    // 6. Render the Footer Keyhints
+    // Match the text to whatever the user is currently doing
+    let hint_text = match app.input_mode {
+        InputMode::Normal => " [q]uit | [a]dd | [d]elete | [v]iew day/week | [←/→] change day | [↑/↓] select ",
+        InputMode::Editing => " [Tab] next field | [Space] toggle | [↑/↓] adjust time | [Enter] save/next | [Esc] cancel ",
+        InputMode::EditingRecurrence => " [Tab] move | [Space] check | [↑/↓] weeks | [Enter] save | [Esc] cancel ",
+    };
+
+    // A clean, reversed-color look is standard for TUI status bars
+    let footer = Paragraph::new(hint_text)
+        .style(Style::default().fg(Color::Black).bg(Color::Cyan)); 
+
+    // Render it into that 3rd chunk we created at the top
+    f.render_widget(footer, chunks[2]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
