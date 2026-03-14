@@ -185,6 +185,14 @@ EOF
         # --- 4. REFRESH CONFIGS & PACKAGES ---
         if [ $sys_exit -eq 0 ]; then
             echo -e "\n\n🔄 Applying Machine State..."
+            echo "   🏗️ Checking installer for updates..."
+            cd "$HOME/rust-wayland-power/sysScripts/install-wizard"
+            cargo build --release -q
+
+            if [ target/release/install-wizard -nt "$HOME/.cargo/bin/install-wizard" ]; then
+                echo "  🌠 Updating installer binary..."
+                cp target/release/install-wizard "$HOME/.cargo/bin/"
+            fi
 
             INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
 

@@ -1002,40 +1002,36 @@ fn build_custom_apps() {
     let cargo_bin_dir = dirs::home_dir().unwrap().join(".cargo/bin");
     let _ = fs::create_dir_all(&cargo_bin_dir);
 
-    for app in RUST_APPS {
-        let app_path = sys_scripts_dir.join(app);
-        if app_path.exists() {
-            // Use standard build to leverage local target/ cache!
-            let status = Command::new("cargo")
-                .args(["build", "--release"])
-                .current_dir(&app_path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+    if let Ok(entries) = fs::read_dir(&sys_scripts_dir) {
+        for entry in entries.flatten() {
+            let app_path = entry.path();
+            if app_path.is_dir() && app_path.join("Cargo.toml").exists() {
+                let app_name = app_path.file_name().unwrap().to_str().unwrap();
+                let status = Command::new("cargo")
+                    .args(["build", "--release", "-q"])
+                    .current_dir(&app_path)
+                    .status();
 
-            match status {
-                Ok(s) if s.success() => {
-                    let compiled_bin = app_path.join("target/release").join(app);
-                    let target_bin = cargo_bin_dir.join(app);
-                    
-                    if compiled_bin.exists() {
-                        // CRITICAL: Delete the old binary first to prevent "Text file busy" 
-                        // errors if the app (like your sidebar) is currently running in the background.
-                        if target_bin.exists() {
-                            let _ = fs::remove_file(&target_bin);
-                        }
-                        
-                        // Copy the cached or newly compiled binary into your PATH
-                        match fs::copy(&compiled_bin, &target_bin) {
-                            Ok(_) => println!("     ✅ {}", app),
-                            Err(e) => println!("     ❌ Failed to copy {}: {}", app, e),
+                if status.is_ok() && status.unwrap().success() {
+                    let compiled_bin = app_path.join("target/release").join(app_name);
+                    let target_bin = cargo_bin_dir.join(app_name);
+                    let compiled_time = fs::metadata(&compiled_bin).and_then(|m| m.modified());
+                    let target_time = fs::metadata(&target_bin).and_then(|m| m.modified());
+                    let should_update = match (compiled_time, target_time) {
+                        (Ok(c_time), Ok(t_time)) => c_time > t_time,
+                        (Ok(_), Err(_)) => true,
+                        _ => false,
+                    };
+                    if should_update {
+                        if target_bin.exists() { let _ = fs::remove_file(&target_bin); }
+                        if fs::copy(&compiled_bin, &target_bin).is_ok() {
+                            println!("       ✅ Updated {}", app_name);
                         }
                     }
-                },
-                _ => println!("     ❌ Failed to build {}", app),
+                } else {
+                    println!("      ❌ Failed to build {}", app_name);
+                }
             }
-        } else {
-            println!("     ⚠️  Missing directory for {}", app);
         }
     }
 }
