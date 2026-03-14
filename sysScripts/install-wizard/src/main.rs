@@ -19,6 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 
 // --- Enums for Hardware Detection ---
 #[derive(Debug, PartialEq)]
@@ -28,18 +29,6 @@ enum GpuVendor {
     Intel,
     Unknown,
 }
-
-// --- Packages ---
-// Const for auditing and immutability
-
-const RUST_APPS: &[&str] = &[
-    // My custom toolchain
-    "waybar-switcher", "waybar-weather", "sway-workspace", "update-check",
-    "cloudflare-toggle", "wallpaper-manager", "kb-launcher", "updater",
-    "sidebar", "rfkill-manager", "clip-manager", "emoji-picker",
-    "radio-menu", "waybar-finance", "cal-tui", "battery-daemon",
-    "install-wizard",
-];
 
 // Hardware Specific: NVIDIA
 const NVIDIA_PACKAGES: &[&str] = &[
@@ -989,7 +978,18 @@ file = "~/.config/nvim/keybinds_nvim.txt"
     } else {
         std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
     }
-    fs::write(&config_path, config_content).expect("Failed to write config.toml");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    match options.open(&config_path) {
+        Ok(mut file) => {
+            file.write_all(config_content.as_bytes()).expect("Failed to write secure config.toml");
+            println!("  ✅ Config generated securely at {:?}", config_path);
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to securely open config.toml: {}", e);
+            std::process::exit(1);
+        }
+    }
     println!("   ✅ Config generated at {:?}", config_path);
 }
 /// Builds custom Rust apps using native caching. 
