@@ -1298,12 +1298,10 @@ fn setup_battery_daemon() {
     // Make sure the ~/.config/systemd/user/ folder actually exists
     let _ = std::fs::create_dir_all(&systemd_user_dir);
 
-    // Grab the .service file from the repo and put it in the systemd folder
-    let current_dir = std::env::current_dir().expect("Could not get current dir");
-    let service_src = current_dir.join("../battery-daemon/battery-daemon.service");
+    let service_content = include_str!("../../battery-daemon/battery-daemon.service");
 
-    if let Err(e) = std::fs::copy(&service_src, &service_dest) {
-        eprintln!("   ⚠️ Failed to copy battery-daemon.service: {}", e);
+    if let Err(e) = std::fs::write(&service_dest, service_content) {
+        eprintln!("   ⚠️ Failed to write battery-daemon.service: {}", e);
         return;
     } 
 
