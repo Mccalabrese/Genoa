@@ -12,11 +12,17 @@
   <a href="https://www.gnome.org/"><img src="https://img.shields.io/badge/GNOME-4A86CF?logo=gnome&logoColor=white" alt="GNOME"></a>
   <a href="https://neovim.io/"><img src="https://img.shields.io/badge/Neovim-57A143?logo=neovim&logoColor=white" alt="Neovim"></a>
   <a href="https://github.com/tmux/tmux"><img src="https://img.shields.io/badge/tmux-1BB91F?logo=tmux&logoColor=white" alt="tmux"></a>
-  <a href="#my-arch-dotfiles"><img src="https://img.shields.io/badge/Compositors-Niri%20%7C%20Hyprland%20%7C%20Sway-6A5ACD" alt="Compositors: Niri | Hyprland | Sway"></a>
+  <a href="#my-arch-dotfiles"><img src="https://img.shields.io/badge/Compositors-Niri%20%7C%20Sway-6A5ACD" alt="Compositors: Niri | Sway"></a>
   <a href="https://www.shellcheck.net/"><img src="https://img.shields.io/badge/shellcheck-recommended-blue" alt="ShellCheck recommended"></a>
 </p>
 
 [![Donate](https://img.shields.io/badge/Donate-Crypto-yellow.svg?style=for-the-badge&logo=bitcoin&logoColor=white)](#support-the-project)
+
+## Required Config Changes
+
+My updater will not update your configs, it will only update my rust tools in /sysScripts. Because of this, breaking changes will periodically occur in configs that users must manually fix. I believe this is the best choice for user customization and personalization. That said, I will start maintaining a list of breaking config changes at the top of this readme. This list is not exhaustive and users can always refer back to my configs on this repo for complete and up to date config examples.
+
+* swww (the Niri wallpaper manager dependency) has renamed to awww. Users will need to change line 83 of their niri configs to `spawn-at-startup "awww-daemon" "--namespace" "niri"` to have the correct dependency start when logging into Niri. The package will already be installed and the wallpaper management tooling is already refactored via the updater.
 
 ## Screenshots
 
@@ -26,10 +32,9 @@
   </p>
 <p align="center">
   <img src="screenshots/niri.png" width="90%" alt="Niri Overview"/>
-  <img src="screenshots/hyprland.png" width="90%" alt="Hyprland Desktop"/>
 </p>
 
-This is my obsessive setup for a minimal, multi-compositor Arch Linux environment. I run **Niri** primarily, **Hyprland** when docked, and a custom **Sway** session (iGPU-only) hyper-optimized for battery life. Gnome is included for when a full desktop is needed (e.g., Zoom annotations).
+This is my obsessive setup for a minimal, multi-compositor Arch Linux environment. I run **Niri** primarily and a custom **Sway** session (iGPU-only) hyper-optimized for battery life. GNOME is included for when a full desktop is needed (e.g., Zoom annotations).
 
 The whole point is efficiency and performance. This setup idles at **4.8W** on my ThinkPad X1 Extreme (i7-10850H, 64GB RAM, GTX 1650 Ti, 4k display).
 
@@ -166,6 +171,13 @@ All the helper scripts in this repo have been rewritten in Rust for maximum perf
 
 <p align="center">
   <img src="screenshots/sidebar.png" width="60%" alt="Power Menu formatting"/>
+  </p>
+
+* **`cal-tui`**: A calendar app that runs in your terminal. It allows you to add appointments to your calender.
+
+<p align="center">
+  <img src="screenshots/CalTuiDay.png" width="45%" alt="Calendar TUI"/>
+  <img src="screenshots/CalTuiWeek.png" width="45%" alt="Calendar TUI 2"/>
   </p>
 
 * **`rfkill-manager`**:
