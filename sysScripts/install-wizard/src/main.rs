@@ -15,11 +15,14 @@
 
 use colored::*;
 use inquire::{Select, Text};
+use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 
 // --- Enums for Hardware Detection ---
 #[derive(Debug, PartialEq)]
@@ -991,6 +994,48 @@ file = "~/.config/nvim/keybinds_nvim.txt"
         }
     }
 }
+fn expected_binary_names(app_path: &Path, app_name: &str) -> HashSet<String> {
+    let mut expected = HashSet::new();
+
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(app_path)
+        .output();
+
+    if let Ok(output) = metadata {
+        if output.status.success() {
+            if let Ok(json) = serde_json::from_slice::<Value>(&output.stdout) {
+                if let Some(packages) = json.get("packages").and_then(|v| v.as_array()) {
+                    for package in packages {
+                        if let Some(targets) = package.get("targets").and_then(|v| v.as_array()) {
+                            for target in targets {
+                                let is_bin = target
+                                    .get("kind")
+                                    .and_then(|v| v.as_array())
+                                    .map(|kinds| kinds.iter().any(|k| k.as_str() == Some("bin")))
+                                    .unwrap_or(false);
+
+                                if is_bin {
+                                    if let Some(name) = target.get("name").and_then(|v| v.as_str()) {
+                                        expected.insert(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Safe fallback so single-bin crates still update even if metadata fails.
+    if expected.is_empty() {
+        expected.insert(app_name.to_string());
+    }
+
+    expected
+}
+
 /// Builds custom Rust apps using native caching. 
 /// If source files haven't changed, this takes milliseconds.
 fn build_custom_apps() {
@@ -1012,20 +1057,58 @@ fn build_custom_apps() {
                     .status();
 
                 if status.is_ok() && status.unwrap().success() {
-                    let compiled_bin = app_path.join("target/release").join(app_name);
-                    let target_bin = cargo_bin_dir.join(app_name);
-                    let compiled_time = fs::metadata(&compiled_bin).and_then(|m| m.modified());
-                    let target_time = fs::metadata(&target_bin).and_then(|m| m.modified());
-                    let should_update = match (compiled_time, target_time) {
-                        (Ok(c_time), Ok(t_time)) => c_time > t_time,
-                        (Ok(_), Err(_)) => true,
-                        _ => false,
-                    };
-                    if should_update {
-                        if target_bin.exists() { let _ = fs::remove_file(&target_bin); }
-                        if fs::copy(&compiled_bin, &target_bin).is_ok() {
-                            println!("       ✅ Updated {}", app_name);
+                    let release_dir = app_path.join("target/release");
+                    let expected_bins = expected_binary_names(&app_path, app_name);
+                    let mut synced_any = false;
+
+                    if let Ok(bin_entries) = fs::read_dir(&release_dir) {
+                        for bin_entry in bin_entries.flatten() {
+                            let bin_path = bin_entry.path();
+                            if !bin_path.is_file() {
+                                continue;
+                            }
+
+                            // On Linux, real executables have at least one execute bit set.
+                            let is_executable = fs::metadata(&bin_path)
+                                .map(|m| m.permissions().mode() & 0o111 != 0)
+                                .unwrap_or(false);
+                            if !is_executable {
+                                continue;
+                            }
+
+                            // Ignore hidden entries and extension-based artifacts.
+                            let filename = match bin_path.file_name() {
+                                Some(name) => name.to_string_lossy().to_string(),
+                                None => continue,
+                            };
+                            if filename.starts_with('.') || bin_path.extension().is_some() {
+                                continue;
+                            }
+                            if !expected_bins.contains(&filename) {
+                                continue;
+                            }
+
+                            let target_bin = cargo_bin_dir.join(&filename);
+                            let compiled_time = fs::metadata(&bin_path).and_then(|m| m.modified());
+                            let target_time = fs::metadata(&target_bin).and_then(|m| m.modified());
+                            let should_update = match (compiled_time, target_time) {
+                                (Ok(c_time), Ok(t_time)) => c_time > t_time,
+                                (Ok(_), Err(_)) => true,
+                                _ => false,
+                            };
+
+                            if should_update {
+                                if target_bin.exists() { let _ = fs::remove_file(&target_bin); }
+                                if fs::copy(&bin_path, &target_bin).is_ok() {
+                                    println!("       ✅ Synced binary: {}", filename);
+                                    synced_any = true;
+                                }
+                            }
                         }
+                    }
+
+                    if !synced_any {
+                        println!("       ✔ {} is already up to date", app_name);
                     }
                 } else {
                     println!("      ❌ Failed to build {}", app_name);

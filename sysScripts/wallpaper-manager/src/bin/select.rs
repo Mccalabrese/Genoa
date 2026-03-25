@@ -196,7 +196,7 @@ fn main() -> Result<()> {
     let rofi_conf_path = expand_path(&config.rofi_config_path);
     // User Interaction (Wallpaper Selection)
     let selection_name = ask_rofi(
-        "Select Wallpaper",
+        "Select Wallpaper🐧",
         rofi_items,
         Some((&rofi_conf_path, &config.rofi_theme_override))
     )?;
