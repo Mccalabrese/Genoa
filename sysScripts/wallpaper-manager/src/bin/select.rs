@@ -116,15 +116,15 @@ fn get_monitor_list(compositor: &str) -> Result<Vec<String>> {
                 .collect())
         }
         "niri" => {
-            // Niri uses swww-daemon as its "state of truth" for monitors context
-            output = Command::new("swww")
+            // Niri uses awww-daemon as its "state of truth" for monitors context
+            output = Command::new("awww")
                 .arg("query")
                 .arg("--namespace")
                 .arg("niri")
                 .output()?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("swww query failed: {}", stderr);
+                anyhow::bail!("awww query failed: {}", stderr);
             }
             let stdout = String::from_utf8_lossy(&output.stdout);
             let monitors: Vec<String> = stdout

@@ -56,15 +56,15 @@ fn pkill(name: &str) {
 
 // --- Compositor Strategies ---
 
-/// Applies wallpaper using `swww` (Solution for Hyprland/Niri).
+/// Applies wallpaper using `awww` (Solution for Hyprland/Niri).
 /// Supports animated transitions and per-monitor namespaces.
-fn apply_swww_wallpaper(selected_file: &Path, monitor: &str, namespace: &str, swww_params: &[String]) -> Result<()> {
-    println!("Applying wallpaper via swww (namespace: {})...", namespace);
+fn apply_awww_wallpaper(selected_file: &Path, monitor: &str, namespace: &str, swww_params: &[String]) -> Result<()> {
+    println!("Applying wallpaper via awww (namespace: {})...", namespace);
     // Clean up incompatible daemons
     pkill("mpvpaper");
     pkill("swaybg");
     // Ensure the daemon is running in the background
-    let _ = Command::new("swww-daemon")
+    let _ = Command::new("awww-daemon")
         .arg("--namespace")
         .arg(namespace)
         .arg("--format")
@@ -73,7 +73,7 @@ fn apply_swww_wallpaper(selected_file: &Path, monitor: &str, namespace: &str, sw
     // Wait briefly for daemon startup race conditions
     std::thread::sleep(std::time::Duration::from_millis(100));
     // Send the image command
-    Command::new("swww")
+    Command::new("awww")
         .arg("img") 
         .arg("--namespace")
         .arg(namespace)
@@ -82,15 +82,15 @@ fn apply_swww_wallpaper(selected_file: &Path, monitor: &str, namespace: &str, sw
         .arg(selected_file)
         .args(swww_params)
         .status()
-        .context("swww img command failed")?;
+        .context("awww img command failed")?;
     Ok(())
 }
 /// Applies wallpaper using `swaybg` (Solution for Sway).
 /// Swaybg is static and requires manual process management.
 fn apply_sway_wallpaper(selected_file: &Path, monitor: &str, cache_filename: &str) -> Result<()> {
     println!("Applying wallpaper for Sway...");
-    // Kill swww as it conflicts with swaybg
-    pkill("swww-daemon");
+    // Kill awww as it conflicts with swaybg
+    pkill("awww-daemon");
     pkill("hyprpaper");
     Command::new("swaybg")
         .arg("-o")
@@ -123,14 +123,14 @@ fn main() -> Result<()> {
     // Strategy Pattern: Dispatch based on the detected environment
     match compositor.as_str() {
         "hyprland" => {
-            apply_swww_wallpaper(&wallpaper_path, monitor, "hypr", &config.swww_params)?;
+            apply_awww_wallpaper(&wallpaper_path, monitor, "hypr", &config.swww_params)?;
             // Trigger hook to update system colors (e.g. Waybar styles)
             let refresh_script = expand_path(&config.hyprland_refresh_script);
             Command::new("bash").arg(refresh_script).status()?;
         }
         "niri" => {
-            // Niri uses the same backend (swww) but a isolated namespace
-            apply_swww_wallpaper(&wallpaper_path, monitor, "niri", &config.swww_params)?;
+            // Niri uses the same backend (awww) but a isolated namespace
+            apply_awww_wallpaper(&wallpaper_path, monitor, "niri", &config.swww_params)?;
         }
         "sway" => {
             apply_sway_wallpaper(&wallpaper_path, monitor, &config.swaybg_cache_file)?;

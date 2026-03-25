@@ -80,7 +80,7 @@ layout {
 
 // Startup Apps (Corrected Syntax)
 // Many of these might already be started by XDG Autostart
-spawn-at-startup "swww-daemon" "--namespace" "niri"
+spawn-at-startup "awww-daemon" "--namespace" "niri"
 spawn-sh-at-startup "$HOME/.cargo/bin/wp-daemon"
 // spawn-at-startup "/path/to/your/WallpaperAutoChange.sh" "/path/to/wallpapers"
 

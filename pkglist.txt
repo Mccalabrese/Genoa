@@ -71,7 +71,7 @@ gnome-keyring
 waybar
 wofi
 rofi
-swww
+awww
 swaybg
 grim
 slurp
