@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use chrono::{DateTime, Utc, TimeZone, NaiveDate, Datelike};
+use chrono::{NaiveDate, Datelike};
 use serde::{Serialize, Deserialize};
 use crate::model::{Appointment, Recurrence};
 

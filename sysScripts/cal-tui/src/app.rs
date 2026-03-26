@@ -119,10 +119,6 @@ impl App {
         self.status_message = Some(message.into());
     }
 
-    pub fn on_tick(&mut self) {
-        // This is where we would handle auto-saving or background tasks later
-    }
-
     pub fn quit(&mut self) {
         self.save();
         self.should_quit = true;
