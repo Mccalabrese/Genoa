@@ -85,8 +85,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
     loop {
         terminal.draw(|f| ui::ui(f, app))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == event::KeyEventKind::Press {
+        if let Event::Key(key) = event::read()?
+            && key.kind == event::KeyEventKind::Press {
                 match app.input_mode {
                     InputMode::Normal => match key.code {
                         KeyCode::Char('?') => {
@@ -110,19 +110,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             app.list_state.select(None); // Reset cursor on view change
                         }
                         KeyCode::Right => {
-                            app.current_date = app.current_date + Duration::days(1);
+                            app.current_date += Duration::days(1);
                             app.list_state.select(None); // Clear selection on day change
                         }
                         KeyCode::Char('l') => {
-                            app.current_date = app.current_date + Duration::days(1);
+                            app.current_date += Duration::days(1);
                             app.list_state.select(None);
                         }
                         KeyCode::Left => {
-                            app.current_date = app.current_date - Duration::days(1);
+                            app.current_date -= Duration::days(1);
                             app.list_state.select(None); // Clear selection on day change
                         }
                         KeyCode::Char('h') => {
-                            app.current_date = app.current_date - Duration::days(1);
+                            app.current_date -= Duration::days(1);
                             app.list_state.select(None);
                         }
                         KeyCode::Char('a') => {
@@ -350,9 +350,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                             // 2. Build the active days vector
                             let mut active_days = Vec::new();
                             let all_days = [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat, Weekday::Sun];
-                            for i in 0..7 {
+                            for (i, &day) in all_days.iter().enumerate() {
                                 if app.rec_days[i] {
-                                    active_days.push(all_days[i]);
+                                    active_days.push(day);
                                 }
                             }
 
@@ -396,6 +396,5 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
                     },
                 }
             }
-        }
     }
 }

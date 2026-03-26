@@ -104,14 +104,13 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 f.render_stateful_widget(list_widget, day_chunks[i as usize], &mut app.list_state);
                 
                 // Grab data for the details pane!
-                if let Some(idx) = app.list_state.selected() {
-                    if idx < events.len() {
+                if let Some(idx) = app.list_state.selected()
+                    && idx < events.len() {
                         let evt = events[idx];
                         let dur = evt.duration.num_minutes();
                         details_text = format!(" Event: {}\n Time:  {}\n Dur:   {}h {}m\n ID:    {}", 
                             evt.summary, evt.start.format("%A, %B %e at %H:%M"), dur / 60, dur % 60, evt.id);
                     }
-                }
             } else {
                 // Not active, just render it statically
                 f.render_widget(list_widget, day_chunks[i as usize]);

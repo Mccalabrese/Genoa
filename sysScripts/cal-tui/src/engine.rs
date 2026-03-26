@@ -63,15 +63,13 @@ impl CalendarEngine {
 
         match app.rule.as_ref().unwrap() {
             Recurrence::Daily { until } => {
-                if let Some(end_dt) = until {
-                    if target_date > end_dt.date_naive() { return false; }
-                }
+                if let Some(end_dt) = until
+                    && target_date > end_dt.date_naive() { return false; }
                 true
             },
             Recurrence::Weekly { days, until } => {
-                if let Some(end_dt) = until {
-                    if target_date > end_dt.date_naive() { return false; }
-                }
+                if let Some(end_dt) = until
+                    && target_date > end_dt.date_naive() { return false; }
 
                 days.contains(&target_date.weekday())
             }
