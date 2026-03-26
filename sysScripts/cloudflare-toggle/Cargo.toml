@@ -6,6 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 serde_json = "1.0"
-toml = "0.9.8"
+toml = "1.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 dirs = "6.0.0"

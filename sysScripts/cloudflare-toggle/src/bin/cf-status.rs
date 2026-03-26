@@ -46,7 +46,7 @@ fn main() -> Result<()> {
     // systemctl is-active returns "active" (exit code 0) or "inactive" (exit code 3/4).
     let service_active = Command::new("systemctl")
         .arg("is-active")
-        .arg(&config.as_ref().map_or("dnscrypt-proxy", |c| &c.service_name))
+        .arg(config.as_ref().map_or("dnscrypt-proxy", |c| &c.service_name))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
