@@ -33,19 +33,18 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
     // 1. Try Local JSON first (App specific overrides)
     if path.exists() {
         let content = fs::read_to_string(path).context("Failed to read config file")?;
-        if let Ok(config) = serde_json::from_str::<Config>(&content) {
-            if config.api_key.is_some() {
+        if let Ok(config) = serde_json::from_str::<Config>(&content)
+            && config.api_key.is_some() {
                 return Ok(config);
             }
-        }
     }
 
     // 2. Try Central TOML (Installer provided)
-    if let Some(central_path) = get_central_config_path() {
-        if central_path.exists() {
-            if let Ok(content) = fs::read_to_string(&central_path) {
-                if let Ok(global) = toml::from_str::<GlobalConfig>(&content) {
-                    if let Some(finance) = global.waybar_finance {
+    if let Some(central_path) = get_central_config_path()
+        && central_path.exists()
+            && let Ok(content) = fs::read_to_string(&central_path)
+                && let Ok(global) = toml::from_str::<GlobalConfig>(&content)
+                    && let Some(finance) = global.waybar_finance {
                         return Ok(Config {
                             api_key: Some(finance.api_key),
                             stocks: finance.stocks.unwrap_or_else(|| vec![
@@ -53,10 +52,6 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
                             ]),
                         });
                     }
-                }
-            }
-        }
-    }
 
     // 3. Fallback to defaults
     Ok(Config::default())

@@ -59,9 +59,8 @@ pub async fn run_tui(client: &reqwest::Client, app: &mut App) -> Result<()> {
     let tx_input = tx.clone();
     tokio::task::spawn_blocking(move || {
         loop {
-            if let Ok(event) = crossterm::event::read() {
-                if tx_input.blocking_send(AppEvent::Input(event)).is_err() { break; }
-            }
+            if let Ok(event) = crossterm::event::read()
+                && tx_input.blocking_send(AppEvent::Input(event)).is_err() { break; }
         }
     });
 
@@ -81,11 +80,10 @@ pub async fn run_tui(client: &reqwest::Client, app: &mut App) -> Result<()> {
                 latest_query = newer;
             }
 
-            if latest_query.len() > 1 {
-                if let Ok(results) = crate::network::search_ticker(&client_search, &latest_query).await {
+            if latest_query.len() > 1
+                && let Ok(results) = crate::network::search_ticker(&client_search, &latest_query).await {
                     let _ = tx_search_res.send(AppEvent::SearchResultsFetched(results)).await;
                 }
-            }
         }
     });
 
@@ -121,12 +119,14 @@ pub async fn run_tui(client: &reqwest::Client, app: &mut App) -> Result<()> {
                     AppEvent::MarketFetched(Ok(status)) => {
                         app.market_status = Some(status);
                     }
-                    AppEvent::QuoteFetched(sym, res) => {
-                        if let Ok(q) = res {
-                            app.current_quote = Some(q);
-                            app.message = format!("Updated {}", sym);
-                            app.message_color = Color::Cyan;
-                        }
+                    AppEvent::QuoteFetched(sym, Ok(q)) => {
+                        app.current_quote = Some(q);
+                        app.message = format!("Updated {}", sym);
+                        app.message_color = Color::Cyan;
+                    }
+                    AppEvent::QuoteFetched(sym, Err(e)) => {
+                        app.message = format!("Failed to fetch quote for {}: {}", sym, e);
+                        app.message_color = Color::Red;
                     }
                     AppEvent::SearchResultsFetched(results) => {
                         app.search_results = results;
@@ -141,9 +141,17 @@ pub async fn run_tui(client: &reqwest::Client, app: &mut App) -> Result<()> {
                         app.stock_history = Some(h);
                         app.message = format!("Loaded history for {}", sym);
                     }
+                    AppEvent::HistoryFetched(sym, Err(e)) => {
+                        app.message = format!("Failed to fetch history for {}: {}", sym, e);
+                        app.message_color = Color::Red;
+                    }
                     AppEvent::DetailsFetched(sym, Ok(d)) => {
                         app.details = Some(d);
                         app.message = format!("Loaded details for {}", sym);
+                    }
+                    AppEvent::DetailsFetched(sym, Err(e)) => {
+                        app.message = format!("Failed to fetch details for {}: {}", sym, e);
+                        app.message_color = Color::Red;
                     }
                     _ => {}
                 }
