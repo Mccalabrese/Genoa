@@ -139,11 +139,10 @@ fn get_month_days_with_appointments(year: i32, month: u32) -> HashSet<u32> {
     let all = load_calendar_data();
 
     for day_num in 1..=days_in_month {
-        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day_num) {
-            if all.iter().any(|appt| occurs_on(appt, date)) {
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, day_num)
+            && all.iter().any(|appt| occurs_on(appt, date)) {
                 days.insert(day_num);
             }
-        }
     }
 
     days

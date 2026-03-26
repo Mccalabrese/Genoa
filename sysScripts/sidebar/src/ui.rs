@@ -565,17 +565,15 @@ pub fn build_ui(app: &Application) {
         let dns_in_flight = Arc::new(AtomicBool::new(false));
         let mut attempts = 0;
         glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-            if let Ok(Some(stdout)) = dns_rx.try_recv() {
-                if let Ok(json) = serde_json::from_slice::<Value>(&stdout) {
-                    if let Some(class) = json.get("class").and_then(|v| v.as_str()) {
+            if let Ok(Some(stdout)) = dns_rx.try_recv()
+                && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
+                    && let Some(class) = json.get("class").and_then(|v| v.as_str()) {
                         if class == "on" {
                             btn_target.add_css_class("active");
                         } else {
                             btn_target.remove_css_class("active");
                         }
                     }
-                }
-            }
 
             attempts += 1;
             if !dns_in_flight.swap(true, Ordering::AcqRel) {
@@ -615,14 +613,12 @@ pub fn build_ui(app: &Application) {
 
     // Update Checker (UI Receiver)
     glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-        if let Ok(stdout) = update_rx.try_recv() {
-            if let Ok(json) = serde_json::from_slice::<Value>(&stdout) {
-                if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+        if let Ok(stdout) = update_rx.try_recv()
+            && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
+                && let Some(text) = json.get("text").and_then(|v| v.as_str()) {
                      lbl_update_target.set_label(text);
                      lbl_update_target.set_visible(text != "0");
                 }
-            }
-        }
         glib::ControlFlow::Continue
     });
 
@@ -657,8 +653,8 @@ pub fn build_ui(app: &Application) {
     let finance_label_update = finance_label.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         if let Ok(Some(stdout)) = receiver.try_recv() {
-            if let Ok(json) = serde_json::from_slice::<Value>(&stdout) {
-                if let Some(text) = json.get("text").and_then(|v| v.as_str()) {
+            if let Ok(json) = serde_json::from_slice::<Value>(&stdout)
+                && let Some(text) = json.get("text").and_then(|v| v.as_str()) {
                     // Manual HTML/Pango parsing to format the grid 
                     // (The API returns raw HTML spans, we need to insert newlines every 4 items)
                     let raw_items: Vec<&str> = text.split("</span> ").collect();
@@ -674,7 +670,6 @@ pub fn build_ui(app: &Application) {
                         finance_label_update.set_tooltip_markup(Some(tt));
                     }
                 }
-            }
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -703,31 +698,25 @@ pub fn build_ui(app: &Application) {
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         if let Ok((dns_o, air_o, mute_o, bright_o)) = status_rx.try_recv() {
             // Apply DNS State
-            if let Some(out) = dns_o {
-                if let Ok(json) = serde_json::from_slice::<Value>(&out) {
-                    if json.get("class").and_then(|v| v.as_str()) == Some("on") { btn_dns_load.add_css_class("active"); }
-                }
-            }
+            if let Some(out) = dns_o
+                && let Ok(json) = serde_json::from_slice::<Value>(&out)
+                    && json.get("class").and_then(|v| v.as_str()) == Some("on") { btn_dns_load.add_css_class("active"); }
             // Apply Airplane State
-            if let Some(out) = air_o {
-                if String::from_utf8_lossy(&out).contains("Soft blocked: yes") { btn_air_load.add_css_class("active"); }
-            }
+            if let Some(out) = air_o
+                && String::from_utf8_lossy(&out).contains("Soft blocked: yes") { btn_air_load.add_css_class("active"); }
             // Apply Mute/Volume State
             if let Some(out) = mute_o {
                 let s = String::from_utf8_lossy(&out);
                 if s.contains("[MUTED]") { btn_mute_load.add_css_class("active"); }
-                if let Some(vol_str) = s.split_whitespace().nth(1) {
-                    if let Ok(vol) = vol_str.parse::<f64>() { scale_vol_load.set_value(vol * 100.0); }
-                }
+                if let Some(vol_str) = s.split_whitespace().nth(1)
+                    && let Ok(vol) = vol_str.parse::<f64>() { scale_vol_load.set_value(vol * 100.0); }
             }
             // Apply Brightness State
-            if let Some(out) = bright_o {
-                if let Some(p) = String::from_utf8_lossy(&out).split(',').nth(3) {
-                     if let Ok(val) = p.replace("%", "").replace("\n", "").parse::<f64>() {
+            if let Some(out) = bright_o
+                && let Some(p) = String::from_utf8_lossy(&out).split(',').nth(3)
+                     && let Ok(val) = p.replace("%", "").replace("\n", "").parse::<f64>() {
                          scale_bright_load.set_value(val);
                      }
-                }
-            }
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -747,16 +736,14 @@ pub fn build_ui(app: &Application) {
 
     glib::timeout_add_seconds_local(1, move || {
         if let Ok(snapshot) = slider_rx.try_recv() {
-            if let Some(sys_val) = snapshot.brightness {
-                if (scale_bright_watch.value() - sys_val).abs() > 1.0 {
+            if let Some(sys_val) = snapshot.brightness
+                && (scale_bright_watch.value() - sys_val).abs() > 1.0 {
                     scale_bright_watch.set_value(sys_val);
                 }
-            }
-            if let Some(sys_val) = snapshot.volume {
-                if (scale_vol_watch.value() - sys_val).abs() > 1.0 {
+            if let Some(sys_val) = snapshot.volume
+                && (scale_vol_watch.value() - sys_val).abs() > 1.0 {
                     scale_vol_watch.set_value(sys_val);
                 }
-            }
         }
 
         // Guard: If user touched slider < 3 seconds ago, skip external refresh.
