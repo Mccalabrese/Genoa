@@ -28,7 +28,6 @@ intel-media-driver
 libva-utils
 vulkan-intel
 sway
-hyprland
 niri
 gnome
 hyprlock

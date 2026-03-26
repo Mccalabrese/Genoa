@@ -19,11 +19,10 @@ use std::process::{Command, Stdio};
 
 
 fn expand_path(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+    if let Some(stripped) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir() {
             return home.join(stripped);
         }
-    }
     PathBuf::from(path)
 }
 
@@ -32,13 +31,13 @@ fn expand_path(path: &str) -> PathBuf {
 struct Sheet {
     name: String, // Display name in Rofi (e.g., "Vim Keys")
     file: String, // Path to file (e.g., "~/docs/vim.md")
+    compositor: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
 struct CompositorArgs {
     // Window rules arguments vary by terminal emulator and compositor combination.
     // We store them as lists of strings in the config.
-    hyprland: Vec<String>,
     sway: Vec<String>,
     niri: Vec<String>,
     default: Vec<String>,
@@ -77,12 +76,10 @@ fn load_config() -> Result<GlobalConfig> {
 /// Detects the active Wayland compositor via environment variables.
 fn get_compositor() -> String {
     if env::var("NIRI_SOCKET").is_ok() { return "niri".to_string(); }
-    if env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() { return "hyprland".to_string(); }
     if env::var("SWAYSOCK").is_ok() { return "sway".to_string(); }
     if let Ok(d) = env::var("XDG_CURRENT_DESKTOP") {
         let d = d.to_lowercase();
         if d.contains("niri") { return "niri".to_string(); }
-        if d.contains("hypr") { return "hyprland".to_string(); }
         if d.contains("sway") { return "sway".to_string(); }
     }
     "unknown".to_string()
@@ -92,7 +89,7 @@ fn get_compositor() -> String {
 
 /// Spawns Rofi to let the user select a sheet.
 /// Returns the name of the selected sheet.
-fn show_rofi_menu(sheets: &[Sheet]) -> Result<String> {
+fn show_rofi_menu(sheets: &[&Sheet]) -> Result<String> {
     // Build the input string (newline separated names)
     let menu_string = sheets
         .iter()
@@ -132,11 +129,23 @@ fn main() -> Result<()> {
     let global_config = load_config()?;
     let global_conf = global_config.global;
     let kb_config = global_config.kb_launcher;
-    // User Selection
-    let chosen_sheet_name = show_rofi_menu(&kb_config.sheet)?;
-    // Resolve File
-    let chosen_sheet = kb_config.sheet
+    let compositor = get_compositor();
+
+    let available_sheets: Vec<&Sheet> = kb_config.sheet
         .iter()
+        .filter(|s| {
+            s.compositor.is_none() || s.compositor.as_deref() == Some(compositor.as_str())
+        })
+        .collect();
+
+    if available_sheets.is_empty() {
+        anyhow::bail!("No cheat sheets available for the current compositor");
+    }
+    // User Selection
+    let chosen_sheet_name = show_rofi_menu(&available_sheets)?;
+    // Resolve File
+    let chosen_sheet = available_sheets
+        .into_iter()
         .find(|s| s.name == chosen_sheet_name)
         .context("Failed to find chosen sheet")?;
 
@@ -145,9 +154,7 @@ fn main() -> Result<()> {
     // Environment specific args
     // Inject specific arguments (like `--title=float_me`) so the window manager 
     // knows to float this specific terminal window.
-    let compositor = get_compositor();
     let compositor_args = match compositor.as_str() {
-        "hyprland" => &kb_config.compositor_args.hyprland,
         "sway" => &kb_config.compositor_args.sway,
         "niri" => &kb_config.compositor_args.niri,
         _ => &kb_config.compositor_args.default,

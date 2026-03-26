@@ -7,7 +7,6 @@ terminal = "ghostty"
 # Settings for our keybind launcher
 # -------------------------------
 [kb_launcher.compositor_args]
-hyprland = ["--title=KeybindCheatSheetApp"]
 sway = ["--title=KeybindCheatSheetApp"]
 niri = ["--title=KeybindCheatSheet"]
 default = []
@@ -17,16 +16,14 @@ name = "Neovim"
 file = "~/.config/nvim/keybinds_nvim.txt"
 
 [[kb_launcher.sheet]]
-name = "Hyprland"
-file = "~/.config/hypr/keybinds_hyprland.txt"
-
-[[kb_launcher.sheet]]
 name = "Niri"
 file = "~/.config/niri/keybinds_niri.txt"
+compositor = "sway"
 
 [[kb_launcher.sheet]]
 name = "Sway"
 file = "~/.config/sway/keybinds_sway.txt"
+compositor = "niri"
 # -------------------------------
 # [waybar_weather]
 # Settings for our weather module
