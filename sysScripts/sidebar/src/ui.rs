@@ -220,7 +220,7 @@ pub fn build_ui(app: &Application) {
     // This box expands to fill all available vertical space, pushing Top and Bottom zones apart.
     let middle_box = Box::builder()
         .orientation(Orientation::Vertical)
-        .spacing(20)
+        .spacing(10)
         .valign(Align::Fill)
         .vexpand(true)
         .build();
@@ -663,7 +663,7 @@ pub fn build_ui(app: &Application) {
                         if item.trim().is_empty() { continue; }
                         grid_text.push_str(item);
                         if !item.ends_with("</span>") { grid_text.push_str("</span>"); }
-                        if (i + 1) % 4 == 0 { grid_text.push('\n'); } else { grid_text.push_str("      "); }
+                        if (i + 1) % 3 == 0 { grid_text.push('\n'); } else { grid_text.push_str("      "); }
                     }
                     finance_label_update.set_markup(&grid_text);
                     if let Some(tt) = json.get("tooltip").and_then(|v| v.as_str()) {

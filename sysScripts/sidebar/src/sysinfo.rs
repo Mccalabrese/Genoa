@@ -28,7 +28,6 @@ pub fn build() -> Box {
     // during a session (except uptime, but rough accuracy is fine here).
     // This approach consumes zero CPU after the initial load.
 
-    let host = get_stdout("hostname", &[]);
     let kernel = get_stdout("uname", &["-r"]);
 
     // Shell detection: Safe unwrap with fallbacks
@@ -48,7 +47,6 @@ pub fn build() -> Box {
     // 3. Layout Construction
     // Define the data model as a vector of tuples: (Icon + Label, Value)
     let rows = vec![
-        ("  Host", host),
         ("  Kernel", kernel),
         ("  Shell", shell.to_string()),
         ("  WM", wm),
