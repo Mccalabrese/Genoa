@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use anyhow::{Result, Context};
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use crate::app::Config;
 
 // Struct to parse the central TOML
@@ -10,12 +10,30 @@ struct GlobalConfig {
     waybar_finance: Option<FinanceConfig>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum StockConfig {
+    Legacy(Option<Vec<String>>),
+    V2(Vec<StockStruct>),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct StockStruct {
+    pub symbol: Option<String>,
+    pub sidebar: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ParsedConfig {
+    api_key: String,
+    stocks: Option<StockConfig>,
+}
+
 #[derive(Deserialize)]
 struct FinanceConfig {
     api_key: String,
-    stocks: Option<Vec<String>>,
+    stocks: Option<StockConfig>,
 }
-
 /// Resolves the XDG-compliant configuration path.
 /// Usually ~/.config/waybar-finance/config.json on Linux.
 pub fn get_config_path() -> Result<PathBuf> {
@@ -33,10 +51,25 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
     // 1. Try Local JSON first (App specific overrides)
     if path.exists() {
         let content = fs::read_to_string(path).context("Failed to read config file")?;
-        if let Ok(config) = serde_json::from_str::<Config>(&content)
-            && config.api_key.is_some() {
-                return Ok(config);
-            }
+        if let Ok(parsed) = serde_json::from_str::<ParsedConfig>(&content) {
+            let unified_stocks: Vec<StockStruct> = match parsed.stocks {
+                Some(StockConfig::Legacy(stocks)) => {
+                    stocks.unwrap_or_default().into_iter().map(|s| StockStruct { symbol: Some(s), sidebar: Some(true) }).collect()
+                },
+                Some(StockConfig::V2(stocks)) => {
+                    stocks
+                },
+                _ => { vec![
+                    StockStruct { symbol: Some("SPY".into()), sidebar: Some(true) },
+                    StockStruct { symbol: Some("QQQ".into()), sidebar: Some(true) },
+                    StockStruct { symbol: Some("BTC-USD".into()), sidebar: Some(true) },
+                ] },
+            };
+            return Ok(Config {
+                api_key: Some(parsed.api_key),
+                stocks: unified_stocks,
+            });
+        }
     }
 
     // 2. Try Central TOML (Installer provided)
@@ -45,11 +78,22 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
             && let Ok(content) = fs::read_to_string(&central_path)
                 && let Ok(global) = toml::from_str::<GlobalConfig>(&content)
                     && let Some(finance) = global.waybar_finance {
+                        let unified_stocks: Vec<StockStruct> = match finance.stocks {
+                            Some(StockConfig::Legacy(stocks)) => {
+                                stocks.unwrap_or_default().into_iter().map(|s| StockStruct { symbol: Some(s), sidebar: Some(true) }).collect()
+                            },
+                            Some(StockConfig::V2(stocks)) => {
+                                stocks
+                            },
+                            _ => { vec![
+                                StockStruct { symbol: Some("SPY".into()), sidebar: Some(true) },
+                                StockStruct { symbol: Some("QQQ".into()), sidebar: Some(true) },
+                                StockStruct { symbol: Some("BTC-USD".into()), sidebar: Some(true) },
+                            ] },
+                        };
                         return Ok(Config {
                             api_key: Some(finance.api_key),
-                            stocks: finance.stocks.unwrap_or_else(|| vec![
-                                "SPY".into(), "QQQ".into(), "BTC-USD".into()
-                            ]),
+                            stocks: unified_stocks,
                         });
                     }
 

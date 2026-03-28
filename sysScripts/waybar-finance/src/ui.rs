@@ -190,9 +190,11 @@ async fn handle_keys(
             }
             KeyCode::Enter => {
                 if let Some(sel) = app.state.selected() {
-                    let sym = app.stocks[sel].clone();
-                    app.trigger_fetch(sym, tx, client);
-                }
+                    if let Some(sym) = app.stocks[sel].symbol.clone(){ 
+                        app.trigger_fetch(sym, tx, client);
+                    } else {app.message = "symbol not found!".to_string()};
+                } 
+
             }
             KeyCode::Up => app.previous(),
             KeyCode::Down => app.next(),
@@ -202,6 +204,7 @@ async fn handle_keys(
             KeyCode::Esc => app.input_mode = InputMode::Normal,
             KeyCode::Enter => {
                 app.handle_confirm_selection(tx, client);
+                app.state.select(Some(app.state.selected().unwrap() + 1)); // Reselect the current item after
             }
             KeyCode::Char(c) => {
                 app.input.push(c);
@@ -281,7 +284,7 @@ pub fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let watchlist: Vec<ListItem> = app
         .stocks
         .iter()
-        .map(|s| ListItem::new(s.as_str()))
+        .map(|s| ListItem::new(s.symbol.as_deref().unwrap_or("Unknown")))
         .collect();
     let list = List::new(watchlist)
         .block(Block::default()

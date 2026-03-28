@@ -6,6 +6,7 @@ use crate::ui::AppEvent;
 
 use crate::network::{FinnhubQuote, YahooSearchResult};
 use crate::app::InputMode::Normal;
+use crate::config::StockStruct;
 
 /// Defines the input state of the TUI.
 /// We use a state machine approach to change keybindings based on context.
@@ -17,7 +18,7 @@ pub enum InputMode {
 }
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
-    pub stocks: Vec<String>,
+    pub stocks: Vec<StockStruct>,
     pub api_key: Option<String>,
 }
 // Default configuration for new users
@@ -25,11 +26,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             stocks: vec![
-                "SCHO".into(),
-                "SPY".into(),
-                "BITB".into(),
-                "SGOL".into(),
-                "QQQ".into(),
+                StockStruct { symbol: Some("SPY".into()), sidebar: Some(true) },
+                StockStruct { symbol: Some("QQQ".into()), sidebar: Some(true) },
+                StockStruct { symbol: Some("BTC-USD".into()), sidebar: Some(true) },
             ],
             api_key: None,
         }
@@ -61,7 +60,7 @@ impl MarketStatus {
 }
 /// Holds the runtime state of the TUI application.
 pub struct App {
-    pub stocks: Vec<String>,
+    pub stocks: Vec<StockStruct>,
     pub should_quit: bool,
     pub state: ListState, // tracks the selected item in the stock list
     pub api_key: Option<String>,
@@ -184,17 +183,18 @@ impl App {
 
         if new_symbol.is_empty() { return; }
 
-        if self.stocks.contains(&new_symbol) {
+        if self.stocks.iter().any(|s| s.symbol.as_ref() == Some(&new_symbol)) {
             self.message = format!("{} exists!", new_symbol);
             self.message_color = Color::Yellow;
         } else {
-            self.stocks.push(new_symbol.clone());
-            self.state.select(Some(self.stocks.len() - 1));
-            self.message = format!("Added {}", new_symbol);
             self.message_color = Color::Green;
+            self.message = format!("Added {}", &new_symbol);
+            
+            self.state.select(Some(self.stocks.len() - 1));
             
             // Trigger background work
-            self.trigger_fetch(new_symbol, tx, client);
+            self.trigger_fetch(new_symbol.clone(), tx, client);
+            self.stocks.push(StockStruct { symbol: Some(new_symbol), sidebar: Some(true) });
             let tx_clone = tx.clone();
             tokio::spawn(async move {
                 let _ = tx_clone.send(AppEvent::SaveConfig).await;
@@ -211,6 +211,7 @@ impl App {
         let client = client.clone();
         let tx = tx.clone();
         let api_key = self.api_key.clone().unwrap_or_default();
+        let symbol = symbol.clone();
 
         tokio::spawn(async move {
             let q_res = crate::network::fetch_quote(&client, &symbol, &api_key).await;
@@ -220,7 +221,7 @@ impl App {
             let _ = tx.send(AppEvent::HistoryFetched(symbol.clone(), h_res)).await;
 
             let d_res = crate::network::fetch_details(&client, &symbol, &api_key).await;
-            let _ = tx.send(AppEvent::DetailsFetched(symbol, d_res)).await;
+            let _ = tx.send(AppEvent::DetailsFetched(symbol.clone(), d_res)).await;
         });
     }
 }
