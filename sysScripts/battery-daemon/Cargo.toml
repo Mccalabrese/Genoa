@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio = "1.50.0"
+zbus = "5.14.0"

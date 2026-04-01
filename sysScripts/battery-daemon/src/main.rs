@@ -27,9 +27,8 @@ fn main() {
     let status_path = format!("/sys/class/power_supply/{}/status", battery_detection); // path to check the status (discharging, charging, etc)
 
     // These are for the popup warnings to ensure that they will show up no matter what
-    let mut warning_10 = false; 
-    let mut warning_5 = false;
-    let mut shutting_down = false;
+    let mut warning_15 = false; 
+    let mut warning_10 = false;
 
     loop {
         thread::sleep(Duration::from_secs(30)); // This is for your computer to run a check every 30 seconds to keep an eye on the battery
@@ -56,23 +55,17 @@ fn main() {
 
         let status  = status_string.trim();
 
-            if capacity_int <= 10 && status == "Discharging" && !warning_10 && !shutting_down { // battery warning at 10%
-                let _ = Command::new("/usr/bin/notify-send").arg("Battery Warning 10%").arg("Shuts down at 3%").spawn();
+            if capacity_int <= 15 && status == "Discharging" && !warning_15 { // battery warning at 15%
+                let _ = Command::new("/usr/bin/notify-send").arg("Battery Warning 15%").arg("Shuts down at 5%").spawn();
+                warning_15 = true;
+            } 
+            if  capacity_int <= 10 && status == "Discharging" && !warning_10 { // battery warning 10%
+                let _ = Command::new("/usr/bin/notify-send").arg("Battery Warning 10%").arg("Shuts down at 5%\nSAVE WORK NOW").spawn();
                 warning_10 = true;
             } 
-            if  capacity_int <= 5 && status == "Discharging" && !warning_5 && !shutting_down { // battery warning 5%
-                let _ = Command::new("/usr/bin/notify-send").arg("Battery Warning 5%").arg("Shuts down at 3%\nSAVE WORK NOW").spawn();
-                warning_5 = true;
-            } 
             if status != "Discharging" { // prevents losing the warnings if you replug and let the computer drain again
+                warning_15 = false;
                 warning_10 = false;
-                warning_5 = false;
             }
-
-            // Here is where the magic happens
-            if capacity_int <= 3 && status == "Discharging" && !shutting_down { 
-                shutting_down = true;
-                let _ = Command::new("/usr/bin/systemctl").arg("poweroff").spawn();
-             } 
     } 
 }

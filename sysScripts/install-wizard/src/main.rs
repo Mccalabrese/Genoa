@@ -593,7 +593,6 @@ fn configure_system() {
     let logind_conf = "/etc/systemd/logind.conf";
     run_cmd("sudo", &["sed", "-i", "s/#KillUserProcesses=no/KillUserProcesses=yes/", logind_conf]);
     run_cmd("sudo", &["sed", "-i", "s/KillUserProcesses=no/KillUserProcesses=yes/", logind_conf]);
-
     println!("    🔧 Configuring Greetd...");
     let greetd_config = r#"
 [terminal]
@@ -1354,6 +1353,8 @@ fn get_ignored_packages() -> Vec<String> {
 fn setup_battery_daemon() {
     println!("   🔋 Configuring Battery Safety Daemon...");
     
+    configure_upower();
+
     let home = std::env::var("HOME").expect("HOME environment variable not set");
     let systemd_user_dir = std::path::Path::new(&home).join(".config/systemd/user");
     let service_dest = systemd_user_dir.join("battery-daemon.service");
@@ -1383,8 +1384,42 @@ fn setup_battery_daemon() {
         .status();
     
     println!("   ✅ Battery Daemon ready.");
-
 }
+
+fn configure_upower() {
+    let _ = Command::new("sudo").args(["pacman", "-S", "--needed", "--noconfirm", "upower"]).status();
+    println!("🔋 Enforcing UPower Critical Shutdown at 5%...");
+    let upower_conf = "/etc/UPower/UPower.conf";
+
+    let file_content = match fs::read_to_string(upower_conf) {
+        Ok(content) => content,
+        Err(_) => {
+            println!("⚠️ Could not read UPower.conf. Is upower installed?");
+            return;
+        }
+    };
+    let mut upower_file_rebuild = String::new();
+
+    for line in file_content.lines() {
+        if line.replace("#", "").trim().starts_with("PercentageAction=") {
+            upower_file_rebuild.push_str("PercentageAction=5.0");
+            upower_file_rebuild.push('\n');
+        } else if line.replace("#", "").trim().starts_with("CriticalPowerAction=") {
+            upower_file_rebuild.push_str("CriticalPowerAction=PowerOff");
+            upower_file_rebuild.push('\n');
+        } else {
+            upower_file_rebuild.push_str(line);
+            upower_file_rebuild.push('\n');
+        }
+    }
+    let temp_upower_file = "/tmp/UPower.conf.new";
+    let _ = fs::write(temp_upower_file, upower_file_rebuild);
+    let _ = Command::new("sudo").args(["mv", temp_upower_file, upower_conf]).status();
+    let _ = Command::new("sudo").args(["systemctl", "restart", "upower.service"]).status();
+
+    println!("✅ UPower configuration applied.");
+}
+
 fn print_logo() {
 println!(r#"
                                                                                                     
