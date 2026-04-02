@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::io::{Write, Error};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
@@ -220,7 +220,7 @@ fn load_packages_from_file(filename: &str) -> std::io::Result<Vec<String>> {
     println!("   ✅ Loaded package list from '{}'.", filename);
     Ok(content
         .lines()
-        .map(str::trim())
+        .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(String::from)
         .collect::<Vec<String>>())
