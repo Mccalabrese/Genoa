@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::io::Write;
+use std::io::{Write, Error};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
@@ -132,7 +132,17 @@ fn main() {
     
     // 1. Sync Standard & AUR Packages
     println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
-    let mut common_pkgs = load_packages_from_file("pkglist.txt");
+    let mut common_pkgs = match load_packages_from_file("pkglist.txt") {
+        Ok(pkgs) => pkgs,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("   ⚠️  pkglist.txt not found. Skipping package installation.");
+            Vec::new()
+        },
+        Err(e) => {
+            eprintln!("   ❌ Failed to read pkglist.txt: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let ignored_pkgs = get_ignored_packages();
     common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
@@ -202,22 +212,18 @@ fn main() {
 
 /// Reads a package list from a text file (one package per line).
 /// Ignores empty lines and comments starting with '#'.
-fn load_packages_from_file(filename: &str) -> Vec<String> {
+fn load_packages_from_file(filename: &str) -> std::io::Result<Vec<String>> {
     let repo_root = get_repo_root();
     let path = repo_root.join(filename);
-
-    if path.exists() {
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        return content
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .map(|line| line.to_string())
-            .collect();
-    }
     
-    eprintln!("⚠️ Could not find package list at: {}", path.display());
-    vec![]
+    let content = fs::read_to_string(&path)?;
+    println!("   ✅ Loaded package list from '{}'.", filename);
+    Ok(content
+        .lines()
+        .map(str::trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(String::from)
+        .collect::<Vec<String>>())
 }
 /// Parses `lspci` output to identify GPU vendor IDs.
 /// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
