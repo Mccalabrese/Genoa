@@ -228,10 +228,10 @@ fn load_packages_from_file(filename: &str) -> std::io::Result<Vec<String>> {
 /// Parses `lspci` output to identify GPU vendor IDs.
 /// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
 fn detect_gpu() -> GpuVendor {
-    let entries = std::fs::read_dir("/sys/bus/pci/devices").unwrap_or_else(|_| {
-        eprintln!("❌ Failed to read PCI devices.");
-        std::process::exit(1);
-    });
+    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        eprintln!("⚠️ Failed to read PCI devices. Defaulting to Unknown");
+        return GpuVendor::Unknown;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let class_path = path.join("class");
@@ -257,30 +257,25 @@ fn detect_gpu() -> GpuVendor {
 /// Scans /sys/class/drm to find the integrated GPU (Intel or AMD).
 /// Returns a tuple: (Card Path, Vendor Type "intel"|"amd")
 fn find_igpu() -> Option<(String, String)> {
-    let drm_dir = Path::new("/sys/class/drm");
-    
-    if let Ok(entries) = fs::read_dir(drm_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_name = path.file_name().unwrap().to_str().unwrap();
-
-            // We only care about "card0", "card1", etc. (Not renderD128)
-            if file_name.starts_with("card") && !file_name.contains("-") {
-                // Read the vendor ID
-                let vendor_path = path.join("device/vendor");
-                if let Ok(vendor_hex) = fs::read_to_string(&vendor_path) {
-                    let vendor = vendor_hex.trim(); // e.g. "0x8086"
-
-                    // Check for Intel (0x8086)
-                    if vendor == "0x8086" {
-                        return Some((format!("/dev/dri/{}", file_name), "intel".to_string()));
-                    }
-                    // Check for AMD (0x1002)
-                    if vendor == "0x1002" {
-                        return Some((format!("/dev/dri/{}", file_name), "amd".to_string()));
-                    }
-                }
-            }
+    let entries = std::fs::read_dir("/sys/class/drm").ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue; };
+        if !name.starts_with("card") || name.contains("-") { continue; } // We only care about card* entries and want to ignore cables
+        let device_path = path.join("device");
+        let vendor_path = path.join("device/vendor");
+        let Ok(symlink_target) = fs::read_link(&device_path) else {
+            continue;
+        };
+        let Some(link_str) = symlink_target.to_str() else { continue; };
+        if !link_str.contains("0000:00:") { continue; } // iGPU's addresses only
+        let Ok(vendor_hex) = fs::read_to_string(&vendor_path) else {
+            continue;
+        };
+        match vendor_hex.trim() {
+            "0x8086" => return Some((format!("/dev/dri/{}", name), "intel".to_string())),
+            "0x1002" => return Some((format!("/dev/dri/{}", name), "amd".to_string())),
+            _ => continue,
         }
     }
     None
