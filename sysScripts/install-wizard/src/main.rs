@@ -228,23 +228,30 @@ fn load_packages_from_file(filename: &str) -> std::io::Result<Vec<String>> {
 /// Parses `lspci` output to identify GPU vendor IDs.
 /// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
 fn detect_gpu() -> GpuVendor {
-    let output = Command::new("lspci")
-        .arg("-n") //Numeric ID's, string parsing maybe isn't reliable according to the Goog.
-        .output();
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            if stdout.contains("10de:") { return GpuVendor::Nvidia; }
-            if stdout.contains("1002:") { return GpuVendor::Amd; }
-            if stdout.contains("8086:") { return GpuVendor::Intel; }
-            GpuVendor::Unknown
-        },
-        Err(_) => {
-            println!("   ⚠️  lspci failed. Skipping auto-detection.");
-            GpuVendor::Unknown
+    let entries = std::fs::read_dir("/sys/bus/pci/devices").unwrap_or_else(|_| {
+        eprintln!("❌ Failed to read PCI devices.");
+        std::process::exit(1);
+    });
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let class_path = path.join("class");
+        let vendor_path = path.join("vendor");
+        let Ok(class_hex) = fs::read_to_string(&class_path) else {
+            continue;
+        };
+        let Ok(vendor_hex) = fs::read_to_string(&vendor_path) else {
+            continue;
+        };
+        if class_hex.trim() == "0x030000" || class_hex.trim() == "0x038000" { // VGA Controller
+            match vendor_hex.trim() {
+                "0x10de" => return GpuVendor::Nvidia,
+                "0x1002" => return GpuVendor::Amd,
+                "0x8086" => return GpuVendor::Intel,
+                _ => continue,
+            }
         }
     }
+    GpuVendor::Unknown
 }
 
 /// Scans /sys/class/drm to find the integrated GPU (Intel or AMD).
