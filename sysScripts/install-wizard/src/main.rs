@@ -24,10 +24,24 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
+const TURING_IDS: &[&str] = &[
+    "0x1e02", "0x1e04", "0x1e07", "0x1e30", // Titan RTX, 2080 Ti, Quadro...
+    "0x1f02", "0x1f06", "0x1f08", "0x1f82", // 2070, 2060, 1650 (TU106)...
+    "0x2182", "0x2184", "0x2187", "0x2188", // 1660 Ti, 1660, 1650 Super, 1650...
+    "0x2191", "0x21d1", // GTX 1650 Mobile variants..."0x1e02", "0x1e04", "0x1e07", "0x1e30", 
+];
+
+
 // --- Enums for Hardware Detection ---
 #[derive(Debug, PartialEq)]
+enum NvidiaArch {
+    Turing,
+    Modern,
+}
+
+#[derive(Debug, PartialEq)]
 enum GpuVendor {
-    Nvidia,
+    Nvidia(NvidiaArch),
     Amd,
     Intel,
     Unknown,
@@ -92,10 +106,13 @@ fn main() {
             println!("\n{}", "🔍 Detecting GPU Hardware & Installing Base Drivers...".blue().bold());
             let gpu = detect_gpu();
             match gpu {
-                GpuVendor::Nvidia => {
-                    println!("   👉 NVIDIA Detected.");
-                    if is_turing_gpu() { install_nvidia_legacy_580(); } 
-                    else { install_pacman_packages(NVIDIA_PACKAGES); }
+                GpuVendor::Nvidia(NvidiaArch::Turing) => {
+                    println!("   👉 NVIDIA Turing Detected (GTX 16xx / RTX 20xx).");
+                    install_nvidia_legacy_580();
+                },
+                GpuVendor::Nvidia(NvidiaArch::Modern) => {
+                    println!("   👉 Modern NVIDIA Detected (RTX 30xx/40xx).");
+                    install_pacman_packages(NVIDIA_PACKAGES);
                 },
                 GpuVendor::Amd => {
                     println!("   👉 AMD Detected.");
@@ -173,15 +190,17 @@ fn main() {
     optimize_pacman_config(); 
 
     // 3. Hardware Enforcement
-    let current_gpu = detect_gpu();
-    let is_nvidia = current_gpu == GpuVendor::Nvidia;
-    
-    if is_nvidia {
-        if is_turing_gpu() {
+    let current_gpu = detect_gpu(); 
+
+    let is_nvidia = if let GpuVendor::Nvidia(arch) = current_gpu {
+        if arch == NvidiaArch::Turing {
             enforce_turing_kernel(); // Nuke mainline, install LTS
         }
-        apply_nvidia_configs(); 
-    }
+        apply_nvidia_configs(&arch); 
+        true
+    } else {
+        false
+    };
 
     enforce_session_order(is_nvidia);
 
@@ -242,9 +261,18 @@ fn detect_gpu() -> GpuVendor {
         let Ok(vendor_hex) = fs::read_to_string(&vendor_path) else {
             continue;
         };
+        let Ok(device_hex) = fs::read_to_string(path.join("device")) else {
+            continue;
+        };
         if class_hex.trim() == "0x030000" || class_hex.trim() == "0x038000" { // VGA Controller
             match vendor_hex.trim() {
-                "0x10de" => return GpuVendor::Nvidia,
+                "0x10de" => {
+                    let dev = device_hex.trim();
+                    if TURING_IDS.contains(&dev) || dev.starts_with("0x1e") || dev.starts_with("0x1f") || dev.starts_with("0x21") {
+                        return GpuVendor::Nvidia(NvidiaArch::Turing);
+                    }
+                    return GpuVendor::Nvidia(NvidiaArch::Modern);
+                },
                 "0x1002" => return GpuVendor::Amd,
                 "0x8086" => return GpuVendor::Intel,
                 _ => continue,
@@ -279,28 +307,6 @@ fn find_igpu() -> Option<(String, String)> {
         }
     }
     None
-}
-
-/// checks lspci to see if the card is Turing architecture (GTX 16xx / RTX 20xx)
-/// These cards require the 580 driver to sleep correctly.
-fn is_turing_gpu() -> bool {
-    let output = Command::new("lspci").arg("-v").output();
-    
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            // Check for specific Turing identifiers
-            // 1650, 1660, 2060, 2070, 2080 (and Super/Ti variants)
-            let is_16_series = stdout.contains("GeForce GTX 16");
-            let is_20_series = stdout.contains("GeForce RTX 20");
-            
-            if is_16_series || is_20_series {
-                return true;
-            }
-            false
-        },
-        Err(_) => false,
-    }
 }
 
 /// Installs the specific 580.119.02 driver from Arch Archive and locks it.
@@ -670,10 +676,10 @@ fn optimize_pacman_config() {
 /// 
 /// Security Note: Uses a secure temp file pattern for writing to /etc/.
 /// NOW SMART: Differentiates between Turing (Legacy) and Modern (Ampere/Ada) cards.
-fn apply_nvidia_configs() {
+fn apply_nvidia_configs(arch: &NvidiaArch) {
     println!("    Applying Nvidia Configs...");
 
-    let is_turing = is_turing_gpu();
+    let is_turing = *arch == NvidiaArch::Turing;
     
     if is_turing {
         println!("    ℹ️  Configuring for Turing Architecture (GTX 16xx / RTX 20xx)...");
@@ -683,12 +689,15 @@ fn apply_nvidia_configs() {
 
     // Helper closure: Write to local dir (safe) then install
     let install_securely = |content: &str, dest: &str| {
-        let filename = Path::new(dest).file_name().unwrap().to_str().unwrap();
+        let Some(filename) = Path::new(dest).file_name().and_then(|n| n.to_str()) else {
+            eprintln!("❌ Invalid destination path: {}", dest);
+            return;
+        };
         let local_tmp = format!("./{}", filename);
 
         if let Err(e) = fs::write(&local_tmp, content) {
             eprintln!("❌ Failed to write local file {}: {}", local_tmp, e);
-            std::process::exit(1);
+            return;
         }
 
         // Use 'install' to copy with root:root ownership and 644 permissions
@@ -740,17 +749,23 @@ fn apply_nvidia_configs() {
 
     if !content.contains("nvidia_drm.modeset=1") {
         println!("    👉 Adding nvidia_drm.modeset=1 to GRUB...");
-        let status = Command::new("sudo")
+        let result = Command::new("sudo")
             .args([
                 "sed", "-i",
                 "s/GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*/& nvidia_drm.modeset=1/",
                 grub_path
             ])
-            .status()
-            .expect("Failed to patch GRUB");
-
-        if !status.success() {
-             println!("    ⚠️  Failed to patch GRUB. Please manually add nvidia_drm.modeset=1");
+            .status();
+        match result {
+            Ok(status) if status.success() => {
+                println!("    ✅ GRUB configured for NVIDIA modeset.");
+            },
+            Ok(status) => {
+                println!("    ⚠️  Failed to patch GRUB (exit code: {}. Please manually add nvidia_drm.modeset=1)",status);
+            },
+            Err(e) => {
+                eprintln!("    ❌ Failed to run sed for GRUB configuration: {}", e);
+            }
         }
     }
 
