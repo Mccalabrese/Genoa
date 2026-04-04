@@ -156,11 +156,17 @@ fn main() {
                 }
                 GpuVendor::Nvidia(NvidiaArch::Modern) => {
                     println!("   👉 Modern NVIDIA Detected (RTX 30xx/40xx).");
-                    install_pacman_packages(NVIDIA_PACKAGES);
+                    if let Err(e) = install_pacman_packages(NVIDIA_PACKAGES) {
+                        eprintln!("   ❌ Failed to install NVIDIA drivers: {}", e);
+                        std::process::exit(1);
+                    }
                 }
                 GpuVendor::Amd => {
                     println!("   👉 AMD Detected.");
-                    install_pacman_packages(AMD_PACKAGES);
+                    if let Err(e) = install_pacman_packages(AMD_PACKAGES) {
+                        eprintln!("   ❌ Failed to install AMD drivers: {}", e);
+                        std::process::exit(1);
+                    }
                 }
                 GpuVendor::Intel => println!("   👉 Intel Detected (Drivers in common)."),
                 GpuVendor::Unknown => println!("   ⚠️  No dedicated GPU detected."),
@@ -231,7 +237,9 @@ fn main() {
 
     if !AUR_PACKAGES.is_empty() {
         println!("\n{}", "📦 Syncing AUR Packages...".blue().bold());
-        install_aur_packages();
+        if let Err(e) = install_aur_packages() {
+            eprintln!("   ❌ Failed to install AUR packages: {}", e);
+        };
     }
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
@@ -561,7 +569,8 @@ exec sway
 fn setup_librewolf() -> Result<(), std::io::Error> {
     println!("   🐺 Configuring LibreWolf for Human Beings...");
 
-    let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
     let wolf_dir = home.join(".librewolf");
     let override_file = wolf_dir.join("librewolf.overrides.cfg");
 
@@ -604,67 +613,65 @@ fn install_pacman_packages(packages: &[&str]) -> Result<(), std::io::Error> {
     }
     let mut args = vec!["-S", "--needed", "--noconfirm"];
     args.extend(packages);
-    let status = Command::new("sudo")
-        .arg("pacman")
-        .args(&args)
-        .status()?;
+    let status = Command::new("sudo").arg("pacman").args(&args).status()?;
     if !status.success() {
-        eprintln!("{}", format!("❌ Failed to install packages: {}", packages.join(", ")).red());
+        eprintln!(
+            "{}",
+            format!("❌ Failed to install packages: {}", packages.join(", ")).red()
+        );
         return Err(std::io::Error::other("Failed to install packages"));
     }
     println!("   ✅ Installed packages: {}", packages.join(", "));
     Ok(())
 }
+
 /// Bootstraps 'yay' from the AUR git repo if not present.
 /// This allows the script to run on a truly clean Arch install.
-fn install_aur_packages() {
-    let yay_check = Command::new("which").arg("yay").output();
-
-    if yay_check.is_err() || !yay_check.unwrap().status.success() {
+fn install_aur_packages() -> Result<(), std::io::Error> {
+    if !Command::new("which")
+        .arg("yay")
+        .status()
+        .is_ok_and(|s| s.success())
+    {
         println!("   ⬇️  Bootstrapping 'yay'...");
-        let home = dirs::home_dir().unwrap_or_else(|| {
-            eprintln!("⚠️ Could not determine home directory. Using /tmp as fallback.");
-            PathBuf::from("/tmp")
-        });
+        let home = dirs::home_dir()
+            .ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
         let clone_path = home.join("yay-clone");
 
         if clone_path.exists() {
             let _ = fs::remove_dir_all(&clone_path);
         }
 
-        let _ = Command::new("git")
-            .args([
-                "clone",
-                "https://aur.archlinux.org/yay.git",
-                clone_path.to_str().unwrap(),
-            ])
-            .status();
+        Command::new("git")
+            .arg("clone")
+            .arg("https://aur.archlinux.org/yay.git")
+            .arg(&clone_path)
+            .status()?;
+
         let status = Command::new("makepkg")
             .arg("-si")
             .arg("--noconfirm")
             .current_dir(&clone_path)
-            .status();
+            .status()?;
 
-        if status.is_err() || !status.unwrap().success() {
-            println!("{}", "❌ Failed to bootstrap yay.".red());
-            return;
+        fs::remove_dir_all(&clone_path)?;
+
+        if !status.success() {
+            eprintln!("{}", "❌ Failed to install yay from AUR.".red());
+            return Err(std::io::Error::other("Failed to install yay"));
         }
-        let _ = fs::remove_dir_all(&clone_path);
     }
 
     let mut args = vec!["-S", "--needed", "--noconfirm"];
     args.extend(AUR_PACKAGES);
-    let status = Command::new("yay")
-        .args(&args)
-        .status()
-        .unwrap_or_else(|_| {
-            eprintln!("❌ Failed to run yay");
-            std::process::exit(1);
-        });
+    let status = Command::new("yay").args(&args).status()?;
+
     if !status.success() {
         eprintln!("{}", "⚠️  AUR Warning.".yellow());
     }
+    Ok(())
 }
+
 /// Configures critical system services.
 /// 1. Disables systemd-resolved (we use Cloudflared/Dnsmasq).
 /// 2. Configures `greetd` (tuigreet) as the display manager.
