@@ -312,6 +312,7 @@ fn main() {
         );
     }
 }
+
 // --- Helper functions ---
 
 /// Reads a package list from a text file (one package per line).
@@ -329,6 +330,7 @@ fn load_packages_from_file(filename: &str) -> std::io::Result<Vec<String>> {
         .map(String::from)
         .collect::<Vec<String>>())
 }
+
 /// Parses `lspci` output to identify GPU vendor IDs.
 /// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
 fn detect_gpu() -> GpuVendor {
@@ -923,11 +925,28 @@ vt = 1
 command = "tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
 user = "greeter"
 "#;
-    fs::write("./greetd_config.toml", greetd_config)?;
-    run_cmd(
-        "sudo",
-        &["mv", "./greetd_config.toml", "/etc/greetd/config.toml"],
-    )?;
+    tempfile::NamedTempFile::new()
+        .and_then(|mut temp_file| {
+            temp_file.write_all(greetd_config.as_bytes())?;
+            Command::new("sudo")
+                .arg("install")
+                .arg("-m")
+                .arg("644")
+                .arg("-o")
+                .arg("root")
+                .arg("-g")
+                .arg("root")
+                .arg(temp_file.path())
+                .arg("/etc/greetd/config.toml")
+                .status()
+        })
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("Failed to install greetd config"))
+            }
+        })?;
     Command::new("sudo")
         .args(["systemctl", "disable", "gdm", "sddm", "lightdm"])
         .status()?;
