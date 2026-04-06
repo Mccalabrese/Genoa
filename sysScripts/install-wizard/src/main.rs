@@ -295,7 +295,9 @@ fn main() {
     enforce_session_order(is_nvidia);
 
     // 4. Check or install battery-daemon
-    setup_battery_daemon();
+    if let Err(e) = setup_battery_daemon(&home) {
+        eprintln!("   ❌ Failed to set up battery-daemon: {}", e);
+    }
 
     // 5. Finalize
     if !refresh_mode {
@@ -1718,38 +1720,104 @@ fn get_ignored_packages() -> Vec<String> {
 }
 // Installs the battery life warning and exectes systemctl poweroff to protect battery
 /// Installs the battery life warning and exectes systemctl poweroff to protect battery
-fn setup_battery_daemon() {
+fn setup_battery_daemon(home: &Path) -> Result<(), std::io::Error> {
     println!("   🔋 Configuring Battery Safety Daemon...");
 
-    let home = std::env::var("HOME").expect("HOME environment variable not set");
-    let systemd_user_dir = std::path::Path::new(&home).join(".config/systemd/user");
+    configure_upower()?;
+
+    let systemd_user_dir = home.join(".config/systemd/user");
     let service_dest = systemd_user_dir.join("battery-daemon.service");
 
-    if service_dest.exists() {
-        println!("   ✅ Battery daemon already configured. Skipping systemd setup.");
-        return;
-    }
-    println!("   🔋 Setting up Battery Safety Daemon for the first time...");
+    println!("   🔋 Setting up Battery Safety Daemon...");
 
     // Make sure the ~/.config/systemd/user/ folder actually exists
-    let _ = std::fs::create_dir_all(&systemd_user_dir);
-
+    std::fs::create_dir_all(&systemd_user_dir)?;
     let service_content = include_str!("../../battery-daemon/battery-daemon.service");
+    let existing_content = std::fs::read_to_string(&service_dest).unwrap_or_default();
 
-    if let Err(e) = std::fs::write(&service_dest, service_content) {
-        eprintln!("   ⚠️ Failed to write battery-daemon.service: {}", e);
-        return;
+    if existing_content != service_content {
+        println!("   ✅ Battery daemon already configured. Skipping systemd setup.");
+
+        std::fs::write(&service_dest, service_content)?;
+
+        let status = std::process::Command::new("systemctl")
+            .arg("--user")
+            .arg("daemon-reload")
+            .status()?;
+        if !status.success() {
+            eprintln!("   ❌ Failed to reload systemd daemon for battery service.");
+            return Err(std::io::Error::other("Failed to reload systemd daemon"));
+        }
+    } else {
+        println!("   ✅ Battery daemon already configured. Skipping systemd setup.");
+    }
+    let status = std::process::Command::new("systemctl")
+        .arg("--user")
+        .arg("enable")
+        .arg("--now")
+        .arg("battery-daemon.service")
+        .status()?;
+    if !status.success() {
+        eprintln!("   ❌ Failed to enable/start battery daemon service.");
+        return Err(std::io::Error::other(
+            "Failed to enable/start battery daemon",
+        ));
     }
 
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
-
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", "battery-daemon.service"])
-        .status();
-
     println!("   ✅ Battery Daemon ready.");
+
+    Ok(())
+}
+
+fn configure_upower() -> Result<(), std::io::Error> {
+    println!("🔋 Enforcing UPower Critical Shutdown at 5%...");
+
+    let upower_conf = "/etc/UPower/UPower.conf";
+    let file_content = fs::read_to_string(upower_conf)?;
+    let mut needs_update = false;
+    let mut lines: Vec<String> = file_content.lines().map(|s| s.to_string()).collect();
+
+    for line in &mut lines {
+        let normalized = line.trim_start().trim_start_matches('#').trim_start();
+        if normalized.starts_with("PercentageAction=") && !line.starts_with("PercentageAction=5.0")
+        {
+            needs_update = true;
+            *line = "PercentageAction=5.0".to_string();
+        } else if normalized.starts_with("CriticalPowerAction=")
+            && !line.starts_with("CriticalPowerAction=PowerOff")
+        {
+            needs_update = true;
+            *line = "CriticalPowerAction=PowerOff".to_string();
+        }
+    }
+    if !needs_update {
+        println!("⚡ UPower already configured for critical shutdown. Skipping.");
+        return Ok(());
+    }
+    let mut temp_upower_file = NamedTempFile::new()?;
+    writeln!(temp_upower_file, "{}", lines.join("\n"))?;
+    let status = Command::new("sudo")
+        .arg("install")
+        .arg("-m")
+        .arg("644")
+        .arg("-o")
+        .arg("root")
+        .arg("-g")
+        .arg("root")
+        .arg(temp_upower_file.path())
+        .arg(upower_conf)
+        .status()?;
+    if !status.success() {
+        eprintln!(
+            "{}",
+            "❌ Failed to update script with new poweroff battery features".red()
+        );
+        return Err(std::io::Error::other("Failed to update upower config"));
+    }
+    // restarting to apply changes
+    run_cmd("sudo", &["systemctl", "restart", "upower.service"])?;
+
+    Ok(())
 }
 fn print_logo() {
     println!(
