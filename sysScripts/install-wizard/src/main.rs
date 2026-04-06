@@ -74,6 +74,14 @@ const AUR_PACKAGES: &[&str] = &[
 // ---------- Main Execution -----------------
 // ---------- Main Execution -----------------
 fn main() {
+    let home = dirs::home_dir().unwrap_or_else(|| {
+        eprintln!(
+            "{}",
+            "❌ Critical Error: Could not determine home directory.".red()
+        );
+        std::process::exit(1);
+    });
+
     // 🚨 PREVENT FATAL ROOT EXECUTION 🚨
     // If run with sudo, home_dir() points to /root, which breaks dotfiles and cargo paths.
     if std::env::var("USER").unwrap_or_default() == "root" || std::env::var("SUDO_USER").is_ok() {
@@ -136,16 +144,9 @@ fn main() {
         } else {
             println!("   ✅ No JACK audio server detected. Skipping removal.");
         }
-        //let _ = Command::new("sudo")
-        //    .args(["pacman", "-Rdd", "--noconfirm", "jack2"])
-        //    .stdout(Stdio::null())
-        //    .stderr(Stdio::null())
-        //    .status();
 
         // GPU Drivers Checkpoint & Exit Logic
-        let state_file = dirs::home_dir()
-            .unwrap()
-            .join(".cache/rust_installer_drivers_done");
+        let state_file = home.join(".cache/rust_installer_drivers_done");
 
         if state_file.exists() {
             println!(
@@ -252,7 +253,7 @@ fn main() {
 
     if !AUR_PACKAGES.is_empty() {
         println!("\n{}", "📦 Syncing AUR Packages...".blue().bold());
-        if let Err(e) = install_aur_packages() {
+        if let Err(e) = install_aur_packages(&home) {
             eprintln!("   ❌ Failed to install AUR packages: {}", e);
         };
     }
@@ -265,7 +266,7 @@ fn main() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    build_custom_apps();
+    build_custom_apps(&home);
 
     println!(
         "\n{}",
@@ -298,19 +299,19 @@ fn main() {
     if !refresh_mode {
         // --- FRESH INSTALL ONLY ---
         println!("\n{}", "🔗 Linking Config Files...".blue().bold());
-        link_dotfiles_and_copy_resources();
+        link_dotfiles_and_copy_resources(&home);
 
-        if let Err(e) = configure_system() {
+        if let Err(e) = configure_system(&home) {
             eprintln!("   ❌ Failed to configure system services: {}", e);
             std::process::exit(1);
         }
 
-        if let Err(e) = setup_librewolf() {
+        if let Err(e) = setup_librewolf(&home) {
             eprintln!("   ⚠️ Failed to configure LibreWolf: {}", e);
         }
-        setup_waybar_configs();
-        setup_secrets_and_geoclue();
-        finalize_setup(); // Neovim/Tmux plugins
+        setup_waybar_configs(&home);
+        setup_secrets_and_geoclue(&home);
+        finalize_setup(&home); // Neovim/Tmux plugins
 
         print_logo();
         println!(
@@ -467,7 +468,7 @@ fn install_nvidia_legacy_580() -> Result<(), std::io::Error> {
     let ignore_line = "IgnorePkg = nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings";
 
     // Check if IgnorePkg is already active
-    let content = fs::read_to_string(pacman_conf).unwrap_or_default();
+    let content = fs::read_to_string(pacman_conf)?;
 
     if !content.contains(ignore_line) {
         // We look for the [options] header and insert IgnorePkg below it
@@ -590,11 +591,9 @@ exec sway
     Ok(())
 }
 //-------- Main Steps ------
-fn setup_librewolf() -> Result<(), std::io::Error> {
+fn setup_librewolf(home: &Path) -> Result<(), std::io::Error> {
     println!("   🐺 Configuring LibreWolf for Human Beings...");
 
-    let home = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
     let wolf_dir = home.join(".librewolf");
     let override_file = wolf_dir.join("librewolf.overrides.cfg");
 
@@ -657,15 +656,13 @@ fn install_pacman_packages(packages: &[&str]) -> Result<(), std::io::Error> {
 
 /// Bootstraps 'yay' from the AUR git repo if not present.
 /// This allows the script to run on a truly clean Arch install.
-fn install_aur_packages() -> Result<(), std::io::Error> {
+fn install_aur_packages(home: &Path) -> Result<(), std::io::Error> {
     if !Command::new("which")
         .arg("yay")
         .status()
         .is_ok_and(|s| s.success())
     {
         println!("   ⬇️  Bootstrapping 'yay'...");
-        let home = dirs::home_dir()
-            .ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
         let clone_path = home.join("yay-clone");
 
         if clone_path.exists() {
@@ -706,7 +703,7 @@ fn install_aur_packages() -> Result<(), std::io::Error> {
 /// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, setting up the session environment, and
 /// configuring logind and greetd. This function is idempotent and can be safely run multiple times
 /// without causing issues.
-fn configure_system() -> Result<(), std::io::Error> {
+fn configure_system(home: &Path) -> Result<(), std::io::Error> {
     sanitize_mkinitcpio()?;
     run_cmd("sudo", &["systemctl", "enable", "geoclue.service"])?;
     run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"])?;
@@ -718,8 +715,6 @@ fn configure_system() -> Result<(), std::io::Error> {
 
     // --- ENVIRONMENT & LOGIND ---
     println!("    🔧 Configuring Session Environment (PATH)...");
-    let home = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
     let env_dir = home.join(".config/environment.d");
     let env_file = env_dir.join("99-cargo-path.conf");
 
@@ -729,7 +724,7 @@ fn configure_system() -> Result<(), std::io::Error> {
 
     configure_logind()?;
     configure_greetd()?;
-    configure_shell()?;
+    configure_shell(home)?;
     Ok(())
 }
 
@@ -862,7 +857,7 @@ fn configure_dns() -> Result<(), std::io::Error> {
 
 ///Configures the user's shell to Zsh and sets up Tmux Plugin Manager for enhanced terminal
 ///experience.
-fn configure_shell() -> Result<(), std::io::Error> {
+fn configure_shell(home: &Path) -> Result<(), std::io::Error> {
     println!("    🔧 Setting Shell to Zsh...");
     let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
     Command::new("sudo")
@@ -870,8 +865,6 @@ fn configure_shell() -> Result<(), std::io::Error> {
         .output()?;
 
     println!("    ✨ Setting up Tmux Plugin Manager...");
-    let home = dirs::home_dir()
-        .ok_or_else(|| std::io::Error::other("Could not determine home directory"))?;
     let tpm_dir = home.join(".tmux/plugins/tpm");
     if !tpm_dir.exists() {
         Command::new("git")
@@ -1183,11 +1176,7 @@ fn ensure_nvidia_modules_in_initcpio() {
 }
 ///I templated my waybar configs to allow gitignore of my personalization.
 ///This unpacks them if they don't already exist.
-fn setup_waybar_configs() {
-    let home = dirs::home_dir().unwrap_or_else(|| {
-        eprintln!("⚠️ Could not determine home directory. Using /tmp as fallback.");
-        PathBuf::from("/tmp")
-    });
+fn setup_waybar_configs(home: &Path) {
     let waybar_dir = home.join(".config/waybar");
     let configs = vec!["hyprConfig.jsonc", "swayConfig.jsonc", "niriConfig.jsonc"];
 
@@ -1207,11 +1196,7 @@ fn setup_waybar_configs() {
 }
 /// Interactive wizard to generate the local `config.toml`.
 /// Validates input to prevent injection attacks before writing to system files (like /etc/geoclue).
-fn setup_secrets_and_geoclue() {
-    let home = dirs::home_dir().unwrap_or_else(|| {
-        eprintln!("⚠️ Could not determine home directory. Using /tmp as fallback.");
-        PathBuf::from("/tmp")
-    });
+fn setup_secrets_and_geoclue(home: &Path) {
     let config_dir = home.join(".config/rust-dotfiles");
     let config_path = config_dir.join("config.toml");
 
@@ -1436,12 +1421,12 @@ fn expected_binary_names(app_path: &Path, app_name: &str) -> HashSet<String> {
 
 /// Builds custom Rust apps using native caching.
 /// If source files haven't changed, this takes milliseconds.
-fn build_custom_apps() {
+fn build_custom_apps(home: &Path) {
     let repo_root = get_repo_root();
     let sys_scripts_dir = repo_root.join("sysScripts");
 
     // Ensure ~/.cargo/bin exists
-    let cargo_bin_dir = dirs::home_dir().unwrap().join(".cargo/bin");
+    let cargo_bin_dir = home.join(".cargo/bin");
     let _ = fs::create_dir_all(&cargo_bin_dir);
 
     if let Ok(entries) = fs::read_dir(&sys_scripts_dir) {
@@ -1588,11 +1573,7 @@ fn enforce_session_order(is_nvidia: bool) {
 }
 
 ///Walks through dotfiles in repo and symlinks them to home directory.
-fn link_dotfiles_and_copy_resources() {
-    let home = dirs::home_dir().unwrap_or_else(|| {
-        eprintln!("⚠️ Could not determine home directory. Using /tmp as fallback.");
-        PathBuf::from("/tmp")
-    });
+fn link_dotfiles_and_copy_resources(home: &Path) {
     let repo_root = get_repo_root();
 
     let links = vec![
@@ -1685,12 +1666,11 @@ fn create_symlink(src: &Path, dest: &Path) {
 }
 /// Runs post-install hooks to set up themes and plugins.
 /// This ensures the user doesn't see "broken" visuals on first launch.
-fn finalize_setup() {
+fn finalize_setup(home: &Path) {
     println!(
         "\n{}",
         "✨ Finalizing Setup (Themes & Plugins)...".blue().bold()
     );
-    let home = dirs::home_dir().unwrap();
 
     // 1. Install Tmux Plugins (Fixes the Green Bar)
     let tpm_script = home.join(".tmux/plugins/tpm/bin/install_plugins");
