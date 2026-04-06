@@ -1075,7 +1075,7 @@ fn apply_nvidia_configs(arch: &NvidiaArch) -> Result<(), std::io::Error> {
         }
         //let local_tmp = format!("./{}", filename);
         let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "{}", content)?;
+        temp_file.write_all(content.as_bytes())?;
         // Use 'install' to copy with root:root ownership and 644 permissions
         let status = Command::new("sudo")
             .args([
@@ -1172,7 +1172,7 @@ fn ensure_nvidia_modules_in_initcpio() -> Result<bool, std::io::Error> {
         })
         .collect::<Vec<String>>()
         .join("\n");
-    if new_content == content {
+    if new_content == content.trim_end() {
         return Ok(false); // No changes needed
     }
     let mut temp_file = NamedTempFile::new()?;
