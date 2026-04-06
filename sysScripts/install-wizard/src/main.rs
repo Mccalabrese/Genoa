@@ -513,7 +513,7 @@ fn install_nvidia_legacy_580() -> Result<(), std::io::Error> {
 }
 
 /// Generates the sway-hybrid wrapper script with DYNAMIC paths.
-fn create_sway_hybrid_script() -> Result<(), std::io::Error> {
+fn create_sway_hybrid_script() -> Result<bool, std::io::Error> {
     println!("   🔧 Generating dynamic Sway-Hybrid wrapper...");
 
     // 1. Find the iGPU
@@ -562,11 +562,11 @@ exec sway
 
     //Idempotency Check: If the file already exists with the same content, skip writing
     let wrapper_path = "/usr/local/bin/sway-hybrid";
-    if let Ok(current_content) = fs::read_to_string(wrapper_path)
-        && current_content == script_content
+    if fs::read_to_string(wrapper_path)
+        .is_ok_and(|current_content| current_content == script_content)
     {
         println!("   ✅ Sway-Hybrid script is already up to date. No changes made.");
-        return Ok(());
+        return Ok(false);
     }
 
     // 4. Write to a secure temp file first (prevents partial writes to /usr/local/bin)
@@ -590,7 +590,7 @@ exec sway
         eprintln!("{}", "❌ Failed to install sway-hybrid script.".red());
         return Err(std::io::Error::other("Failed to install sway-hybrid"));
     }
-    Ok(())
+    Ok(true)
 }
 //-------- Main Steps ------
 fn setup_librewolf(home: &Path) -> Result<(), std::io::Error> {
@@ -1057,6 +1057,7 @@ fn apply_nvidia_configs(arch: &NvidiaArch) -> Result<(), std::io::Error> {
     println!("    Applying Nvidia Configs...");
 
     let is_turing = *arch == NvidiaArch::Turing;
+    let mut requires_rebuild = false;
 
     if is_turing {
         println!("    ℹ️  Configuring for Turing Architecture (GTX 16xx / RTX 20xx)...");
@@ -1065,33 +1066,38 @@ fn apply_nvidia_configs(arch: &NvidiaArch) -> Result<(), std::io::Error> {
     }
 
     // Helper closure: Write to local dir (safe) then install
-    let install_securely = |content: &str, dest: &str| {
-        let Some(filename) = Path::new(dest).file_name().and_then(|n| n.to_str()) else {
-            eprintln!("❌ Invalid destination path: {}", dest);
-            return;
-        };
-        let local_tmp = format!("./{}", filename);
-
-        if let Err(e) = fs::write(&local_tmp, content) {
-            eprintln!("❌ Failed to write local file {}: {}", local_tmp, e);
-            return;
+    let install_securely = |content: &str, dest: &str| -> Result<bool, std::io::Error> {
+        if let Ok(existing) = fs::read_to_string(dest)
+            && existing == content
+        {
+            println!("   ✅ {} is already up to date.", dest);
+            return Ok(false); // No changes made
         }
-
+        //let local_tmp = format!("./{}", filename);
+        let mut temp_file = NamedTempFile::new()?;
+        writeln!(temp_file, "{}", content)?;
         // Use 'install' to copy with root:root ownership and 644 permissions
         let status = Command::new("sudo")
             .args([
-                "install", "-m", "644", "-o", "root", "-g", "root", &local_tmp, dest,
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                temp_file.path().to_str().unwrap(),
+                dest,
             ])
-            .status();
-
-        match status {
-            Ok(s) if s.success() => {
-                let _ = fs::remove_file(&local_tmp); // Cleanup
-            }
-            _ => {
-                eprintln!("⚠️  Failed to install {} to {}", local_tmp, dest);
-            }
+            .status()?;
+        if !status.success() {
+            eprintln!("❌ Failed to install file to {}.", dest);
+            return Err(std::io::Error::other(format!(
+                "Failed to install file to {}",
+                dest
+            )));
         }
+        Ok(true) // Changes were made
     };
 
     // --- 1. MODPROBE CONFIGURATION ---
@@ -1100,114 +1106,101 @@ fn apply_nvidia_configs(arch: &NvidiaArch) -> Result<(), std::io::Error> {
     let firmware_val = if is_turing { "0" } else { "1" };
 
     let modprobe_content = format!(
-        "options nvidia NVreg_EnableGpuFirmware={} NVreg_DynamicPowerManagement=0x02 NVreg_EnableS0ixPowerManagement=1\n",
+        "options nvidia NVreg_EnableGpuFirmware={} NVreg_DynamicPowerManagement=0x02 NVreg_EnableS0ixPowerManagement=1\noptions nvidia_drm modeset=1 fbdev=1\n",
         firmware_val
     );
 
-    install_securely(&modprobe_content, "/etc/modprobe.d/nvidia.conf");
+    requires_rebuild |= install_securely(&modprobe_content, "/etc/modprobe.d/nvidia.conf")?;
 
-    install_securely(
+    requires_rebuild |= install_securely(
         "blacklist nvidia_uvm\n",
         "/etc/modprobe.d/99-nvidia-uvm-blacklist.conf",
-    );
+    )?;
 
     // --- 2. UDEV RULES (Common) ---
     // Keeps the dGPU 'auto' suspended when not in use.
-    install_securely(
+    requires_rebuild |= install_securely(
         "SUBSYSTEM==\"pci\", ATTR{vendor}==\"0x10de\", ATTR{power/control}=\"auto\"\n",
         "/etc/udev/rules.d/90-nvidia-pm.rules",
-    );
-
-    // --- 3. GRUB Configuration (Common) ---
-    let grub_path = "/etc/default/grub";
-    println!("    🔧 Checking GRUB for NVIDIA modeset...");
-    let content = fs::read_to_string(grub_path).unwrap_or_default();
-
-    if !content.contains("nvidia_drm.modeset=1") {
-        println!("    👉 Adding nvidia_drm.modeset=1 to GRUB...");
-        let result = Command::new("sudo")
-            .args([
-                "sed",
-                "-i",
-                "s/GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*/& nvidia_drm.modeset=1/",
-                grub_path,
-            ])
-            .status();
-        match result {
-            Ok(status) if status.success() => {
-                println!("    ✅ GRUB configured for NVIDIA modeset.");
-            }
-            Ok(status) => {
-                println!(
-                    "    ⚠️  Failed to patch GRUB (exit code: {}. Please manually add nvidia_drm.modeset=1)",
-                    status
-                );
-            }
-            Err(e) => {
-                eprintln!("    ❌ Failed to run sed for GRUB configuration: {}", e);
-            }
-        }
-    }
+    )?;
 
     // --- 4. MKINITCPIO CONFIGURATION ---
     // Newer cards often need early KMS loading for external display hotplug wakeup.
     // We only enforce this for non-turing, though it doesn't hurt turing.
     if !is_turing {
-        ensure_nvidia_modules_in_initcpio();
+        requires_rebuild |= ensure_nvidia_modules_in_initcpio()?;
     }
 
     create_sway_hybrid_script()?;
 
-    println!("    🏗️  Rebuilding Initramfs & GRUB...");
-    let _ = Command::new("sudo").args(["mkinitcpio", "-P"]).status();
-    let _ = Command::new("sudo")
-        .args(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
-        .status();
+    println!("    🏗️  Rebuilding Initramfs...");
+    if requires_rebuild {
+        Command::new("sudo").args(["mkinitcpio", "-P"]).status()?;
+    } else {
+        println!("    ✅ No changes to initramfs configuration. Skipping rebuild.");
+    }
     Ok(())
 }
 
 /// Helper: Safely adds nvidia modules to mkinitcpio.conf if missing.
 /// Handles the request: "-added nvidia to modules in mkinitcpio"
-fn ensure_nvidia_modules_in_initcpio() {
+fn ensure_nvidia_modules_in_initcpio() -> Result<bool, std::io::Error> {
     println!("    🔧 Checking mkinitcpio modules for Modern NVIDIA support...");
     let config_path = "/etc/mkinitcpio.conf";
+    let content = fs::read_to_string(config_path)?;
 
-    let content = fs::read_to_string(config_path).unwrap_or_default();
+    let new_content = content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("MODULES=") {
+                let start = trimmed.find('(').unwrap_or(0);
+                let end = trimmed.find(')').unwrap_or(trimmed.len());
+                if start < end {
+                    let inner = &trimmed[start + 1..end];
+                    let mut modules: Vec<&str> = inner.split_whitespace().collect();
 
-    // We check if 'nvidia' is already in the file to avoid duplicates
-    if !content.contains("nvidia ") && !content.contains("(nvidia)") {
-        println!("    👉 Injecting nvidia modules into mkinitcpio.conf...");
-
-        // Sed magic:
-        // Finds the line starting with MODULES=(...
-        // Replaces the closing parenthesis ')' with ' nvidia nvidia_modeset nvidia_uvm nvidia_drm)'
-        let status = Command::new("sudo")
-            .args([
-                "sed",
-                "-i",
-                "s/^MODULES=(\\(.*\\))/MODULES=(\\1 nvidia nvidia_modeset nvidia_uvm nvidia_drm)/",
-                config_path,
-            ])
-            .status()
-            .unwrap_or_else(|_| {
-                eprintln!("❌ sed not found");
-                std::process::exit(1);
-            });
-
-        if status.success() {
-            println!("    ✅ Added nvidia modules to Initramfs config.");
-        } else {
-            eprintln!("    ⚠️  Failed to update mkinitcpio.conf.");
-        }
+                    for req in ["nvidia", "nvidia_modeset", "nvidia_uvm", "nvidia_drm"] {
+                        if !modules.contains(&req) {
+                            modules.push(req);
+                        }
+                    }
+                    return format!("MODULES=({})", modules.join(" "));
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    if new_content == content {
+        return Ok(false); // No changes needed
+    }
+    let mut temp_file = NamedTempFile::new()?;
+    writeln!(temp_file, "{}", new_content)?;
+    let status = Command::new("sudo")
+        .arg("install")
+        .arg("-m")
+        .arg("644")
+        .arg("-o")
+        .arg("root")
+        .arg("-g")
+        .arg("root")
+        .arg(temp_file.path())
+        .arg(config_path)
+        .status()?;
+    if status.success() {
+        println!("    ✅ Added nvidia modules to Initramfs config.");
+        Ok(true)
     } else {
-        println!("    ℹ️  Nvidia modules already present in mkinitcpio.");
+        eprintln!("    ⚠️  Failed to update mkinitcpio.conf.");
+        Err(std::io::Error::other("Failed to update mkinitcpio.conf"))
     }
 }
 ///I templated my waybar configs to allow gitignore of my personalization.
 ///This unpacks them if they don't already exist.
 fn setup_waybar_configs(home: &Path) {
     let waybar_dir = home.join(".config/waybar");
-    let configs = vec!["hyprConfig.jsonc", "swayConfig.jsonc", "niriConfig.jsonc"];
+    let configs = vec!["swayConfig.jsonc", "niriConfig.jsonc"];
 
     for config in configs {
         let template = waybar_dir.join(format!("{}.template", config));
