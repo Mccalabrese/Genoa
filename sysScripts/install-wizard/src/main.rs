@@ -520,6 +520,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
             "sudo",
             &["pacman", "-Rdd", "--noconfirm", "lib32-nvidia-utils"],
         ); // Remove 32-bit drivers if present
+        let _ = run_cmd("sudo", &["pacman", "-Rdd", "--noconfirm", "libxnvctrl"]);
         run_cmd(
             "sudo",
             &["pacman", "-S", "--noconfirm", "linux", "linux-headers"],
