@@ -445,7 +445,7 @@ fn find_igpu() -> Option<(String, String)> {
 ///    grub-mkconfig if user is on grub, and force reboot to load the new drivers safely.
 fn setup_turing_gpu() -> Result<(), std::io::Error> {
     let pacman_conf = "/etc/pacman.conf";
-    let mut pac_conf_content = fs::read_to_string(pacman_conf)?;
+    let pac_conf_content = fs::read_to_string(pacman_conf)?;
     let drivers_installed = Command::new("pacman")
         .args(["-Q", "nvidia-580xx-dkms"])
         .stdout(Stdio::null())
@@ -463,12 +463,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
         }
     let mut config_modified = false;
 
-    let target_multilib = "#[multilib]\n#Include = /etc/pacman.d/mirrorlist";
-    let active_multilib = "[multilib]\nInclude = /etc/pacman.d/mirrorlist";
-    if pac_conf_content.contains(target_multilib) {
-        pac_conf_content = pac_conf_content.replace(target_multilib, active_multilib);
-        config_modified = true;
-    }
+    let mut inside_multilib = false;
     let mut lines: Vec<String> = pac_conf_content.lines().map(|s| s.to_string()).collect();
     for line in &mut lines {
         let trimmed = line.trim_start();
@@ -483,12 +478,25 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
                 .replace("nvidia-dkms", "")
                 .replace("nvidia", "");
             config_modified = true;
+            continue;
+        }
+        if trimmed.to_lowercase() == "#[multilib]" {
+            *line = "[multilib]".to_string();
+            config_modified = true;
+            inside_multilib = true;
+        } else if inside_multilib
+            && trimmed.starts_with("#Include")
+            && trimmed.contains("mirrorlist")
+        {
+            *line = "Include = /etc/pacman.d/mirrorlist".to_string();
+            config_modified = true;
+            inside_multilib = false;
         }
     }
     if config_modified {
         let mut temp_file = NamedTempFile::new()?;
         write!(temp_file, "{}", lines.join("\n"))?;
-        let _ = run_cmd(
+        run_cmd(
             "sudo",
             &[
                 "install",
@@ -501,7 +509,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
                 temp_file.path().to_str().unwrap(),
                 pacman_conf,
             ],
-        );
+        )?;
         run_cmd("sudo", &["pacman", "-Sy"])?;
     }
     if is_legacy_nvidia || !drivers_installed {
@@ -526,7 +534,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
             &["pacman", "-S", "--noconfirm", "linux", "linux-headers"],
         )?; // Ensure mainline kernel is installed
     }
-    if is_legacy_nvidia || config_modified || !drivers_installed {
+    if is_legacy_nvidia || !drivers_installed {
         println!("   👉 Installing legacy NVIDIA drivers from AUR...");
         run_cmd(
             "yay",
