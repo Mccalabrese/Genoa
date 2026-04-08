@@ -32,7 +32,6 @@ struct WallpaperManagerConfig {
     wallpaper_dir: String,
     swww_params: Vec<String>,
     swaybg_cache_file: String,
-    hyprland_refresh_script: String,
     cache_file: String,
     rofi_config_path: String,
     rofi_theme_override: String,
