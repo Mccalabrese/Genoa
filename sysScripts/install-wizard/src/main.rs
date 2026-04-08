@@ -488,7 +488,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
     if config_modified {
         let mut temp_file = NamedTempFile::new()?;
         write!(temp_file, "{}", lines.join("\n"))?;
-        run_cmd(
+        let _ = run_cmd(
             "sudo",
             &[
                 "install",
@@ -501,11 +501,11 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
                 temp_file.path().to_str().unwrap(),
                 pacman_conf,
             ],
-        )?;
+        );
         run_cmd("sudo", &["pacman", "-Sy"])?;
     }
     if is_legacy_nvidia || !drivers_installed {
-        run_cmd(
+        let _ = run_cmd(
             "sudo",
             &[
                 "pacman",
@@ -515,7 +515,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
                 "nvidia-utils",
                 "nvidia-settings",
             ],
-        )?;
+        );
         let _ = run_cmd(
             "sudo",
             &["pacman", "-Rdd", "--noconfirm", "lib32-nvidia-utils"],
