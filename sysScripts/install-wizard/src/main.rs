@@ -165,7 +165,7 @@ fn main() {
             match gpu {
                 GpuVendor::Nvidia(NvidiaArch::Turing) => {
                     println!("   👉 NVIDIA Turing Detected (GTX 16xx / RTX 20xx).");
-                    if let Err(e) = install_nvidia_legacy_580() {
+                    if let Err(e) = setup_turing_gpu() {
                         eprintln!("   ❌ Failed to install legacy NVIDIA drivers: {}", e);
                         std::process::exit(1);
                     }
@@ -280,8 +280,11 @@ fn main() {
     let current_gpu = detect_gpu();
 
     let is_nvidia = if let GpuVendor::Nvidia(arch) = current_gpu {
-        if arch == NvidiaArch::Turing {
-            enforce_turing_kernel(); // Nuke mainline, install LTS
+        if arch == NvidiaArch::Turing
+            && let Err(e) = setup_turing_gpu()
+        {
+            eprintln!("   ❌ Failed to set up Turing NVIDIA drivers: {}", e);
+            std::process::exit(1);
         }
         if let Err(e) = apply_nvidia_configs(&arch) {
             eprintln!("   ❌ Failed to apply NVIDIA configurations: {}", e);
@@ -435,84 +438,116 @@ fn find_igpu() -> Option<(String, String)> {
     None
 }
 
-/// Installs the specific 580.119.02 driver from Arch Archive and locks it.
-fn install_nvidia_legacy_580() -> Result<(), std::io::Error> {
-    println!(
-        "\n{}",
-        "🛑 Turing GPU Detected (GTX 16xx / RTX 20xx)"
-            .yellow()
-            .bold()
-    );
-    println!("   The latest NVIDIA drivers (590+) break power management on this card.");
-    println!("   Downgrading to version 580.119.02 for battery life safety...");
-
-    // 1. Install specific versions via URL
-    // We include lib32 variants assuming multilib is enabled (standard for gaming)
-    let packages = vec![
-        "https://archive.archlinux.org/packages/n/nvidia-dkms/nvidia-dkms-580.119.02-1-x86_64.pkg.tar.zst",
-        "https://archive.archlinux.org/packages/n/nvidia-utils/nvidia-utils-580.119.02-1-x86_64.pkg.tar.zst",
-        "https://archive.archlinux.org/packages/n/nvidia-settings/nvidia-settings-580.119.02-1-x86_64.pkg.tar.zst",
-        "https://archive.archlinux.org/packages/l/lib32-nvidia-utils/lib32-nvidia-utils-580.119.02-1-x86_64.pkg.tar.zst",
-    ];
-
-    let mut args = vec!["-U", "--noconfirm"];
-    args.extend(packages);
-
-    let status = Command::new("sudo").arg("pacman").args(&args).status()?;
-
-    if !status.success() {
-        eprintln!(
-            "{}",
-            "❌ Critical Error: Failed to install legacy NVIDIA drivers.".red()
-        );
-        return Err(std::io::Error::other("Failed to install NVIDIA drivers"));
-    }
-
-    // 2. Pin the version in pacman.conf
-    println!("   🔒 Pinning NVIDIA drivers in /etc/pacman.conf...");
+/// 1. Check if user is on old drivers and ignoring updates in their pacman conf.
+/// 2. If they are installingg from scratch, just install AUR nvidia-580-dkms which supports Turing and older cards on newer kernels.
+/// 3. For users on old drivers, halt&warn, execute removing ignore line from pacman conf, pacman
+///    -Rdd old drivers, install mainline kernel, install AUR drivers, run mkinicpio and
+///    grub-mkconfig if user is on grub, and force reboot to load the new drivers safely.
+fn setup_turing_gpu() -> Result<(), std::io::Error> {
     let pacman_conf = "/etc/pacman.conf";
-    let ignore_line = "IgnorePkg = nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings";
+    let mut pac_conf_content = fs::read_to_string(pacman_conf)?;
+    let drivers_installed = Command::new("pacman")
+        .args(["-Q", "nvidia-580xx-dkms"])
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    let is_legacy_nvidia = pac_conf_content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#')
+            && trimmed.starts_with("IgnorePkg")
+            && (trimmed.contains("nvidia") || trimmed.contains("nvidia-dkms"))
+    });
+    if is_legacy_nvidia
+        && !inquire::Confirm::new("⚠️  Legacy NVIDIA configuration detected. We need to migrate you to the new AUR drivers to restore mainline kernel support. This will rebuild your drivers and reboot your computer. Proceed?").with_default(true).prompt().unwrap_or(false) {        
+            std::process::exit(1);
+        }
+    let mut config_modified = false;
 
-    // Check if IgnorePkg is already active
-    let content = fs::read_to_string(pacman_conf)?;
-
-    if !content.contains(ignore_line) {
-        // We look for the [options] header and insert IgnorePkg below it
-        // Or simply uncomment the existing IgnorePkg line if standard arch config
-        // Simplest robust method: Append to [options]
-
-        let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        let opts = lines.iter().position(|line| line.starts_with("[options]"));
-        let patched_content = if let Some(idx) = opts {
-            lines.insert(idx + 1, ignore_line.to_string());
-            lines.join("\n")
-        } else {
-            // If [options] not found, append at the end (unlikely)
-            format!("{}\n\n[options]\n{}", content, ignore_line)
-        };
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "{}", patched_content)?;
-        let status = Command::new("sudo")
-            .arg("install")
-            .arg("-m")
-            .arg("644")
-            .arg("-o")
-            .arg("root")
-            .arg("-g")
-            .arg("root")
-            .arg(temp_file.path())
-            .arg(pacman_conf)
-            .status()?;
-
-        if !status.success() {
-            eprintln!(
-                "{}",
-                "❌ Failed to update pacman.conf with IgnorePkg.".red()
-            );
-            return Err(std::io::Error::other("Failed to update pacman.conf"));
+    let target_multilib = "#[multilib]\n#Include = /etc/pacman.d/mirrorlist";
+    let active_multilib = "[multilib]\nInclude = /etc/pacman.d/mirrorlist";
+    if pac_conf_content.contains(target_multilib) {
+        pac_conf_content = pac_conf_content.replace(target_multilib, active_multilib);
+        config_modified = true;
+    }
+    let mut lines: Vec<String> = pac_conf_content.lines().map(|s| s.to_string()).collect();
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#')
+            && trimmed.starts_with("IgnorePkg")
+            && (trimmed.contains("nvidia") || trimmed.contains("nvidia-dkms"))
+        {
+            *line = line
+                .replace("lib32-nvidia-utils", "")
+                .replace("nvidia-settings", "")
+                .replace("nvidia-utils", "")
+                .replace("nvidia-dkms", "")
+                .replace("nvidia", "");
+            config_modified = true;
         }
     }
-    println!("   ✅ Drivers pinned. System updates will skip NVIDIA.");
+    if config_modified {
+        let mut temp_file = NamedTempFile::new()?;
+        write!(temp_file, "{}", lines.join("\n"))?;
+        run_cmd(
+            "sudo",
+            &[
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                temp_file.path().to_str().unwrap(),
+                pacman_conf,
+            ],
+        )?;
+        run_cmd("sudo", &["pacman", "-Sy"])?;
+    }
+    if is_legacy_nvidia {
+        run_cmd(
+            "sudo",
+            &[
+                "pacman",
+                "-Rdd",
+                "--noconfirm",
+                "nvidia-dkms",
+                "nvidia-utils",
+                "nvidia-settings",
+            ],
+        )?;
+        let _ = run_cmd(
+            "sudo",
+            &["pacman", "-Rdd", "--noconfirm", "lib32-nvidia-utils"],
+        ); // Remove 32-bit drivers if present
+        run_cmd(
+            "sudo",
+            &["pacman", "-S", "--noconfirm", "linux", "linux-headers"],
+        )?; // Ensure mainline kernel is installed
+    }
+    if is_legacy_nvidia || config_modified || !drivers_installed {
+        println!("   👉 Installing legacy NVIDIA drivers from AUR...");
+        run_cmd(
+            "yay",
+            &[
+                "-S",
+                "--noconfirm",
+                "nvidia-580xx-dkms",
+                "nvidia-580xx-utils",
+                "nvidia-580xx-settings",
+                "libva-nvidia-driver",
+            ],
+        )?;
+        let _ = run_cmd("yay", &["-S", "--noconfirm", "lib32-nvidia-580xx-utils"]); // Install 32-bit
+    }
+    if is_legacy_nvidia {
+        run_cmd("sudo", &["mkinitcpio", "-P"])?; // Regenerate initramfs
+        if Path::new("/boot/grub/grub.cfg").exists() {
+            let _ = run_cmd("sudo", &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"]); // Regenerate GRUB config if GRUB is present
+        }
+        let _ = run_cmd("sudo", &["reboot"]); // Reboot to load new drivers safely
+        std::process::exit(0); // In case reboot command fails, we still want to exit to prevent further issues
+    }
     Ok(())
 }
 
@@ -1698,43 +1733,6 @@ fn finalize_setup(home: &Path) {
             Ok(s) if s.success() => println!("   ✅ Neovim Plugins Synced"),
             _ => println!("   ⚠️  Neovim setup skipped (will run on first launch)"),
         }
-    }
-}
-/// Specifically enforces the LTS kernel for Turing GPUs to protect the 580 driver.
-/// It will install linux-lts and actively remove the mainline linux kernel.
-fn enforce_turing_kernel() {
-    println!("   🛡️  Turing GPU: Verifying LTS Kernel environment...");
-
-    // 1. Ensure LTS is installed
-    let _ = Command::new("sudo")
-        .args([
-            "pacman",
-            "-S",
-            "--needed",
-            "--noconfirm",
-            "linux-lts",
-            "linux-lts-headers",
-        ])
-        .status();
-
-    // 2. Check if mainline is installed
-    let check_mainline = Command::new("pacman")
-        .args(["-Q", "linux"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    if check_mainline.is_ok() && check_mainline.unwrap().success() {
-        println!("   🗑️  Turing GPU: Nuking mainline kernel to protect sleep states...");
-        // Remove mainline and skip dependency checks
-        let _ = Command::new("sudo")
-            .args(["pacman", "-Rdd", "--noconfirm", "linux", "linux-headers"])
-            .status();
-
-        println!("   🏗️  Rebuilding GRUB for LTS Kernel...");
-        let _ = Command::new("sudo")
-            .args(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
-            .status();
     }
 }
 /// Reliably finds the root of the dotfiles repository regardless of where the binary is executed.
