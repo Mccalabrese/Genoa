@@ -504,7 +504,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
         )?;
         run_cmd("sudo", &["pacman", "-Sy"])?;
     }
-    if is_legacy_nvidia {
+    if is_legacy_nvidia || !drivers_installed {
         run_cmd(
             "sudo",
             &[
@@ -541,7 +541,7 @@ fn setup_turing_gpu() -> Result<(), std::io::Error> {
         )?;
         let _ = run_cmd("yay", &["-S", "--noconfirm", "lib32-nvidia-580xx-utils"]); // Install 32-bit
     }
-    if is_legacy_nvidia {
+    if is_legacy_nvidia || !drivers_installed {
         run_cmd("sudo", &["mkinitcpio", "-P"])?; // Regenerate initramfs
         if Path::new("/boot/grub/grub.cfg").exists() {
             let _ = run_cmd("sudo", &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"]); // Regenerate GRUB config if GRUB is present
