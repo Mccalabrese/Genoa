@@ -1417,36 +1417,52 @@ fn configure_geoclue() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Helper to parse `cargo metadata` and extract the expected binary names for a given app.
+/// Parses the JSON in a way that explicitly returns the app name if the parsing fails or the
+/// expected fields are missing
 fn expected_binary_names(app_path: &Path, app_name: &str) -> HashSet<String> {
     let mut expected = HashSet::new();
-
-    let metadata = Command::new("cargo")
+    let err_closure = |detail: &str| {
+        eprintln!(
+            "   ⚠️  Warning: {} for {}. Falling back to single binary assumption.",
+            detail, app_name
+        );
+        HashSet::from([app_name.to_string()])
+    };
+    let metadata = match Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(app_path)
-        .output();
-
-    if let Ok(output) = metadata
-        && output.status.success()
-        && let Ok(json) = serde_json::from_slice::<Value>(&output.stdout)
-        && let Some(packages) = json.get("packages").and_then(|v| v.as_array())
+        .output()
     {
-        for package in packages {
-            if let Some(targets) = package.get("targets").and_then(|v| v.as_array()) {
-                for target in targets {
-                    let is_bin = target
-                        .get("kind")
-                        .and_then(|v| v.as_array())
-                        .map(|kinds| kinds.iter().any(|k| k.as_str() == Some("bin")))
-                        .unwrap_or(false);
+        Ok(metadata) if metadata.status.success() => metadata,
+        _ => return err_closure("Failed to run cargo metadata"),
+    };
 
-                    if is_bin && let Some(name) = target.get("name").and_then(|v| v.as_str()) {
-                        expected.insert(name.to_string());
-                    }
+    let json: Value = match serde_json::from_slice(&metadata.stdout) {
+        Ok(json) => json,
+        Err(_) => return err_closure("Failed to parse cargo metadata JSON"),
+    };
+    let packages = match json.get("packages").and_then(|v| v.as_array()) {
+        Some(packages) => packages,
+        None => {
+            return err_closure("Failed to find 'packages' array in cargo metadata");
+        }
+    };
+    for package in packages {
+        if let Some(targets) = package.get("targets").and_then(|v| v.as_array()) {
+            for target in targets {
+                let is_bin = target
+                    .get("kind")
+                    .and_then(|v| v.as_array())
+                    .map(|kinds| kinds.iter().any(|k| k.as_str() == Some("bin")))
+                    .unwrap_or(false);
+
+                if is_bin && let Some(name) = target.get("name").and_then(|v| v.as_str()) {
+                    expected.insert(name.to_string());
                 }
             }
         }
     }
-
     // Safe fallback so single-bin crates still update even if metadata fails.
     if expected.is_empty() {
         expected.insert(app_name.to_string());
