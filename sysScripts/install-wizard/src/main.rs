@@ -372,7 +372,13 @@ fn main() {
             );
         }
     } else {
-        // --- UPDATE MODE ---
+        // --- REFRESH MODE (Updater) ---
+        println!("\n{}", "🔧 Repairing managed symlink targets...".blue().bold());
+        repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
+        if let Err(e) = write_repo_root(&repo_root) {
+            eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+        }
+
         print_logo();
         println!(
             "\n{}",
