@@ -3,19 +3,19 @@
 //! This module builds the GTK layout, connects controls, and coordinates background
 //! polling so command I/O does not block the main loop.
 
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use chrono::{Datelike, Local};
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, Box, Orientation, Align};
+use gtk4::{Align, Application, ApplicationWindow, Box, Orientation};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use serde_json::Value;
-use chrono::{Datelike, Local};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 
-use crate::style;
 use crate::helpers;
 use crate::media;
+use crate::style;
 use crate::sysinfo;
 
 struct SliderSnapshot {
@@ -45,7 +45,7 @@ pub fn build_ui(app: &Application) {
     // Since we rely on the compositor (Sway/Niri) to place the window on the active monitor,
     // we cannot easily query the screen dimensions beforehand.
     // 400px is a safe, usable default for a sidebar.
-    let final_width = 400; 
+    let final_width = 400;
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -61,9 +61,9 @@ pub fn build_ui(app: &Application) {
     // but pass it back to the underlying app when ignored.
     window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
     window.set_layer(Layer::Overlay);
-    
+
     // Monitor Auto-Detection
-    // Passing `None` tells the protocol to assign this window to the monitor 
+    // Passing `None` tells the protocol to assign this window to the monitor
     // containing the active mouse pointer. This solves multi-monitor focus issues natively.
     window.set_monitor(None);
 
@@ -83,13 +83,13 @@ pub fn build_ui(app: &Application) {
     hover_controller.connect_leave(move |_| {
         *is_hovered_leave.borrow_mut() = false;
     });
-    
+
     window.add_controller(hover_controller);
 
     // --- SMART CLOSE LOGIC ---
     let is_hovered_close = is_hovered.clone();
     let launch_time = std::time::Instant::now();
-    
+
     // Track if we ever successfully grabbed focus
     let has_been_active = Rc::new(RefCell::new(false));
     let has_been_active_clone = has_been_active.clone();
@@ -100,25 +100,24 @@ pub fn build_ui(app: &Application) {
             *has_been_active_clone.borrow_mut() = true;
         } else {
             // We LOST focus (or never had it). Should we close?
-            
-            // 1. Startup Grace Period: 
-            // Sway needs more time than Hyprland. Bump to 1500ms.
-            if launch_time.elapsed().as_millis() < 2000 { 
-                return; 
-            }
 
+            // 1. Startup Grace Period:
+            // Sway needs more time than Hyprland. Bump to 1500ms.
+            if launch_time.elapsed().as_millis() < 2000 {
+                return;
+            }
 
             // 3. Hover Guard:
             // If mouse is physically over the window, don't close.
-            if *is_hovered_close.borrow() { 
-                return; 
+            if *is_hovered_close.borrow() {
+                return;
             }
 
             // Marker used by the toggle script to detect a user-close event.
             let _ = std::process::Command::new("touch")
                 .arg("/tmp/sidebar_just_closed")
                 .output();
-            
+
             win.close();
         }
     });
@@ -145,14 +144,14 @@ pub fn build_ui(app: &Application) {
 
     // Row 1: Session Controls (Logout, Reboot, etc.)
     let row_session = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    row_session.set_homogeneous(true);    // Force all buttons to equal width
+    row_session.set_homogeneous(true); // Force all buttons to equal width
     let btn_idle = helpers::make_squared_button("view-conceal-symbolic", "Idle Inhibit");
-    let btn_suspend = helpers::make_squared_button("system-suspend-symbolic", "Suspend");
+    let btn_suspend = helpers::make_squared_button("weather-clear-night-symbolic", "Suspend");
     let btn_lock = helpers::make_squared_button("system-lock-screen-symbolic", "Lock Screen");
     let btn_logout = helpers::make_squared_button("system-log-out-symbolic", "Logout");
-    let btn_restart = helpers::make_squared_button("system-reboot-symbolic", "Reboot");
+    let btn_restart = helpers::make_squared_button("view-refresh-symbolic", "Reboot");
     let btn_power = helpers::make_squared_button("system-shutdown-symbolic", "Power Off");
-    
+
     row_session.append(&btn_idle);
     row_session.append(&btn_suspend);
     row_session.append(&btn_lock);
@@ -166,13 +165,14 @@ pub fn build_ui(app: &Application) {
 
     let btn_radio = helpers::make_icon_button("multimedia-player-symbolic", "Internet Radio");
     // Returns a button AND its badge label so we can update the number later
-    let (btn_update, lbl_update_badge) = helpers::make_badged_button("software-update-available-symbolic", "0", "Update System");
+    let (btn_update, lbl_update_badge) =
+        helpers::make_badged_button("software-update-available-symbolic", "0", "Update System");
     let btn_air = helpers::make_icon_button("airplane-mode-symbolic", "Airplane Mode");
     let btn_dns = helpers::make_icon_button("weather-overcast-symbolic", "Cloudflare DNS");
     let btn_mute = helpers::make_icon_button("audio-volume-muted-symbolic", "Mute Audio");
     let btn_wall = helpers::make_icon_button("image-x-generic-symbolic", "Change Wallpaper");
     let btn_hint = helpers::make_icon_button("emoji-objects-symbolic", "Show Keyhints");
-    
+
     row_toggles.append(&btn_radio);
     row_toggles.append(&btn_wall);
     row_toggles.append(&btn_dns);
@@ -183,8 +183,9 @@ pub fn build_ui(app: &Application) {
 
     // Sliders (Brightness & Volume)
     // We use the helper to create the consistent UI row, but capture the `Scale` object
-    // so we can attach logic to it below.    
-    let (box_brightness, scale_brightness) = helpers::make_slider_row("display-brightness-symbolic");
+    // so we can attach logic to it below.
+    let (box_brightness, scale_brightness) =
+        helpers::make_slider_row("display-brightness-symbolic");
     let (box_volume, scale_volume) = helpers::make_slider_row("audio-volume-high-symbolic");
 
     // --- INTERACTION GUARD ---
@@ -205,10 +206,13 @@ pub fn build_ui(app: &Application) {
     // VOLUME HANDLER
     let last_interaction_v = last_interaction.clone();
     scale_volume.connect_value_changed(move |s| {
-        let val = s.value() / 100.0; 
+        let val = s.value() / 100.0;
         *last_interaction_v.borrow_mut() = std::time::Instant::now();
         let level = val.to_string();
-        helpers::run_command("wpctl", &["set-volume", "@DEFAULT_AUDIO_SINK@", level.as_str()]);
+        helpers::run_command(
+            "wpctl",
+            &["set-volume", "@DEFAULT_AUDIO_SINK@", level.as_str()],
+        );
     });
 
     top_box.append(&row_session);
@@ -232,11 +236,11 @@ pub fn build_ui(app: &Application) {
     // Static System Information (Host, Kernel, Uptime)
     let sys_widget = sysinfo::build();
     middle_box.append(&sys_widget);
-    
+
     // --- ZONE 3: FINANCE TICKER ---
     let finance_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     finance_box.add_css_class("zone");
-    
+
     let finance_label = gtk4::Label::builder()
         .label("Loading Market Data...")
         .use_markup(true)
@@ -277,15 +281,21 @@ pub fn build_ui(app: &Application) {
     // View A: Month Grid
     let month_view_box = gtk4::Box::new(gtk4::Orientation::Vertical, 5);
     month_view_box.set_valign(gtk4::Align::Fill);
-    
+
     // Month Nav Header (< Month >)
     let nav_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     nav_box.set_halign(gtk4::Align::Center);
     nav_box.set_margin_bottom(10);
     nav_box.set_margin_top(10);
 
-    let btn_prev = gtk4::Button::builder().icon_name("go-previous-symbolic").css_classes(vec!["flat".to_string()]).build();
-    let btn_next = gtk4::Button::builder().icon_name("go-next-symbolic").css_classes(vec!["flat".to_string()]).build();
+    let btn_prev = gtk4::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .css_classes(vec!["flat".to_string()])
+        .build();
+    let btn_next = gtk4::Button::builder()
+        .icon_name("go-next-symbolic")
+        .css_classes(vec!["flat".to_string()])
+        .build();
     let label_month = gtk4::Label::builder()
         .css_classes(vec!["calendar-title".to_string()])
         .build();
@@ -316,7 +326,7 @@ pub fn build_ui(app: &Application) {
         while let Some(child) = grid_container_weak.first_child() {
             grid_container_weak.remove(&child);
         }
-        // Build new rows via helper        
+        // Build new rows via helper
         let new_grid = helpers::build_calendar_grid(date.year(), date.month());
         grid_container_weak.append(&new_grid);
     };
@@ -421,9 +431,7 @@ pub fn build_ui(app: &Application) {
         for appt in appointments.into_iter().take(8) {
             let text = format!(
                 "{}  {} ({}m)",
-                appt.time,
-                appt.summary,
-                appt.duration_minutes
+                appt.time, appt.summary, appt.duration_minutes
             );
             let button = gtk4::Button::builder()
                 .label(&text)
@@ -434,7 +442,12 @@ pub fn build_ui(app: &Application) {
 
             let date_copy = date;
             button.connect_clicked(move |_| {
-                let date_arg = format!("{}-{}-{}", date_copy.year(), date_copy.month(), date_copy.day());
+                let date_arg = format!(
+                    "{}-{}-{}",
+                    date_copy.year(),
+                    date_copy.month(),
+                    date_copy.day()
+                );
                 let id_arg = appt.id.to_string();
                 helpers::run_in_ghostty(
                     "calendar-tui",
@@ -476,7 +489,7 @@ pub fn build_ui(app: &Application) {
 
     bottom_box.append(&stack_switcher);
     bottom_box.append(&main_stack);
-    
+
     // Assemble Main Window
     main_box.append(&top_box);
     main_box.append(&middle_box);
@@ -498,7 +511,9 @@ pub fn build_ui(app: &Application) {
 
     // Smart Logout: Detects the active session to run the correct exit command
     btn_logout.connect_clicked(move |_| {
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
         if desktop.contains("niri") {
             helpers::run_command("niri", &["msg", "action", "quit"]);
         } else if desktop.contains("sway") {
@@ -525,10 +540,10 @@ pub fn build_ui(app: &Application) {
     });
 
     // --- Idle Inhibit Persistence ---
-    // Query procps-ng for the state of our idle daemons. 
+    // Query procps-ng for the state of our idle daemons.
     // A suspended process (SIGSTOP) will have a 'T' in its stat column.
     let idle_check = helpers::get_stdout("ps", &["-o", "stat=", "-C", "swayidle,hypridle"]);
-    
+
     // If the process exists and is stopped, visually mark the button active on boot
     if idle_check.contains('T') {
         btn_idle.add_css_class("active");
@@ -567,13 +582,14 @@ pub fn build_ui(app: &Application) {
         glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
             if let Ok(Some(stdout)) = dns_rx.try_recv()
                 && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
-                    && let Some(class) = json.get("class").and_then(|v| v.as_str()) {
-                        if class == "on" {
-                            btn_target.add_css_class("active");
-                        } else {
-                            btn_target.remove_css_class("active");
-                        }
-                    }
+                && let Some(class) = json.get("class").and_then(|v| v.as_str())
+            {
+                if class == "on" {
+                    btn_target.add_css_class("active");
+                } else {
+                    btn_target.remove_css_class("active");
+                }
+            }
 
             attempts += 1;
             if !dns_in_flight.swap(true, Ordering::AcqRel) {
@@ -586,7 +602,11 @@ pub fn build_ui(app: &Application) {
                 });
             }
 
-            if attempts >= 45 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+            if attempts >= 45 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
         });
     });
 
@@ -615,10 +635,11 @@ pub fn build_ui(app: &Application) {
     glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
         if let Ok(stdout) = update_rx.try_recv()
             && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
-                && let Some(text) = json.get("text").and_then(|v| v.as_str()) {
-                     lbl_update_target.set_label(text);
-                     lbl_update_target.set_visible(text != "0");
-                }
+            && let Some(text) = json.get("text").and_then(|v| v.as_str())
+        {
+            lbl_update_target.set_label(text);
+            lbl_update_target.set_visible(text != "0");
+        }
         glib::ControlFlow::Continue
     });
 
@@ -626,16 +647,22 @@ pub fn build_ui(app: &Application) {
     let btn_air_clone = btn_air.clone();
     btn_air.connect_clicked(move |_| {
         helpers::run_home_bin("rfkill-manager", &["--toggle"]);
-        if btn_air_clone.has_css_class("active") { btn_air_clone.remove_css_class("active"); }
-        else { btn_air_clone.add_css_class("active"); }
+        if btn_air_clone.has_css_class("active") {
+            btn_air_clone.remove_css_class("active");
+        } else {
+            btn_air_clone.add_css_class("active");
+        }
     });
 
     // Audio Mute (Optimistic UI)
     let btn_mute_clone = btn_mute.clone();
     btn_mute.connect_clicked(move |_| {
         helpers::run_command("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]);
-        if btn_mute_clone.has_css_class("active") { btn_mute_clone.remove_css_class("active"); }
-        else { btn_mute_clone.add_css_class("active"); }
+        if btn_mute_clone.has_css_class("active") {
+            btn_mute_clone.remove_css_class("active");
+        } else {
+            btn_mute_clone.add_css_class("active");
+        }
     });
 
     // Finance Widget (Background Thread)
@@ -654,22 +681,31 @@ pub fn build_ui(app: &Application) {
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         if let Ok(Some(stdout)) = receiver.try_recv() {
             if let Ok(json) = serde_json::from_slice::<Value>(&stdout)
-                && let Some(text) = json.get("text").and_then(|v| v.as_str()) {
-                    // Manual HTML/Pango parsing to format the grid 
-                    // (The API returns raw HTML spans, we need to insert newlines every 4 items)
-                    let raw_items: Vec<&str> = text.split("</span> ").collect();
-                    let mut grid_text = String::new();
-                    for (i, item) in raw_items.iter().enumerate() {
-                        if item.trim().is_empty() { continue; }
-                        grid_text.push_str(item);
-                        if !item.ends_with("</span>") { grid_text.push_str("</span>"); }
-                        if (i + 1) % 3 == 0 { grid_text.push('\n'); } else { grid_text.push_str("      "); }
+                && let Some(text) = json.get("text").and_then(|v| v.as_str())
+            {
+                // Manual HTML/Pango parsing to format the grid
+                // (The API returns raw HTML spans, we need to insert newlines every 4 items)
+                let raw_items: Vec<&str> = text.split("</span> ").collect();
+                let mut grid_text = String::new();
+                for (i, item) in raw_items.iter().enumerate() {
+                    if item.trim().is_empty() {
+                        continue;
                     }
-                    finance_label_update.set_markup(&grid_text);
-                    if let Some(tt) = json.get("tooltip").and_then(|v| v.as_str()) {
-                        finance_label_update.set_tooltip_markup(Some(tt));
+                    grid_text.push_str(item);
+                    if !item.ends_with("</span>") {
+                        grid_text.push_str("</span>");
+                    }
+                    if (i + 1) % 3 == 0 {
+                        grid_text.push('\n');
+                    } else {
+                        grid_text.push_str("      ");
                     }
                 }
+                finance_label_update.set_markup(&grid_text);
+                if let Some(tt) = json.get("tooltip").and_then(|v| v.as_str()) {
+                    finance_label_update.set_tooltip_markup(Some(tt));
+                }
+            }
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -700,29 +736,41 @@ pub fn build_ui(app: &Application) {
             // Apply DNS State
             if let Some(out) = dns_o
                 && let Ok(json) = serde_json::from_slice::<Value>(&out)
-                    && json.get("class").and_then(|v| v.as_str()) == Some("on") { btn_dns_load.add_css_class("active"); }
+                && json.get("class").and_then(|v| v.as_str()) == Some("on")
+            {
+                btn_dns_load.add_css_class("active");
+            }
             // Apply Airplane State
             if let Some(out) = air_o
-                && String::from_utf8_lossy(&out).contains("Soft blocked: yes") { btn_air_load.add_css_class("active"); }
+                && String::from_utf8_lossy(&out).contains("Soft blocked: yes")
+            {
+                btn_air_load.add_css_class("active");
+            }
             // Apply Mute/Volume State
             if let Some(out) = mute_o {
                 let s = String::from_utf8_lossy(&out);
-                if s.contains("[MUTED]") { btn_mute_load.add_css_class("active"); }
+                if s.contains("[MUTED]") {
+                    btn_mute_load.add_css_class("active");
+                }
                 if let Some(vol_str) = s.split_whitespace().nth(1)
-                    && let Ok(vol) = vol_str.parse::<f64>() { scale_vol_load.set_value(vol * 100.0); }
+                    && let Ok(vol) = vol_str.parse::<f64>()
+                {
+                    scale_vol_load.set_value(vol * 100.0);
+                }
             }
             // Apply Brightness State
             if let Some(out) = bright_o
                 && let Some(p) = String::from_utf8_lossy(&out).split(',').nth(3)
-                     && let Ok(val) = p.replace("%", "").replace("\n", "").parse::<f64>() {
-                         scale_bright_load.set_value(val);
-                     }
+                && let Ok(val) = p.replace("%", "").replace("\n", "").parse::<f64>()
+            {
+                scale_bright_load.set_value(val);
+            }
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
         }
     });
-    
+
     // ================= SLIDER WATCHER =================
     // Watches for EXTERNAL changes (e.g., hardware keys) to update the sliders.
     // Respects the "Interaction Guard" to avoid fighting the user.
@@ -737,13 +785,15 @@ pub fn build_ui(app: &Application) {
     glib::timeout_add_seconds_local(1, move || {
         if let Ok(snapshot) = slider_rx.try_recv() {
             if let Some(sys_val) = snapshot.brightness
-                && (scale_bright_watch.value() - sys_val).abs() > 1.0 {
-                    scale_bright_watch.set_value(sys_val);
-                }
+                && (scale_bright_watch.value() - sys_val).abs() > 1.0
+            {
+                scale_bright_watch.set_value(sys_val);
+            }
             if let Some(sys_val) = snapshot.volume
-                && (scale_vol_watch.value() - sys_val).abs() > 1.0 {
-                    scale_vol_watch.set_value(sys_val);
-                }
+                && (scale_vol_watch.value() - sys_val).abs() > 1.0
+            {
+                scale_vol_watch.set_value(sys_val);
+            }
         }
 
         // Guard: If user touched slider < 3 seconds ago, skip external refresh.
@@ -759,7 +809,7 @@ pub fn build_ui(app: &Application) {
                 let brightness = helpers::get_output("brightnessctl", &["i", "-m"])
                     .as_deref()
                     .and_then(parse_brightness_pct);
-                let volume = helpers::get_output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"]) 
+                let volume = helpers::get_output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])
                     .as_deref()
                     .and_then(parse_volume_pct);
 
