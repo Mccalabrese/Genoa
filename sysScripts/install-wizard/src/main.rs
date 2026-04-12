@@ -417,10 +417,11 @@ fn migrate_legacy_users(home: &Path) {
         // 1. Move the physical folder to the new name
         // (This is safe because this binary is currently running from ~/.cargo/bin/)
         if !new_repo.exists()
-            && let Err(e) = fs::rename(&old_repo, &new_repo) {
-                eprintln!("   ⚠️ Failed to rename repository folder: {}", e);
-                return; // Abort migration, let them safely remain on the old folder for now
-            }
+            && let Err(e) = fs::rename(&old_repo, &new_repo)
+        {
+            eprintln!("   ⚠️ Failed to rename repository folder: {}", e);
+            return; // Abort migration, let them safely remain on the old folder for now
+        }
 
         let active_repo = if new_repo.exists() {
             &new_repo
@@ -463,6 +464,7 @@ fn migrate_legacy_users(home: &Path) {
     }
 }
 
+/// Writes the repository root path to the user's config file for dynamic access by other tools.
 fn write_repo_root(repo_root: &Path) -> Result<(), std::io::Error> {
     let home = dirs::home_dir().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Home directory not found")
@@ -472,60 +474,28 @@ fn write_repo_root(repo_root: &Path) -> Result<(), std::io::Error> {
         .to_str()
         .ok_or_else(|| std::io::Error::other("Invalid repo root path"))?;
     let config_str = fs::read_to_string(&config_path)?;
-    let updated_toml = upsert_repo_root_in_config(&config_str, repo_root_str);
+    let updated_toml = upsert_repo_root_in_config(&config_str, repo_root_str)?;
     if updated_toml != config_str {
         fs::write(&config_path, updated_toml)?;
     }
     Ok(())
 }
 
-fn upsert_repo_root_in_config(content: &str, repo_root: &str) -> String {
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-    let escaped_root = repo_root.replace('\\', "\\\\").replace('"', "\\\"");
-    let root_line = format!("root = \"{}\"", escaped_root);
-
-    if let Some(repo_idx) = lines.iter().position(|l| l.trim() == "[repo]") {
-        let mut section_end = lines.len();
-        for (idx, line) in lines.iter().enumerate().skip(repo_idx + 1) {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                section_end = idx;
-                break;
-            }
+/// will insert or update the `root = "path"` line in the [repo] section of the config.toml content
+/// using toml_edit.
+fn upsert_repo_root_in_config(content: &str, repo_root: &str) -> Result<String, std::io::Error> {
+    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!(
+                "   ❌  Failed to parse config.toml. Please check your config syntax. Error: {}",
+                e
+            );
+            return Err(std::io::Error::other("Failed to parse config.toml"));
         }
-
-        let mut root_idx = None;
-        for (idx, line) in lines
-            .iter()
-            .enumerate()
-            .take(section_end)
-            .skip(repo_idx + 1)
-        {
-            let normalized = line.trim_start().trim_start_matches('#').trim_start();
-            if normalized.starts_with("root") && normalized.contains('=') {
-                root_idx = Some(idx);
-                break;
-            }
-        }
-
-        if let Some(idx) = root_idx {
-            lines[idx] = root_line;
-        } else {
-            lines.insert(repo_idx + 1, root_line);
-        }
-    } else {
-        if !lines.is_empty() && !lines.last().is_some_and(|line| line.trim().is_empty()) {
-            lines.push(String::new());
-        }
-        lines.push("[repo]".to_string());
-        lines.push(root_line);
-    }
-
-    let mut updated = lines.join("\n");
-    if !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated
+    };
+    doc.entry("repo").or_insert(toml_edit::table())["root"] = toml_edit::value(repo_root);
+    Ok(doc.to_string())
 }
 
 /// Reads a package list from a text file (one package per line).
