@@ -72,7 +72,6 @@ const AUR_PACKAGES: &[&str] = &[
 
 const NEW_REPO_DIR: &str = "Genoa";
 const LEGACY_REPO_DIR: &str = "rust-wayland-power";
-const NEW_REPO_REMOTE: &str = "https://github.com/Mccalabrese/Genoa.git";
 // ---------- Main Execution ------_-------
 
 // ---------- Main Execution -----------------
@@ -98,6 +97,9 @@ fn main() {
         eprintln!("The script is designed to safely elevate privileges internally when needed.");
         std::process::exit(1);
     }
+    let previous_repo_root = read_repo_root_from_config(&home);
+    let has_existing_install = home.join(".config/rust-dotfiles/config.toml").exists();
+
     migrate_legacy_users(&home);
 
     let repo_root = resolve_repo_root(&home).unwrap_or_else(|e| {
@@ -280,68 +282,95 @@ fn main() {
         println!("   ⚠️  Failed to build custom Rust apps: {}", e);
     };
 
-    println!(
-        "\n{}",
-        "⚙️  Applying System Configurations...".blue().bold()
-    );
-    if let Err(e) = optimize_pacman_config() {
-        eprintln!("   ❌ Failed to optimize pacman configuration: {}", e);
-    }
-
-    // 3. Hardware Enforcement
-    let current_gpu = detect_gpu();
-
-    let is_nvidia = if let GpuVendor::Nvidia(arch) = current_gpu {
-        if arch == NvidiaArch::Turing
-            && let Err(e) = setup_turing_gpu()
-        {
-            eprintln!("   ❌ Failed to set up Turing NVIDIA drivers: {}", e);
-            std::process::exit(1);
-        }
-        if let Err(e) = apply_nvidia_configs(&arch) {
-            eprintln!("   ❌ Failed to apply NVIDIA configurations: {}", e);
-            std::process::exit(1);
-        }
-        true
+    let update_only_mode = has_existing_install && !refresh_mode;
+    if update_only_mode {
+        println!(
+            "\n{}",
+            "ℹ️  Existing install detected. Limiting this run to pkglist + sysScripts sync."
+                .yellow()
+                .bold()
+        );
     } else {
-        false
-    };
+        println!(
+            "\n{}",
+            "⚙️  Applying System Configurations...".blue().bold()
+        );
+        if let Err(e) = optimize_pacman_config() {
+            eprintln!("   ❌ Failed to optimize pacman configuration: {}", e);
+        }
 
-    enforce_session_order(is_nvidia);
+        // 3. Hardware Enforcement
+        let current_gpu = detect_gpu();
 
-    // 4. Check or install battery-daemon
-    if let Err(e) = setup_battery_daemon(&home) {
-        eprintln!("   ❌ Failed to set up battery-daemon: {}", e);
+        let is_nvidia = if let GpuVendor::Nvidia(arch) = current_gpu {
+            if arch == NvidiaArch::Turing
+                && let Err(e) = setup_turing_gpu()
+            {
+                eprintln!("   ❌ Failed to set up Turing NVIDIA drivers: {}", e);
+                std::process::exit(1);
+            }
+            if let Err(e) = apply_nvidia_configs(&arch) {
+                eprintln!("   ❌ Failed to apply NVIDIA configurations: {}", e);
+                std::process::exit(1);
+            }
+            true
+        } else {
+            false
+        };
+
+        enforce_session_order(is_nvidia);
+
+        // 4. Check or install battery-daemon
+        if let Err(e) = setup_battery_daemon(&home) {
+            eprintln!("   ❌ Failed to set up battery-daemon: {}", e);
+        }
     }
 
     // 5. Finalize
     if !refresh_mode {
-        // --- FRESH INSTALL ONLY ---
-        println!("\n{}", "🔗 Linking Config Files...".blue().bold());
-        link_dotfiles_and_copy_resources(&home, &repo_root);
+        if has_existing_install {
+            // --- UPDATE MODE (safe for personal configs) ---
+            println!("\n{}", "🔧 Repairing managed symlink targets...".blue().bold());
+            repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
+            if let Err(e) = write_repo_root(&repo_root) {
+                eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+            }
 
-        if let Err(e) = configure_system(&home) {
-            eprintln!("   ❌ Failed to configure system services: {}", e);
-            std::process::exit(1);
-        }
+            print_logo();
+            println!(
+                "\n{}",
+                "✅ System Synced. Personal configs preserved; managed symlinks repaired."
+                    .green()
+                    .bold()
+            );
+        } else {
+            // --- FRESH INSTALL ONLY ---
+            println!("\n{}", "🔗 Linking Config Files...".blue().bold());
+            link_dotfiles_and_copy_resources(&home, &repo_root);
 
-        if let Err(e) = setup_librewolf(&home) {
-            eprintln!("   ⚠️ Failed to configure LibreWolf: {}", e);
-        }
-        setup_waybar_configs(&home);
-        if let Err(e) = setup_secrets_and_geoclue(&home) {
-            eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
-        }
-        if let Err(e) = write_repo_root(&repo_root) {
-            eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
-        }
-        finalize_setup(&home); // Neovim/Tmux plugins
+            if let Err(e) = configure_system(&home) {
+                eprintln!("   ❌ Failed to configure system services: {}", e);
+                std::process::exit(1);
+            }
 
-        print_logo();
-        println!(
-            "\n{}",
-            "✅ Installation Complete! Please Reboot.".green().bold()
-        );
+            if let Err(e) = setup_librewolf(&home) {
+                eprintln!("   ⚠️ Failed to configure LibreWolf: {}", e);
+            }
+            setup_waybar_configs(&home);
+            if let Err(e) = setup_secrets_and_geoclue(&home) {
+                eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
+            }
+            if let Err(e) = write_repo_root(&repo_root) {
+                eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+            }
+            finalize_setup(&home); // Neovim/Tmux plugins
+
+            print_logo();
+            println!(
+                "\n{}",
+                "✅ Installation Complete! Please Reboot.".green().bold()
+            );
+        }
     } else {
         // --- UPDATE MODE ---
         print_logo();
@@ -376,11 +405,33 @@ fn migrate_legacy_users(home: &Path) {
 
         let active_repo = if new_repo.exists() { &new_repo } else { &old_repo };
 
-        // 2. Update the Git Remote so future pulls skip the GitHub redirect overhead
-        let _ = Command::new("git")
+        // 2. Preserve transport (SSH vs HTTPS) and only swap repo path.
+        if let Ok(output) = Command::new("git")
             .current_dir(active_repo)
-            .args(["remote", "set-url", "origin", NEW_REPO_REMOTE])
-            .status();
+            .args(["remote", "get-url", "origin"])
+            .output()
+        {
+            if output.status.success() {
+                let current_origin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let migrated_origin = current_origin
+                    .replace(
+                        "Mccalabrese/rust-wayland-power.git",
+                        "Mccalabrese/Genoa.git",
+                    )
+                    .replace("Mccalabrese/rust-wayland-power", "Mccalabrese/Genoa");
+
+                if migrated_origin != current_origin {
+                    let _ = Command::new("git")
+                        .current_dir(active_repo)
+                        .args(["remote", "set-url", "origin", migrated_origin.as_str()])
+                        .status();
+                }
+            } else {
+                eprintln!("   ⚠️ Failed to read current Git origin URL.");
+            }
+        } else {
+            eprintln!("   ⚠️ Failed to execute git while migrating origin URL.");
+        }
 
         // 3. Generate the new config.toml and burn the new path into it
         let _ = write_repo_root(active_repo);
@@ -1774,7 +1825,8 @@ fn link_dotfiles_and_copy_resources(home: &Path, repo_root: &Path) {
     let nvim_dest = home.join(".config/nvim");
     if nvim_dest.exists() {
         println!(
-            "   ℹ️  Neovim config found. Skipping to preserve your setup. If you would like my setup just copy ~/rust-wayland-power/.config/nvim to ~/.config/nvim"
+            "   ℹ️  Neovim config found. Skipping to preserve your setup. If you would like my setup, copy {}/.config/nvim to ~/.config/nvim",
+            repo_root.display()
         );
         println!("      (Note: The 'Neovim' cheat sheet in kb-launcher may not work)");
     } else {
@@ -1834,6 +1886,91 @@ fn create_symlink(src: &Path, dest: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(src, dest)
         .unwrap_or_else(|_| eprintln!("Failed to link {:?}", dest));
+}
+
+/// During updates, only repair symlinks that were previously managed by this repo.
+/// Never rewrite regular files/directories in the user's config.
+fn repair_repo_symlink_targets(home: &Path, previous_repo_root: Option<&Path>, active_repo_root: &Path) {
+    let managed_links = [
+        (".tmux.conf", ".tmux.conf"),
+        (".profile", ".profile"),
+        (".zshrc", ".zshrc"),
+        (".config/waybar", ".config/waybar"),
+        (".config/sway", ".config/sway"),
+        (".config/hypr", ".config/hypr"),
+        (".config/niri", ".config/niri"),
+        (".config/rofi", ".config/rofi"),
+        (".config/ghostty", ".config/ghostty"),
+        (".config/fastfetch", ".config/fastfetch"),
+        (".config/gtk-3.0", ".config/gtk-3.0"),
+        (".config/gtk-4.0", ".config/gtk-4.0"),
+        (".config/environment.d", ".config/environment.d"),
+        (".config/mako", ".config/mako"),
+        (".config/nvim", ".config/nvim"),
+    ];
+
+    for (src_rel, dest_rel) in managed_links {
+        let expected_target = active_repo_root.join(src_rel);
+        let dest = home.join(dest_rel);
+        maybe_repair_symlink(home, &dest, src_rel, previous_repo_root, &expected_target);
+    }
+}
+
+fn maybe_repair_symlink(
+    home: &Path,
+    dest: &Path,
+    src_rel: &str,
+    previous_repo_root: Option<&Path>,
+    expected_target: &Path,
+) {
+    let Ok(metadata) = fs::symlink_metadata(dest) else {
+        return;
+    };
+
+    if !metadata.file_type().is_symlink() {
+        return;
+    }
+
+    let Ok(link_target_raw) = fs::read_link(dest) else {
+        return;
+    };
+
+    let resolved_target = if link_target_raw.is_absolute() {
+        link_target_raw
+    } else {
+        match dest.parent() {
+            Some(parent) => parent.join(link_target_raw),
+            None => return,
+        }
+    };
+
+    if resolved_target == expected_target {
+        return;
+    }
+
+    let src_rel_path = Path::new(src_rel);
+    let from_previous_root = previous_repo_root
+        .map(|root| root.join(src_rel_path) == resolved_target)
+        .unwrap_or(false);
+    let from_legacy_root = home.join(LEGACY_REPO_DIR).join(src_rel_path) == resolved_target;
+
+    if !from_previous_root && !from_legacy_root {
+        return;
+    }
+
+    if !expected_target.exists() {
+        return;
+    }
+
+    if fs::remove_file(dest).is_ok()
+        && std::os::unix::fs::symlink(expected_target, dest).is_ok()
+    {
+        println!(
+            "   ✅ Repaired symlink: {} -> {}",
+            dest.display(),
+            expected_target.display()
+        );
+    }
 }
 /// Runs post-install hooks to set up themes and plugins.
 /// This ensures the user doesn't see "broken" visuals on first launch.
