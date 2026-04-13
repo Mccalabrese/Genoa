@@ -25,6 +25,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 
+mod live_env;
+#[cfg(test)]
+mod mock_env;
+mod traits;
+
+use crate::live_env::LiveEnv;
+use crate::traits::CmdExecutor;
+
 const TURING_IDS: &[&str] = &[
     "0x1e02", "0x1e04", "0x1e07", "0x1e30", // Titan RTX, 2080 Ti, Quadro...
     "0x1f02", "0x1f06", "0x1f08", "0x1f82", // 2070, 2060, 1650 (TU106)...
@@ -74,8 +82,6 @@ const NEW_REPO_DIR: &str = "Genoa";
 const LEGACY_REPO_DIR: &str = "rust-wayland-power";
 // ---------- Main Execution ------_-------
 
-// ---------- Main Execution -----------------
-// ---------- Main Execution -----------------
 fn main() {
     let home = dirs::home_dir().unwrap_or_else(|| {
         eprintln!(
@@ -84,6 +90,7 @@ fn main() {
         );
         std::process::exit(1);
     });
+    let live_sys = LiveEnv;
     // 🚨 PREVENT FATAL ROOT EXECUTION 🚨
     // If run with sudo, home_dir() points to /root, which breaks dotfiles and cargo paths.
     if std::env::var("USER").unwrap_or_default() == "root" || std::env::var("SUDO_USER").is_ok() {
@@ -353,7 +360,7 @@ fn main() {
             println!("\n{}", "🔗 Linking Config Files...".blue().bold());
             link_dotfiles_and_copy_resources(&home, &repo_root);
 
-            if let Err(e) = configure_system(&home) {
+            if let Err(e) = configure_system(&live_sys, &home) {
                 eprintln!("   ❌ Failed to configure system services: {}", e);
                 std::process::exit(1);
             }
@@ -909,15 +916,15 @@ fn install_aur_packages(home: &Path) -> Result<(), std::io::Error> {
 /// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, setting up the session environment, and
 /// configuring logind and greetd. This function is idempotent and can be safely run multiple times
 /// without causing issues.
-fn configure_system(home: &Path) -> Result<(), std::io::Error> {
+fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
     sanitize_mkinitcpio()?;
-    run_cmd("sudo", &["systemctl", "enable", "geoclue.service"])?;
-    run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"])?;
-    run_cmd("sudo", &["systemctl", "enable", "bolt.service"])?;
-    configure_dns()?;
+    sys.run_cmd("sudo", &["systemctl", "enable", "geoclue.service"])?;
+    sys.run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"])?;
+    sys.run_cmd("sudo", &["systemctl", "enable", "bolt.service"])?;
+    configure_dns(sys)?;
     // Prevent Pacman from eating the entire hard drive over time
     println!("   🧹 Enabling automated Pacman cache cleanup...");
-    run_cmd("sudo", &["systemctl", "enable", "--now", "paccache.timer"])?;
+    sys.run_cmd("sudo", &["systemctl", "enable", "--now", "paccache.timer"])?;
 
     // --- ENVIRONMENT & LOGIND ---
     println!("    🔧 Configuring Session Environment (PATH)...");
@@ -983,24 +990,18 @@ fn sanitize_mkinitcpio() -> Result<(), std::io::Error> {
 }
 
 ///Configures dnscrypt-proxy to use Cloudflare's DNS servers for enhanced privacy and security.
-fn configure_dns() -> Result<(), std::io::Error> {
+fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     // --- DNS Crypt Proxy CONFIGURATION ---
     println!("   🔧 Configuring dnscrypt-proxy (DNS Proxy)...");
 
     // 1. Ensure package is installed (failsafe)
-    let status = Command::new("sudo")
-        .args(["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"])
-        .status()?;
-    if !status.success() {
-        eprintln!(
-            "{}",
-            "❌ Failed to install dnscrypt-proxy. DNS configuration aborted.".red()
-        );
-        return Err(std::io::Error::other("Failed to install dnscrypt-proxy"));
-    }
+    sys.run_cmd(
+        "sudo",
+        &["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"],
+    )?;
     // 2. Configure TOML to use Cloudflare
     let dns_conf = "/etc/dnscrypt-proxy/dnscrypt-proxy.toml";
-    let content = fs::read_to_string(dns_conf)?;
+    let content = sys.read_file_to_string(dns_conf)?;
     let mut modified = false;
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     for line in &mut lines {
@@ -1024,40 +1025,30 @@ fn configure_dns() -> Result<(), std::io::Error> {
     if modified {
         let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "{}", lines.join("\n"))?;
-        let status = Command::new("sudo")
-            .arg("install")
-            .arg("-m")
-            .arg("644")
-            .arg("-o")
-            .arg("root")
-            .arg("-g")
-            .arg("root")
-            .arg(temp_file.path())
-            .arg(dns_conf)
-            .status()?;
-        if !status.success() {
-            eprintln!(
-                "{}",
-                "❌ Failed to update dnscrypt-proxy.toml with Cloudflare.".red()
-            );
-            return Err(std::io::Error::other(
-                "Failed to update dnscrypt-proxy.toml",
-            ));
-        }
+        let temp_path = temp_file
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
+        sys.run_cmd(
+            "sudo",
+            &[
+                "install", "-m", "644", "-o", "root", "-g", "root", temp_path, dns_conf,
+            ],
+        )?;
     }
     // 3. Enable the service
-    run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
+    sys.run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
 
     // 4. Clean up old Cloudflared artifacts if they exist
-    Command::new("sudo")
-        .args(["systemctl", "disable", "--now", "cloudflared-dns"])
-        .status()?;
-    Command::new("sudo")
-        .args(["rm", "-f", "/etc/systemd/system/cloudflared-dns.service"])
-        .status()?;
-    Command::new("sudo")
-        .args(["systemctl", "daemon-reload"])
-        .status()?;
+    sys.run_cmd_ignore_err(
+        "sudo",
+        &["systemctl", "disable", "--now", "cloudflared-dns"],
+    )?;
+    sys.run_cmd_ignore_err(
+        "sudo",
+        &["rm", "-f", "/etc/systemd/system/cloudflared-dns.service"],
+    )?;
+    sys.run_cmd("sudo", &["systemctl", "daemon-reload"])?;
     Ok(())
 }
 
@@ -2410,4 +2401,94 @@ fn print_logo() {
                                             ++++++++++++                                            
                                                *++++* "#
     );
+}
+
+//----------- Unit Tests ---------------------
+//--------------------------------------------
+//
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock_env::MockEnv;
+    use std::cell::RefCell;
+
+    #[test]
+    fn test_configure_dns_execution_order() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
+            "\nserver_names = cloudflare\nlisten_addresses = [127.0.0.1:53]\n".to_string(),
+        );
+        let result = configure_dns(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log[0],
+            (
+                "sudo".to_string(),
+                vec![
+                    "pacman".to_string(),
+                    "-S".to_string(),
+                    "--needed".to_string(),
+                    "--noconfirm".to_string(),
+                    "dnscrypt-proxy".to_string()
+                ]
+            )
+        );
+        assert!(
+            log[1].0 == "sudo"
+                && log[1].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string()
+                ])
+        );
+        assert_eq!(
+            log[2],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "--now".to_string(),
+                    "dnscrypt-proxy".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[3],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "disable".to_string(),
+                    "--now".to_string(),
+                    "cloudflared-dns".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[4],
+            (
+                "sudo".to_string(),
+                vec![
+                    "rm".to_string(),
+                    "-f".to_string(),
+                    "/etc/systemd/system/cloudflared-dns.service".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[5],
+            (
+                "sudo".to_string(),
+                vec!["systemctl".to_string(), "daemon-reload".to_string()]
+            )
+        );
+    }
 }
