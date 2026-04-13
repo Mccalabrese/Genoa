@@ -7,12 +7,12 @@
 //! 4. Chains system updates with firmware updates (`fwupdmgr`).
 //! 5. Provides desktop notifications on success/failure using `notify-rust`.
 
-use std::fs;
-use std::process::{Command, Stdio};
-use std::path::{Path, PathBuf};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use notify_rust::{Notification, Urgency};
 use serde::Deserialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 const LOGO: &str = r#"
 "++++++++++
@@ -39,9 +39,10 @@ const LOGO: &str = r#"
 /// Expands shell-style paths like `~/` to absolute system paths.
 fn expand_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(stripped);
+    }
     PathBuf::from(path)
 }
 // 🐧🐧🐧 Config Models 🐧🐧🐧
@@ -61,7 +62,7 @@ struct UpdaterConfig {
 
 #[derive(Deserialize, Debug)]
 struct RepoConfig {
-    root: String, // Path to the root of the dotfiles repo 
+    root: String, // Path to the root of the dotfiles repo
 }
 
 #[derive(Deserialize, Debug)]
@@ -81,8 +82,8 @@ fn load_config() -> Result<GlobalConfig> {
     let config_str = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
 
-    let config: GlobalConfig = toml::from_str(&config_str)
-        .context("Failed to parse config.toml")?;
+    let config: GlobalConfig =
+        toml::from_str(&config_str).context("Failed to parse config.toml")?;
 
     Ok(config)
 }
@@ -148,19 +149,27 @@ fn main() -> Result<()> {
     // Resolve relative paths
     let icon_error = expand_path(&updater_conf.icon_error);
     let icon_success = expand_path(&updater_conf.icon_success);
-    
+
     // Dependency Verification
     let terminal_cmd = &global_conf.terminal;
-    let update_bin = updater_conf.update_command.first().context("update_command empty")?;
+    let update_bin = updater_conf
+        .update_command
+        .first()
+        .context("update_command empty")?;
 
-    if !check_dependency(terminal_cmd) { return Err(anyhow!("Terminal not found: {}", terminal_cmd)); }
-    if !check_dependency(update_bin) { return Err(anyhow!("Update helper not found: {}", update_bin)); }
-    
+    if !check_dependency(terminal_cmd) {
+        return Err(anyhow!("Terminal not found: {}", terminal_cmd));
+    }
+    if !check_dependency(update_bin) {
+        return Err(anyhow!("Update helper not found: {}", update_bin));
+    }
+
     let update_cmd_str = updater_conf.update_command.join(" ");
-    
+
     // --- CONSTRUCT THE BASH SCRIPT ---
     // We use a raw string literal (r#...#) so we can write Bash naturally.
-    let bash_script = format!(r#"
+    let bash_script = format!(
+        r#"
         cat << "EOF"
 {}
 EOF
@@ -253,10 +262,8 @@ EOF
 
         if [ $sys_exit -ne 0 ]; then exit 1; else exit 0; fi
         "#,
-        LOGO,
-        update_cmd_str,
-        repo_path
-    );  
+        LOGO, update_cmd_str, repo_path
+    );
 
     // Interactive Execution
     let status = Command::new(terminal_cmd)
@@ -267,13 +274,22 @@ EOF
         .arg(&bash_script)
         .status()
         .context(format!("Failed to launch terminal: {}", terminal_cmd))?;
-    
+
     // Notifications
     if status.success() {
-        send_notification("System Update Complete", "All updates applied successfully.", &icon_success, Urgency::Low)?;
+        send_notification(
+            "System Update Complete",
+            "All updates applied successfully.",
+            &icon_success,
+            Urgency::Low,
+        )?;
     } else {
-        send_notification("System Update Failed", "The update process encountered an error.", &icon_error, Urgency::Critical)?;
+        send_notification(
+            "System Update Failed",
+            "The update process encountered an error.",
+            &icon_error,
+            Urgency::Critical,
+        )?;
     }
     Ok(())
 }
-

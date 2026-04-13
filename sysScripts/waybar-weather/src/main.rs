@@ -1,5 +1,5 @@
 //! Waybar Weather Module
-//! 
+//!
 //! A focused, asynchronous utility that:
 //! 1. Determines the user's geolocation using `geoclue` (via the `where-am-i` utility).
 //! 2. Caches location data to minimize GPS polling latency on subsequent runs.
@@ -7,14 +7,14 @@
 //! 4. Performs reverse geocoding via OpenStreetMap (Nominatim) to display city/state.
 //! 5. Outputs a JSON payload formatted for Waybar custom modules, including Pango markup for tooltips.
 
-use std::fs;
-use std::path::PathBuf;
-use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
-use regex::Regex;
 use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::time::SystemTime;
 use tokio::process::Command;
 
 // Compile regular expressions once for performance optimization.
@@ -39,8 +39,12 @@ fn load_config() -> Result<GlobalConfig> {
     let config_path = dirs::home_dir()
         .context("Could not determine home directory")?
         .join(".config/rust-dotfiles/config.toml");
-    let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config file from path: {}", config_path.display()))?;
+    let config_str = fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "Failed to read config file from path: {}",
+            config_path.display()
+        )
+    })?;
     let config: GlobalConfig = toml::from_str(&config_str)
         .context("Failed to parse config.toml. Check for syntax errors.")?;
     Ok(config)
@@ -62,7 +66,7 @@ struct Weather {
     id: u32,
     description: String,
 }
-#[derive(Deserialize, Debug, Clone)] 
+#[derive(Deserialize, Debug, Clone)]
 struct Main {
     temp: f64,
     feels_like: f64,
@@ -89,8 +93,8 @@ struct CurrentWeather {
     sys: Sys,
     wind: Wind,
     visibility: Option<f64>,
-    dt: i64,        // Unix timestamp of data calculation
-    timezone: i64,  // Shift in seconds from UTC
+    dt: i64,       // Unix timestamp of data calculation
+    timezone: i64, // Shift in seconds from UTC
 }
 // Nominatim (Reverse Geocoding) Structures
 #[derive(Deserialize, Debug)]
@@ -121,7 +125,7 @@ struct Forecast {
 // --- Geolocation Logic ---
 
 /// Executes the `where-am-i` system utility to get fresh coordinates.
-/// 
+///
 /// This is preferable to using a raw IP-based geolocation API because:
 /// 1. It uses Wi-Fi triangulation/GPS (more accurate).
 /// 2. It respects system privacy settings via Geoclue.
@@ -131,16 +135,28 @@ async fn run_where_am_i() -> Result<Location> {
         .await
         .context("Failed to run 'where-am-i' command, Is geoclue installed?")?;
     if !output.status.success() {
-        anyhow::bail!("'where-am-i' command failed: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "'where-am-i' command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Parse the output using regex to extract coordinates and accuracy
     let lat_re = LAT_RE.get_or_init(|| Regex::new(r"Latitude:\s*(-?\d+\.\d+)").unwrap());
     let lon_re = LON_RE.get_or_init(|| Regex::new(r"Longitude:\s*(-?\d+\.\d+)").unwrap());
     let acc_re = ACC_RE.get_or_init(|| Regex::new(r"Accuracy:\s*(\d+\.?\d*)\s*meters").unwrap());
-    let lat_str = lat_re.captures(&stdout).context("Failed to parse Latitude")?[1].to_string();
-    let lon_str = lon_re.captures(&stdout).context("Failed to parse Longitude")?[1].to_string();
-    let acc_str = acc_re.captures(&stdout).context("Failed to parse Accuracy")?[1].to_string();
+    let lat_str = lat_re
+        .captures(&stdout)
+        .context("Failed to parse Latitude")?[1]
+        .to_string();
+    let lon_str = lon_re
+        .captures(&stdout)
+        .context("Failed to parse Longitude")?[1]
+        .to_string();
+    let acc_str = acc_re
+        .captures(&stdout)
+        .context("Failed to parse Accuracy")?[1]
+        .to_string();
     Ok(Location {
         latitude: lat_str.parse()?,
         longitude: lon_str.parse()?,
@@ -173,18 +189,35 @@ fn get_weather_icon(condition_id: u32, is_day: bool) -> &'static str {
         500..=599 => "󰖖", // Rain
         600..=699 => "󰖘", // Snow
         700..=799 => "󰖑", // Atmosphere
-        800 => if is_day { "󰖙" } else { "󰖔" }, // Clear
-        801..=804 => if is_day { "󰖐" } else { "󰖑" }, // Clouds
-        _ => "󰖐", // Default
+        800 => {
+            if is_day {
+                "󰖙"
+            } else {
+                "󰖔"
+            }
+        } // Clear
+        801..=804 => {
+            if is_day {
+                "󰖐"
+            } else {
+                "󰖑"
+            }
+        } // Clouds
+        _ => "󰖐",         // Default
     }
 }
 // --- Network Functions ---
-async fn fetch_weather(client: &reqwest::Client, loc: &Location, api_key: &str) -> Result<CurrentWeather> {
+async fn fetch_weather(
+    client: &reqwest::Client,
+    loc: &Location,
+    api_key: &str,
+) -> Result<CurrentWeather> {
     let url = format!(
         "https://api.openweathermap.org/data/2.5/weather?lat={}&lon={}&appid={}&units=imperial",
         loc.latitude, loc.longitude, api_key
     );
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .send()
         .await?
         .json::<CurrentWeather>()
@@ -198,34 +231,36 @@ async fn get_city_state(client: &reqwest::Client, loc: &Location) -> Result<(Str
         "https://nominatim.openstreetmap.org/reverse?format=json&lat={}&lon={}&zoom=10",
         loc.latitude, loc.longitude
     );
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .send()
         .await?
         .json::<NominatimResponse>()
         .await?;
     let addr = response.address;
     // Fallback logic: prefer City -> Town -> Village
-    let city = addr.city.or(addr.town).or(addr.village)
+    let city = addr
+        .city
+        .or(addr.town)
+        .or(addr.village)
         .unwrap_or_else(|| "Unknown City".to_string());
-    let state = addr.state
-        .unwrap_or_else(|| "Unknown State".to_string());
+    let state = addr.state.unwrap_or_else(|| "Unknown State".to_string());
     Ok((city, state))
 }
 
-async fn fetch_forecast(client: &reqwest::Client, loc: &Location, api_key: &str) -> Result<Forecast> {
+async fn fetch_forecast(
+    client: &reqwest::Client,
+    loc: &Location,
+    api_key: &str,
+) -> Result<Forecast> {
     let url = format!(
         "https://api.openweathermap.org/data/2.5/forecast?lat={}&lon={}&appid={}&units=imperial",
         loc.latitude, loc.longitude, api_key
     );
 
-    let response = client.get(&url)
-        .send()
-        .await?
-        .json::<Forecast>()
-        .await?;
+    let response = client.get(&url).send().await?.json::<Forecast>().await?;
     Ok(response)
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -233,13 +268,14 @@ async fn main() -> Result<()> {
     let global_config = load_config()?;
     let api_key = global_config.waybar_weather.owm_api_key;
     // Nominatim uses a strict User-Agent policy to avoid blocking.
-    const NOMINATIM_USER_AGENT: &str = "WaybarWeatherScript/2.0-owm (Repo: github.com/Mccalabrese/Arch-multi-session-dot-files)"; 
+    const NOMINATIM_USER_AGENT: &str =
+        "WaybarWeatherScript/2.0-owm (Repo: github.com/Mccalabrese/Arch-multi-session-dot-files)";
     let http_client = reqwest::Client::builder()
         .user_agent(NOMINATIM_USER_AGENT)
         .build()?;
 
     // Obtain Location (with Caching Strategy)
-    // Strategy: Try to get a fresh, high-accuracy GPS fix. 
+    // Strategy: Try to get a fresh, high-accuracy GPS fix.
     // If that fails (or takes too long/is inaccurate), fall back to the last known good cached location.
     let location = match run_where_am_i().await {
         Ok(fresh) => {
@@ -248,7 +284,7 @@ async fn main() -> Result<()> {
                 let _ = write_to_cache(&fresh);
                 fresh
             } else {
-                   read_from_cache().unwrap_or(fresh) 
+                read_from_cache().unwrap_or(fresh)
             }
         }
         Err(e) => {
@@ -271,11 +307,14 @@ async fn main() -> Result<()> {
         Ok(data) => data,
         Err(e) => {
             // Output a valid JSON error state for Waybar so the bar doesn't crash
-            println!("{}", serde_json::json!({
-                "text": "󰖕 API?",
-                "tooltip": format!("Failed to fetch weather: {}", e),
-                "class": "error"
-            }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "text": "󰖕 API?",
+                    "tooltip": format!("Failed to fetch weather: {}", e),
+                    "class": "error"
+                })
+            );
             return Ok(());
         }
     };
@@ -283,7 +322,9 @@ async fn main() -> Result<()> {
     let (city, state) = geo_res.unwrap_or(("Unknown".to_string(), "".to_string()));
     let forecast_data = forecast_res.ok();
     // Calculate Timings (Day/Night)
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs() as i64;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_secs() as i64;
     let is_day = now >= weather_data.sys.sunrise && now <= weather_data.sys.sunset;
     let icon = get_weather_icon(weather_data.weather[0].id, is_day);
 
@@ -306,9 +347,16 @@ async fn main() -> Result<()> {
         weather_data.main.temp_min, weather_data.main.temp_max
     ));
     tooltip_lines.push(String::new()); // Separator
-    // Add Wind/Pressure/Vis details                                   // 
-    let wind_dir = weather_data.wind.deg.map(|d| format!("({:.0}°)", d)).unwrap_or_default();
-    tooltip_lines.push(format!("󰖝 Wind: {:.1} mph {}", weather_data.wind.speed, wind_dir));
+    // Add Wind/Pressure/Vis details                                   //
+    let wind_dir = weather_data
+        .wind
+        .deg
+        .map(|d| format!("({:.0}°)", d))
+        .unwrap_or_default();
+    tooltip_lines.push(format!(
+        "󰖝 Wind: {:.1} mph {}",
+        weather_data.wind.speed, wind_dir
+    ));
     tooltip_lines.push(format!("󰖌 Humidity: {:.0}%", weather_data.main.humidity));
     tooltip_lines.push(format!("󰥡 Pressure: {:.0} hPa", weather_data.main.pressure));
     if let Some(vis) = weather_data.visibility {
@@ -327,7 +375,8 @@ async fn main() -> Result<()> {
                 let time_str = local_time.format("%I%p").to_string();
                 let time_clean = time_str.strip_prefix('0').unwrap_or(&time_str);
                 //Calculate day/night for forecast icon
-                let is_fc_day = item.dt >= weather_data.sys.sunrise && item.dt <= weather_data.sys.sunset;
+                let is_fc_day =
+                    item.dt >= weather_data.sys.sunrise && item.dt <= weather_data.sys.sunset;
                 let fc_icon = get_weather_icon(item.weather[0].id, is_fc_day);
                 let pop_percent = item.pop * 100.0;
 
@@ -341,7 +390,8 @@ async fn main() -> Result<()> {
     let tooltip = tooltip_lines.join("\n");
     // Write Cleaned Cache (for Lockscreen)
     // I strip Pango tags because Hyprlock/swaylock usually don't support markup in text labels.
-    let pango_re = PANGO_RE.get_or_init(|| Regex::new(r"</?b>|</b>|</?span.*?>|</?small>").unwrap());
+    let pango_re =
+        PANGO_RE.get_or_init(|| Regex::new(r"</?b>|</b>|</?span.*?>|</?small>").unwrap());
     let cleaned_tooltip = pango_re.replace_all(&tooltip, "").to_string();
     if let Some(cache_dir) = dirs::cache_dir() {
         let _ = fs::write(cache_dir.join(".weather_cache"), cleaned_tooltip);
@@ -354,6 +404,6 @@ async fn main() -> Result<()> {
     });
 
     println!("{}", output_json);
-    
+
     Ok(())
 }

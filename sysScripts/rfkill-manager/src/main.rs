@@ -7,7 +7,7 @@
 //! 3. Send system notification on toggle.
 //! 4. Signal Waybar (SIGRTMIN+10) to update immediately.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use notify_rust::Notification;
 use serde_json::json;
 use std::env;
@@ -15,7 +15,7 @@ use std::process::Command;
 
 // --- HARDCODED DEFAULTS ---
 // No need to configure these. They are standard.
-const WAYBAR_SIGNAL: i32 = 10; 
+const WAYBAR_SIGNAL: i32 = 10;
 const NOTIFICATION_ICON: &str = "airplane-mode-symbolic"; // Uses system theme icon
 
 // --- System Logic ---
@@ -29,7 +29,10 @@ fn is_blocked() -> Result<bool> {
         .context("Failed to run 'rfkill list'")?;
 
     if !output.status.success() {
-        return Err(anyhow!("rfkill failed: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(anyhow!(
+            "rfkill failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -40,17 +43,24 @@ fn is_blocked() -> Result<bool> {
 
 fn run_status() -> Result<()> {
     let blocked = is_blocked().unwrap_or(false);
-    
+
     // Simple output. The Sidebar/Waybar handles the visuals via CSS classes (.on / .off)
     let class = if blocked { "on" } else { "off" };
     let text = if blocked { "✈" } else { "" };
-    let tooltip = if blocked { "Airplane Mode: Active" } else { "Airplane Mode: Inactive" };
+    let tooltip = if blocked {
+        "Airplane Mode: Active"
+    } else {
+        "Airplane Mode: Inactive"
+    };
 
-    println!("{}", json!({
-        "text": text,
-        "class": class,
-        "tooltip": tooltip
-    }));
+    println!(
+        "{}",
+        json!({
+            "text": text,
+            "class": class,
+            "tooltip": tooltip
+        })
+    );
     Ok(())
 }
 
@@ -97,7 +107,10 @@ fn main() -> Result<()> {
         Some("--toggle") | None => {
             if let Err(e) = run_toggle() {
                 eprintln!("Error: {}", e);
-                let _ = Notification::new().summary("Error").body(&e.to_string()).show();
+                let _ = Notification::new()
+                    .summary("Error")
+                    .body(&e.to_string())
+                    .show();
             }
             Ok(())
         }

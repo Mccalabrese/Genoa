@@ -1,14 +1,14 @@
 //! Radio Menu (radio-menu)
 //!
 //! A minimal internet radio player interface using `rofi` as the frontend and `mpv` as the backend.
-//! 
+//!
 //! Features:
 //! 1. **Search:** Queries the Community Radio Browser API (radio-browser.info).
 //! 2. **Favorites:** Persists preferred stations to a JSON file.
 //! 3. **Playback:** Spawns a detached `mpv` process to stream audio.
 //! 4. **Menu Navigation:** Implements a loop-based state machine to handle "Back", "Search", and "Home".
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use notify_rust::Notification;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -28,20 +28,22 @@ const RESULT_LIMIT: usize = 15; // API limit to keep the UI snappy
 // Rofi UI Hints (displayed in menu)
 const SEARCH_PROMPT: &str = "Type to search station name...";
 const HOME_HINT: &str = "<b>Enter:</b> Play  |  <b>Ctrl+R:</b> Remove Favorite";
-const SEARCH_HINT: &str = "<b>Enter:</b> Play  |  <b>Ctrl+S:</b> Save to Favorites  |  <b>Esc:</b> Back to Search";
+const SEARCH_HINT: &str =
+    "<b>Enter:</b> Play  |  <b>Ctrl+S:</b> Save to Favorites  |  <b>Esc:</b> Back to Search";
 
 /// Enumerates the possible outcomes of a user action in the menu loop.
 enum Action {
-    Exit,      // Close the app (e.g. after playing a station)
-    Refresh,   // Reload data (e.g. after deleting a favorite)
-    Continue,  // No-op
+    Exit,     // Close the app (e.g. after playing a station)
+    Refresh,  // Reload data (e.g. after deleting a favorite)
+    Continue, // No-op
 }
 
 fn expand_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(stripped);
+    }
     PathBuf::from(path)
 }
 
@@ -51,7 +53,7 @@ struct Station {
     name: String,
     url_resolved: String, //The actual stream URL
     tags: String,
-    stationuuid: String,  //Station ID for de-duplication
+    stationuuid: String, //Station ID for de-duplication
 }
 
 #[derive(Deserialize, Debug)]
@@ -89,7 +91,10 @@ fn load_config() -> Result<GlobalConfig> {
 /// Queries the Radio Browser API.
 /// Uses a blocking client because the UI (Rofi) cannot display results until the search completes anyway.
 fn search_stations(query: &str) -> Result<Vec<Station>> {
-    let url = format!("https://de1.api.radio-browser.info/json/stations/byname/{}", query);
+    let url = format!(
+        "https://de1.api.radio-browser.info/json/stations/byname/{}",
+        query
+    );
     let response = reqwest::blocking::get(&url)?.json::<Vec<Station>>()?;
     Ok(response.into_iter().take(RESULT_LIMIT).collect())
 }
@@ -109,7 +114,10 @@ fn save_favorite(station: Station) -> Result<()> {
     let path = get_favorites_path();
     let mut favorites = load_favorites()?;
     // Prevent duplicates by UUID
-    if !favorites.iter().any(|s| s.stationuuid == station.stationuuid) {
+    if !favorites
+        .iter()
+        .any(|s| s.stationuuid == station.stationuuid)
+    {
         favorites.push(station);
         let json = serde_json::to_string_pretty(&favorites)?;
         fs::write(path, json)?;
@@ -136,7 +144,7 @@ fn stop_radio() {
 /// Spawns a detached mpv process to stream the audio.
 fn play_station(station_name: &str, url: &str) -> Result<()> {
     stop_radio(); // Enforce single-instance playback
-    
+
     Command::new("mpv")
         .arg("--no-video")
         .arg(format!("--force-media-title={}", station_name))
@@ -152,7 +160,7 @@ fn play_station(station_name: &str, url: &str) -> Result<()> {
         .body(station_name)
         .icon("media-playback-start")
         .show();
-        
+
     Ok(())
 }
 
@@ -160,7 +168,12 @@ fn play_station(station_name: &str, url: &str) -> Result<()> {
 
 /// Wraps Rofi execution to handle custom keybindings (Ctrl+S, Ctrl+R).
 /// Returns the Exit Code (indicating which key was pressed) and the Selection String.
-fn show_rofi(options: &[String], prompt: &str, config: &RadioConfig, custom_message: Option<&str>) -> Result<(i32, String)> {
+fn show_rofi(
+    options: &[String],
+    prompt: &str,
+    config: &RadioConfig,
+    custom_message: Option<&str>,
+) -> Result<(i32, String)> {
     let input = options.join("\n");
     let rofi_config_path = expand_path(&config.rofi_config);
     let msg = custom_message.unwrap_or(&config.message);
@@ -189,9 +202,9 @@ fn show_rofi(options: &[String], prompt: &str, config: &RadioConfig, custom_mess
     }
 
     let output = child.wait_with_output()?;
-    
+
     let code = output.status.code().unwrap_or(1);
-    
+
     // Rofi uses specific codes: 0=Enter, 1=Esc, 10-28=Custom Keys
     if code != 0 && code != 1 && code != 10 && code != 11 {
         return Err(anyhow!("Rofi failed with exit code: {}", code));
@@ -214,7 +227,9 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
             Some(q) => q,
             None => {
                 let (code, q) = show_rofi(&[], "Search Query", config, Some(SEARCH_PROMPT))?;
-                if code == 1 || q.is_empty() { return Ok(false); }
+                if code == 1 || q.is_empty() {
+                    return Ok(false);
+                }
                 q
             }
         };
@@ -226,25 +241,24 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
             // Show error dialog
             let (retry_code, _) = show_rofi(
                 &[ICON_REDO.to_string()],
-                "No Results", 
-                config, 
-                Some(&format!("No stations found for '<b>{}</b>'", query))
+                "No Results",
+                config,
+                Some(&format!("No stations found for '<b>{}</b>'", query)),
             )?;
-                    
-            if retry_code == 1 { return Ok(false); } // Esc -> Back
+
+            if retry_code == 1 {
+                return Ok(false);
+            } // Esc -> Back
             continue; // Retry -> Loop back to search bar
         }
 
         // 4. Show Results
         let result_names: Vec<String> = results.iter().map(|s| s.name.clone()).collect();
-        let (r_code, picked_name) = show_rofi(
-            &result_names, 
-            "Results", 
-            config, 
-            Some(SEARCH_HINT)
-        )?;
-                
-        if r_code == 1 { continue; } // Esc -> Back to search input
+        let (r_code, picked_name) = show_rofi(&result_names, "Results", config, Some(SEARCH_HINT))?;
+
+        if r_code == 1 {
+            continue;
+        } // Esc -> Back to search input
 
         //5. Handle Action
         if let Some(station) = results.into_iter().find(|s| s.name == picked_name) {
@@ -252,7 +266,10 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
                 // Ctrl+S -> Save
                 save_favorite(station.clone())?;
                 play_station(&station.name, &station.url_resolved)?;
-                let _ = Notification::new().summary("Radio").body("Station Saved").show();
+                let _ = Notification::new()
+                    .summary("Radio")
+                    .body("Station Saved")
+                    .show();
                 return Ok(true);
             } else if r_code == 0 {
                 // Enter -> Play
@@ -267,7 +284,10 @@ fn handle_favorite_actions(clean_name: &str, code: i32, favorites: &[Station]) -
     if code == 11 {
         // Ctrl+R: Remove Favorite
         remove_favorite(clean_name)?;
-        let _ = Notification::new().summary("Radio").body("Favorite Removed").show();
+        let _ = Notification::new()
+            .summary("Radio")
+            .body("Favorite Removed")
+            .show();
         Ok(Action::Refresh)
     } else if code == 0 {
         // Enter: Play Favorite
@@ -286,7 +306,7 @@ fn main() -> Result<()> {
     let global_config = load_config()?;
     let config = global_config.radio_menu;
     let mut menu_options = Vec::with_capacity(20);
-    
+
     // Main Application Loop
     // Keeps the menu open until the user plays a station or explicitly quits.
     'main_menu: loop {
@@ -300,25 +320,22 @@ fn main() -> Result<()> {
             menu_options.push([PREFIX_FAV, &station.name].concat());
         }
 
-        let (code, selection) = show_rofi(
-            &menu_options, 
-            "Radio", 
-            &config, 
-            Some(HOME_HINT)
-        )?;
+        let (code, selection) = show_rofi(&menu_options, "Radio", &config, Some(HOME_HINT))?;
 
-        if code == 1 { break 'main_menu; } // Esc -> Quit
+        if code == 1 {
+            break 'main_menu;
+        } // Esc -> Quit
 
         if selection == ICON_STOP {
             stop_radio();
             let _ = Notification::new().summary("Radio").body("Stopped").show();
-            break 'main_menu; 
+            break 'main_menu;
         } else if selection == ICON_SEARCH {
             // Enter Search Loop
             if search(None, &config)? {
                 break 'main_menu; // If seach ended in playback, exit app
             }
-        } else if let Some(clean_name) = selection.strip_prefix(PREFIX_FAV) { 
+        } else if let Some(clean_name) = selection.strip_prefix(PREFIX_FAV) {
             // Handle Favorites
             let action = handle_favorite_actions(clean_name, code, &favorites)?;
             match action {
