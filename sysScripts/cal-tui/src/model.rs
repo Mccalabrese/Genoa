@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc, Duration, Weekday};
+use chrono::{DateTime, Duration, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -15,10 +15,10 @@ pub struct Appointment {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Recurrence {
     Daily {
-        until: Option<DateTime<Utc>>
+        until: Option<DateTime<Utc>>,
     },
     Weekly {
         days: Vec<Weekday>,
-        until: Option<DateTime<Utc>>
+        until: Option<DateTime<Utc>>,
     },
 }

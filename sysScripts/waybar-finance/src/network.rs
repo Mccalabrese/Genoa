@@ -1,13 +1,12 @@
-use std::sync::OnceLock;
-use tokio::sync::Mutex;
-use anyhow::{Result, Context};
-use yahoo_finance_api::YahooConnector;
-use time::OffsetDateTime;
-use serde::{Deserialize, Serialize};
-use futures::future::join_all;
+use crate::app::{MarketStatus, StockDetails};
 use crate::config::{get_config_path, load_config};
-use crate::app::{StockDetails, MarketStatus};
-
+use anyhow::{Context, Result};
+use futures::future::join_all;
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+use time::OffsetDateTime;
+use tokio::sync::Mutex;
+use yahoo_finance_api::YahooConnector;
 
 #[derive(Debug, Deserialize)]
 pub struct FinnhubQuote {
@@ -63,8 +62,8 @@ struct YahooQuote {
     #[serde(rename = "trailingPE")]
     pe_ratio: Option<f64>,
 
-    #[serde(rename = "dividendYield")] 
-    dividend_yield: Option<f64>, 
+    #[serde(rename = "dividendYield")]
+    dividend_yield: Option<f64>,
 
     #[serde(rename = "trailingAnnualDividendYield")]
     trailing_yield: Option<f64>,
@@ -76,7 +75,7 @@ struct YahooQuote {
     low_52w: Option<f64>,
     #[serde(rename = "regularMarketPrice")]
     regular_market_price: Option<f64>,
-    
+
     #[serde(rename = "ytdReturn")]
     ytd_return: Option<f64>,
 
@@ -92,18 +91,21 @@ async fn get_yahoo_crumb(client: &reqwest::Client) -> Result<String> {
     // Check cache first
     let mutex = YAHOO_CRUMB.get_or_init(|| Mutex::new(None));
     let mut lock = mutex.lock().await;
-    
+
     if let Some(c) = &*lock {
         return Ok(c.clone());
     }
 
     // Handshake - Get Cookies
-    let _ = client.get("https://fc.yahoo.com")
+    let _ = client
+        .get("https://fc.yahoo.com")
         .header("Accept", "*/*")
-        .send().await;
+        .send()
+        .await;
 
     // Handshake - Ask for the Crumb
-    let resp = client.get("https://query1.finance.yahoo.com/v1/test/getcrumb")
+    let resp = client
+        .get("https://query1.finance.yahoo.com/v1/test/getcrumb")
         .header("Accept", "*/*")
         .send()
         .await?;
@@ -113,16 +115,19 @@ async fn get_yahoo_crumb(client: &reqwest::Client) -> Result<String> {
     }
 
     let crumb = resp.text().await?;
-    
+
     // Handshake - Cache it
     *lock = Some(crumb.clone());
-    
+
     Ok(crumb)
 }
 
 /// Fetches search results from Yahoo Finance's search endpoint.
 /// Handles basic symbol search.
-pub async fn search_ticker(client: &reqwest::Client, query: &str) -> Result<Vec<YahooSearchResult>> {
+pub async fn search_ticker(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<YahooSearchResult>> {
     let url = format!(
         "https://query2.finance.yahoo.com/v1/finance/search?q={}&lang=en-US",
         query
@@ -146,34 +151,40 @@ pub async fn search_ticker(client: &reqwest::Client, query: &str) -> Result<Vec<
 
 /// Fetches detailed metrics (P/E, Yield, etc.) from Yahoo's v7 endpoint.
 /// Handles the differences between Stocks (using Dividend Yield) and ETFs (using 12-Mo Yield).
-pub async fn fetch_details(client: &reqwest::Client, symbol: &str, _key: &str) -> Result<StockDetails> {
-    let crumb = get_yahoo_crumb(client).await?; 
-    
+pub async fn fetch_details(
+    client: &reqwest::Client,
+    symbol: &str,
+    _key: &str,
+) -> Result<StockDetails> {
+    let crumb = get_yahoo_crumb(client).await?;
+
     let url = format!(
         "https://query1.finance.yahoo.com/v7/finance/quote?symbols={}&crumb={}",
         symbol, crumb
     );
 
     let resp = client.get(&url).send().await?;
-    
+
     if !resp.status().is_success() {
         return Err(anyhow::anyhow!("Yahoo Error: {}", resp.status()));
     }
 
     let data: YahooQuoteResponse = resp.json().await?;
-    
+
     if data.quote_response.result.is_empty() {
         return Err(anyhow::anyhow!("No data found"));
     }
 
     let q = &data.quote_response.result[0];
-    
+
     // Polymorphic Field Logic:
     // Different asset classes (Stocks vs ETFs) store yield in different fields.
     // We try them in order of specificity.
     let final_yield = if let Some(y) = q.dividend_yield {
         Some(y)
-    } else { q.trailing_yield.map(|y| y * 100.0) };
+    } else {
+        q.trailing_yield.map(|y| y * 100.0)
+    };
 
     // Fallback for Market Cap (ETFs use Net Assets)
     let mkt_cap = q.market_cap.or(q.net_assets).unwrap_or(0.0) as u64;
@@ -183,7 +194,9 @@ pub async fn fetch_details(client: &reqwest::Client, symbol: &str, _key: &str) -
     // 2. Try 52W Change (Common for Stocks, usually formatted as 0.05 for 5%)
     let perf = if let Some(ytd) = q.ytd_return {
         Some(ytd)
-    } else { q.fifty_two_week_change };
+    } else {
+        q.fifty_two_week_change
+    };
 
     Ok(StockDetails {
         market_cap: mkt_cap,
@@ -195,14 +208,21 @@ pub async fn fetch_details(client: &reqwest::Client, symbol: &str, _key: &str) -
     })
 }
 /// Fetches real-time stock quote from Finnhub API.
-pub async fn fetch_quote(client: &reqwest::Client, symbol: &str, key: &str) -> Result<FinnhubQuote> {
+pub async fn fetch_quote(
+    client: &reqwest::Client,
+    symbol: &str,
+    key: &str,
+) -> Result<FinnhubQuote> {
     let url = format!(
         "https://finnhub.io/api/v1/quote?symbol={}&token={}",
         symbol, key
     );
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Failed to fetch quote: HTTP {}", resp.status()));
+        return Err(anyhow::anyhow!(
+            "Failed to fetch quote: HTTP {}",
+            resp.status()
+        ));
     }
     let quote: FinnhubQuote = resp.json().await?;
     Ok(quote)
@@ -210,14 +230,21 @@ pub async fn fetch_quote(client: &reqwest::Client, symbol: &str, key: &str) -> R
 /// Fetches historical stock data from Yahoo Finance API.
 /// The data points are returned as a vector of (timestamp, close price) tuples.
 /// Used by the charting component.
-pub async fn fetch_history(_client: &reqwest::Client, symbol: &str, _key: &str) -> Result<Vec<(f64, f64)>> {
+pub async fn fetch_history(
+    _client: &reqwest::Client,
+    symbol: &str,
+    _key: &str,
+) -> Result<Vec<(f64, f64)>> {
     let provider = YahooConnector::new()?;
     let end = OffsetDateTime::now_utc();
     let start = end - time::Duration::days(365);
-    let response = provider.get_quote_history(symbol, start, end).await
+    let response = provider
+        .get_quote_history(symbol, start, end)
+        .await
         .context("Yaho API Error")?;
     let quotes = response.quotes().context("No quotes in response")?;
-    let points: Vec<(f64, f64)> = quotes.iter()
+    let points: Vec<(f64, f64)> = quotes
+        .iter()
         .map(|q| (q.timestamp as f64, q.close))
         .collect();
     if points.is_empty() {
@@ -244,8 +271,10 @@ pub async fn run_waybar_mode(client: &reqwest::Client) -> Result<()> {
         }
     };
 
-    let futures: Vec<_> = config.stocks
-        .iter().filter(|s| s.sidebar)
+    let futures: Vec<_> = config
+        .stocks
+        .iter()
+        .filter(|s| s.sidebar)
         .map(|s| {
             let client = client.clone();
             let key = api_key.clone();
@@ -254,7 +283,8 @@ pub async fn run_waybar_mode(client: &reqwest::Client) -> Result<()> {
                 let q = fetch_quote(&client, &sym, &key).await;
                 (sym, q)
             }
-        }).collect();
+        })
+        .collect();
 
     let results = join_all(futures).await;
     let mut text_parts = Vec::new();
@@ -273,7 +303,7 @@ pub async fn run_waybar_mode(client: &reqwest::Client) -> Result<()> {
                 );
                 text_parts.push(part);
                 tooltip_parts.push(format!(
-                    "<span color='{}'>{}: ${:.2} ({:.2}%)</span>", 
+                    "<span color='{}'>{}: ${:.2} ({:.2}%)</span>",
                     color, symbol, quote.price, quote.percent
                 ));
             }
@@ -303,7 +333,7 @@ pub async fn fetch_market_status(client: &reqwest::Client) -> Result<MarketStatu
     );
 
     let resp = client.get(&url).send().await?;
-    
+
     if !resp.status().is_success() {
         return Err(anyhow::anyhow!("Yields Error: {}", resp.status()));
     }

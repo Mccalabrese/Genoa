@@ -1,8 +1,8 @@
-use chrono::{NaiveDate, Utc};
 use crate::engine::CalendarEngine;
-use std::fs;
+use chrono::{NaiveDate, Utc};
 use directories::ProjectDirs;
 use ratatui::widgets::ListState;
+use std::fs;
 
 #[derive(PartialEq)]
 pub enum InputMode {
@@ -26,7 +26,17 @@ pub enum ViewMode {
 }
 
 #[derive(PartialEq)]
-pub enum RecField { Mon, Tue, Wed, Thu, Fri, Sat, Sun, EndToggle, EndWeeks }
+pub enum RecField {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+    EndToggle,
+    EndWeeks,
+}
 
 pub struct App {
     pub engine: CalendarEngine,
@@ -81,12 +91,12 @@ impl App {
             input_mode: InputMode::Normal,
             active_field: EditField::Summary,
             active_rec_field: RecField::Mon, // Start on Monday
-            
+
             input_buffer: String::new(),
             time_minutes: 720,
             duration_minutes: 60,
             is_recurring: false,
-            
+
             rec_days: [false; 7],
             rec_end_date: false,
             rec_end_weeks: 16, // Default to a standard 16-week semester

@@ -1,22 +1,22 @@
 //! Application entry point.
-//! 
-//! Handles command-line argument parsing, configuration loading, and 
-//! dispatching the application to either "Waybar Mode" (one-shot JSON output) 
+//!
+//! Handles command-line argument parsing, configuration loading, and
+//! dispatching the application to either "Waybar Mode" (one-shot JSON output)
 //! or "TUI Mode" (interactive terminal UI).
 
 mod app;
-mod ui;
 mod config;
 mod network;
+mod ui;
 
 use anyhow::Result;
-use clap::Parser;
-use ratatui::style::Color;
 use app::App;
+use clap::Parser;
 use config::{get_config_path, load_config};
 use network::run_waybar_mode;
-use ui::run_tui;
+use ratatui::style::Color;
 use reqwest::Client;
+use ui::run_tui;
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
@@ -33,13 +33,15 @@ async fn main() -> Result<()> {
     // I strictly define the User-Agent to mimic a real browser, which prevents
     // 403 Forbidden errors from the Yahoo Finance API.
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
                      AppleWebKit/537.36 (KHTML, like Gecko) \
-                     Chrome/106 Safari/537.36")
+                     Chrome/106 Safari/537.36",
+        )
         .cookie_store(true)
         .build()?;
     // "Warm up" the client by hitting the homepage.
-    // This is required to acquire the initial session cookies and "crumb" 
+    // This is required to acquire the initial session cookies and "crumb"
     // needed for subsequent API calls to the v7/v10 endpoints.
     let _ = client.get("https://finance.yahoo.com").send().await;
     let args = Args::parse();
@@ -52,7 +54,7 @@ async fn main() -> Result<()> {
         println!("Initializing TUI mode...");
         run_tui(&client, &mut app).await?
     } else {
-        run_waybar_mode(&client).await?; 
+        run_waybar_mode(&client).await?;
     }
     Ok(())
 }

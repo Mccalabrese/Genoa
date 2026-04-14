@@ -1,9 +1,9 @@
+use crate::model::{Appointment, Recurrence};
+use chrono::{Datelike, NaiveDate};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use chrono::{NaiveDate, Datelike};
-use serde::{Serialize, Deserialize};
-use crate::model::{Appointment, Recurrence};
 
 #[derive(Serialize, Deserialize)]
 struct StorageData {
@@ -34,7 +34,7 @@ impl CalendarEngine {
 
     pub fn remove_appointment(&mut self, id: u32) -> bool {
         // Removes the item and returns true if it existed
-        self.appointments.remove(&id).is_some() 
+        self.appointments.remove(&id).is_some()
     }
 
     pub fn get_appointments_on_day(&self, date: NaiveDate) -> Vec<&Appointment> {
@@ -57,19 +57,29 @@ impl CalendarEngine {
             return start_date == target_date;
         }
 
-        if app.exceptions.iter().any(|ex| ex.date_naive() == target_date) {
+        if app
+            .exceptions
+            .iter()
+            .any(|ex| ex.date_naive() == target_date)
+        {
             return false;
         }
 
         match app.rule.as_ref().unwrap() {
             Recurrence::Daily { until } => {
                 if let Some(end_dt) = until
-                    && target_date > end_dt.date_naive() { return false; }
+                    && target_date > end_dt.date_naive()
+                {
+                    return false;
+                }
                 true
-            },
+            }
             Recurrence::Weekly { days, until } => {
                 if let Some(end_dt) = until
-                    && target_date > end_dt.date_naive() { return false; }
+                    && target_date > end_dt.date_naive()
+                {
+                    return false;
+                }
 
                 days.contains(&target_date.weekday())
             }

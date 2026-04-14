@@ -1,18 +1,18 @@
-use ratatui::widgets::ListState;
+use crate::ui::AppEvent;
 use ratatui::style::Color;
+use ratatui::widgets::ListState;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
-use crate::ui::AppEvent;
 
-use crate::network::{FinnhubQuote, YahooSearchResult};
 use crate::app::InputMode::Normal;
 use crate::config::StockStruct;
+use crate::network::{FinnhubQuote, YahooSearchResult};
 
 /// Defines the input state of the TUI.
 /// We use a state machine approach to change keybindings based on context.
 #[derive(Debug, PartialEq)]
 pub enum InputMode {
-    Normal, //Navigation and viewing
+    Normal,   //Navigation and viewing
     Editing,  // Typing in the search bar
     KeyEntry, // Force-prompt for API key on first run
 }
@@ -26,9 +26,18 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             stocks: vec![
-                StockStruct { symbol: "SPY".into(), sidebar: true },
-                StockStruct { symbol: "QQQ".into(), sidebar: true },
-                StockStruct { symbol: "BTC-USD".into(), sidebar: true },
+                StockStruct {
+                    symbol: "SPY".into(),
+                    sidebar: true,
+                },
+                StockStruct {
+                    symbol: "QQQ".into(),
+                    sidebar: true,
+                },
+                StockStruct {
+                    symbol: "BTC-USD".into(),
+                    sidebar: true,
+                },
             ],
             api_key: None,
         }
@@ -72,21 +81,23 @@ pub struct App {
     pub search_results: Vec<YahooSearchResult>,
     pub search_state: ListState,
     pub market_status: Option<MarketStatus>,
-    
+
     // Input Handling
     pub input: String,
     pub input_mode: InputMode,
-    
+
     // UI Feedback
     pub message: String,
     pub message_color: Color,
-
-
 }
 
-
 impl App {
-    pub fn new(config: Config, message: String, message_color: Color, stock_history: Option<Vec<(f64, f64)>>) -> Self {
+    pub fn new(
+        config: Config,
+        message: String,
+        message_color: Color,
+        stock_history: Option<Vec<(f64, f64)>>,
+    ) -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
         // Detect if this is a first run (missing API key) and force KeyEntry mode.
@@ -96,7 +107,7 @@ impl App {
             (
                 InputMode::KeyEntry,
                 "Welcome! Please enter your Finnhub API Key.".to_string(),
-                Color::Yellow
+                Color::Yellow,
             )
         };
         Self {
@@ -118,7 +129,9 @@ impl App {
     }
     /// Moves the selection index down, wrapping around if necessary.
     pub fn next(&mut self) {
-        if self.stocks.is_empty() { return; }
+        if self.stocks.is_empty() {
+            return;
+        }
         let i = match self.state.selected() {
             Some(i) => (i + 1) % self.stocks.len(),
             None => 0,
@@ -127,7 +140,9 @@ impl App {
     }
 
     pub fn previous(&mut self) {
-        if self.stocks.is_empty() { return; }
+        if self.stocks.is_empty() {
+            return;
+        }
         let i = match self.state.selected() {
             Some(i) => (i + self.stocks.len() - 1) % self.stocks.len(),
             None => 0,
@@ -145,9 +160,11 @@ impl App {
 
     pub fn delete(&mut self) {
         if let Some(selected) = self.state.selected() {
-            if self.stocks.is_empty() { return; }
+            if self.stocks.is_empty() {
+                return;
+            }
             self.stocks.remove(selected);
-            
+
             if self.stocks.is_empty() {
                 self.state.select(None);
             } else if selected >= self.stocks.len() {
@@ -155,9 +172,11 @@ impl App {
             }
         }
     }
-    
+
     pub fn next_search(&mut self) {
-        if self.search_results.is_empty() { return; }
+        if self.search_results.is_empty() {
+            return;
+        }
         let i = match self.search_state.selected() {
             Some(i) => (i + 1) % self.search_results.len(),
             None => 0,
@@ -166,7 +185,9 @@ impl App {
     }
 
     pub fn previous_search(&mut self) {
-        if self.search_results.is_empty() { return; }
+        if self.search_results.is_empty() {
+            return;
+        }
         let i = match self.search_state.selected() {
             Some(i) => (i + self.search_results.len() - 1) % self.search_results.len(),
             None => 0,
@@ -175,11 +196,10 @@ impl App {
     }
 
     pub fn toggle_sidebar_view(&mut self) {
-        if let Some(selected) = self.state.selected() {
-            if let Some(stock) = self.stocks.get_mut(selected) {
+        if let Some(selected) = self.state.selected()
+            && let Some(stock) = self.stocks.get_mut(selected) {
                 stock.sidebar = !stock.sidebar;
             }
-        }
     }
 
     ///Handles adding a stock and triggers data fetch
@@ -190,7 +210,9 @@ impl App {
             self.input.trim().to_uppercase()
         };
 
-        if new_symbol.is_empty() { return; }
+        if new_symbol.is_empty() {
+            return;
+        }
 
         if self.stocks.iter().any(|s| s.symbol == new_symbol) {
             self.message = format!("{} exists!", new_symbol);
@@ -198,12 +220,15 @@ impl App {
         } else {
             self.message_color = Color::Green;
             self.message = format!("Added {}", &new_symbol);
-            
+
             self.state.select(Some(self.stocks.len() - 1));
-            
+
             // Trigger background work
             self.trigger_fetch(new_symbol.clone(), tx, client);
-            self.stocks.push(StockStruct { symbol: new_symbol, sidebar: true });
+            self.stocks.push(StockStruct {
+                symbol: new_symbol,
+                sidebar: true,
+            });
             let tx_clone = tx.clone();
             tokio::spawn(async move {
                 let _ = tx_clone.send(AppEvent::SaveConfig).await;
@@ -227,10 +252,14 @@ impl App {
             let _ = tx.send(AppEvent::QuoteFetched(symbol.clone(), q_res)).await;
 
             let h_res = crate::network::fetch_history(&client, &symbol, &api_key).await;
-            let _ = tx.send(AppEvent::HistoryFetched(symbol.clone(), h_res)).await;
+            let _ = tx
+                .send(AppEvent::HistoryFetched(symbol.clone(), h_res))
+                .await;
 
             let d_res = crate::network::fetch_details(&client, &symbol, &api_key).await;
-            let _ = tx.send(AppEvent::DetailsFetched(symbol.clone(), d_res)).await;
+            let _ = tx
+                .send(AppEvent::DetailsFetched(symbol.clone(), d_res))
+                .await;
         });
     }
 }
