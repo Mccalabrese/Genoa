@@ -54,11 +54,19 @@ fn load_config() -> Result<GlobalConfig> {
 /// Represents a geolocation coordinate with accuracy metrics.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Location {
+    #[serde(rename = "lat")]
     latitude: f64,
+    #[serde(rename = "lon")]
     longitude: f64,
     accuracy: f64,
 }
-
+#[derive(Serialize)]
+struct OwmRequest<'a> {
+    #[serde(flatten)]
+    location: &'a Location,
+    appid: &'a str,
+    units: &'a str,
+}
 // OpenWeatherMap API Response Structures
 // I only deserialize the fields we need to keep memory footprint low.
 #[derive(Deserialize, Debug, Clone)]
@@ -212,12 +220,14 @@ async fn fetch_weather(
     loc: &Location,
     api_key: &str,
 ) -> Result<CurrentWeather> {
-    let url = format!(
-        "https://api.openweathermap.org/data/2.5/weather?lat={}&lon={}&appid={}&units=imperial",
-        loc.latitude, loc.longitude, api_key
-    );
+    let request = OwmRequest {
+        location: loc,
+        appid: api_key,
+        units: "imperial",
+    };
     let response = client
-        .get(&url)
+        .get("https://api.openweathermap.org/data/2.5/weather")
+        .query(&request)
         .send()
         .await?
         .json::<CurrentWeather>()
@@ -227,12 +237,14 @@ async fn fetch_weather(
 /// Performs reverse geocoding to convert coords -> "City, State".
 /// Uses OpenStreetMap (Nominatim).
 async fn get_city_state(client: &reqwest::Client, loc: &Location) -> Result<(String, String)> {
-    let url = format!(
-        "https://nominatim.openstreetmap.org/reverse?format=json&lat={}&lon={}&zoom=10",
-        loc.latitude, loc.longitude
-    );
+    //let url = format!(
+    //    "https://nominatim.openstreetmap.org/reverse?format=json&lat={}&lon={}&zoom=10",
+    //    loc.latitude, loc.longitude
+    //);
     let response = client
-        .get(&url)
+        .get("https://nominatim.openstreetmap.org/reverse")
+        .query(loc)
+        .query(&[("format", "json"), ("zoom", "10")])
         .send()
         .await?
         .json::<NominatimResponse>()
@@ -253,12 +265,19 @@ async fn fetch_forecast(
     loc: &Location,
     api_key: &str,
 ) -> Result<Forecast> {
-    let url = format!(
-        "https://api.openweathermap.org/data/2.5/forecast?lat={}&lon={}&appid={}&units=imperial",
-        loc.latitude, loc.longitude, api_key
-    );
+    let request = OwmRequest {
+        location: loc,
+        appid: api_key,
+        units: "imperial",
+    };
 
-    let response = client.get(&url).send().await?.json::<Forecast>().await?;
+    let response = client
+        .get("https://api.openweathermap.org/data/2.5/forecast")
+        .query(&request)
+        .send()
+        .await?
+        .json::<Forecast>()
+        .await?;
     Ok(response)
 }
 
