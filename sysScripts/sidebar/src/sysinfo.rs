@@ -4,9 +4,9 @@
 //! Designed to be lightweight and battery-friendly by fetching data only once at startup
 //! rather than polling continuously.
 
-use gtk4::prelude::*;
-use gtk4::{Box, Label, Orientation, Align};
 use crate::helpers::get_stdout;
+use gtk4::prelude::*;
+use gtk4::{Align, Box, Label, Orientation};
 
 /// Builds the System Info card widget.
 /// Returns a GTK Box containing labeled rows of system data.
@@ -36,10 +36,10 @@ pub fn build() -> Box {
 
     // Session detection: Useful for knowing if we are in Sway, Niri, or Hyprland
     let wm = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "Wayland".to_string());
-    
+
     // Package Count: Piped command requires execution via 'sh -c'
     let pkgs = crate::helpers::pkg_count();
-    
+
     // Uptime: 'uptime -p' gives a human-readable string (e.g., "up 2 hours, 10 minutes")
     // We strip the "up " prefix for cleaner UI.
     let uptime = get_stdout("uptime", &["-p"]).replace("up ", "");
@@ -83,5 +83,3 @@ pub fn build() -> Box {
 
     container
 }
-
-

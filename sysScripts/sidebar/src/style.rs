@@ -2,7 +2,7 @@
 //!
 //! This module manages the visual appearance of the application.
 //! It uses the standard GTK4 CSS provider to load a runtime stylesheet.
-//! 
+//!
 //! Design System:
 //! - **Colors:** Catppuccin-inspired palette (Blue accents, Dark Grey background).
 //! - **Glassmorphism:** Heavy use of semi-transparent backgrounds (`rgba`) and blur effects.
@@ -17,7 +17,8 @@ pub fn load_css() {
 
     // 2. Define Styles
     // We load the CSS data directly from memory for a self-contained binary.
-    provider.load_from_data("
+    provider.load_from_data(
+        "
         /* --- BASE WINDOW & ZONES --- */
         window {
             /* Dark, semi-transparent background (Catppuccin Base) */
@@ -227,7 +228,8 @@ pub fn load_css() {
             color: #cdd6f4; /* Text White */
             margin-bottom: 8px;
         }
-    ");
+    ",
+    );
 
     // 3. Apply to Display
     // Register this provider for the default screen so all widgets inherit these styles.

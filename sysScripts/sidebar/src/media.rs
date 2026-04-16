@@ -2,11 +2,11 @@
 //!
 //! The card stays hidden when no MPRIS player is active and updates once per second.
 
-use gtk4::prelude::*;
-use gtk4::{Box, Button, Label, Orientation, Align};
 use crate::helpers; // Shared helper for running shell commands
+use gtk4::prelude::*;
+use gtk4::{Align, Box, Button, Label, Orientation};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 struct MediaSnapshot {
     status: String,
@@ -70,21 +70,34 @@ pub fn build() -> Box {
         .margin_top(5)
         .build();
 
-    let btn_prev = Button::builder().label("⏮").css_classes(vec!["media-btn"]).build();
-    let btn_play = Button::builder().label("⏸").css_classes(vec!["media-btn", "play-btn"]).build();
-    let btn_next = Button::builder().label("⏭").css_classes(vec!["media-btn"]).build();
+    let btn_prev = Button::builder()
+        .label("⏮")
+        .css_classes(vec!["media-btn"])
+        .build();
+    let btn_play = Button::builder()
+        .label("⏸")
+        .css_classes(vec!["media-btn", "play-btn"])
+        .build();
+    let btn_next = Button::builder()
+        .label("⏭")
+        .css_classes(vec!["media-btn"])
+        .build();
 
     // --- Signal Handlers ---
     // These buttons simply fire-and-forget commands to playerctl.
     // We rely on the polling loop to update the UI state (e.g. changing Pause to Play icon).
 
-    btn_prev.connect_clicked(|_| { helpers::run_command("playerctl", &["previous"]); });
-    btn_next.connect_clicked(|_| { helpers::run_command("playerctl", &["next"]); });
-    
+    btn_prev.connect_clicked(|_| {
+        helpers::run_command("playerctl", &["previous"]);
+    });
+    btn_next.connect_clicked(|_| {
+        helpers::run_command("playerctl", &["next"]);
+    });
+
     let btn_play_clone = btn_play.clone();
-    btn_play.connect_clicked(move |_| { 
+    btn_play.connect_clicked(move |_| {
         helpers::run_command("playerctl", &["play-pause"]);
-        // Note: We don't manually change the icon here. 
+        // Note: We don't manually change the icon here.
         // We let the next poll cycle (max 1s delay) detect the state change.
         // This prevents the UI from getting out of sync if the command fails.
     });

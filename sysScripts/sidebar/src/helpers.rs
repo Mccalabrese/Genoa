@@ -1,7 +1,7 @@
 //! Shared helper utilities for sidebar widgets and command execution.
 
-use gtk4::prelude::*;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc, Weekday};
+use gtk4::prelude::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -140,9 +140,10 @@ fn get_month_days_with_appointments(year: i32, month: u32) -> HashSet<u32> {
 
     for day_num in 1..=days_in_month {
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day_num)
-            && all.iter().any(|appt| occurs_on(appt, date)) {
-                days.insert(day_num);
-            }
+            && all.iter().any(|appt| occurs_on(appt, date))
+        {
+            days.insert(day_num);
+        }
     }
 
     days
@@ -178,30 +179,31 @@ pub fn make_icon_button(icon_name: &str, tooltip: &str) -> gtk4::Button {
         .height_request(30)
         .tooltip_text(tooltip)
         .build()
-        
 }
 /// Creates a button with a "Notification Badge" overlay (Red circle with number).
 /// Returns tuple: (The Button Widget, The Label Widget for the count).
-pub fn make_badged_button(icon_name: &str, count: &str, tooltip: &str) -> (gtk4::Button, gtk4::Label) {
+pub fn make_badged_button(
+    icon_name: &str,
+    count: &str,
+    tooltip: &str,
+) -> (gtk4::Button, gtk4::Label) {
     // 1. Base Layer: The Icon
     let icon = gtk4::Image::builder()
         .icon_name(icon_name)
         .pixel_size(24)
         .build();
-        
+
     // 2. Top Layer: The Badge
     let badge = gtk4::Label::builder()
         .label(count)
         .css_classes(vec!["badge".to_string()])
-        .halign(gtk4::Align::End)   // Align to Top-Right corner
-        .valign(gtk4::Align::Start) 
-        .visible(count != "0")      // Auto-hide if count is zero
+        .halign(gtk4::Align::End) // Align to Top-Right corner
+        .valign(gtk4::Align::Start)
+        .visible(count != "0") // Auto-hide if count is zero
         .build();
 
     // 3. Stack them using GTK Overlay
-    let overlay = gtk4::Overlay::builder()
-        .child(&icon)
-        .build();
+    let overlay = gtk4::Overlay::builder().child(&icon).build();
     overlay.add_overlay(&badge);
 
     // 4. Wrap in Button
@@ -244,10 +246,10 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
     let Some(first_day) = NaiveDate::from_ymd_opt(year, month, 1) else {
         return grid;
     };
-    
+
     // Calculate padding: If Nov 1st is Wednesday (3), we need 3 empty slots (Sun, Mon, Tue).
-    let start_offset = first_day.weekday().num_days_from_sunday(); 
-    
+    let start_offset = first_day.weekday().num_days_from_sunday();
+
     // Calculate total days in month:
     // Rust's chrono doesn't have `days_in_month()`, so we subtract:
     // (First day of NEXT month) - (First day of THIS month)
@@ -269,15 +271,15 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
         // Build the Cell Content (Vertical Box: Number + Dot)
         let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         vbox.set_valign(gtk4::Align::Center);
-        
+
         let num_label = gtk4::Label::builder()
             .label(day_num.to_string())
             .css_classes(vec!["calendar-day-num".to_string()])
             .build();
-        
+
         // Appointment Indicator (Red dot) based on cal-tui data.
         let has_appointment = appointment_days.contains(&(day_num as u32));
-        
+
         let dot_label = gtk4::Label::builder()
             .label("•")
             .css_classes(vec!["calendar-dot".to_string()])
@@ -286,7 +288,7 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
 
         vbox.append(&num_label);
         vbox.append(&dot_label);
-        
+
         let mut btn_classes = vec!["calendar-day-btn".to_string()];
 
         if today.year() == year && today.month() == month && today.day() == day_num as u32 {
@@ -305,11 +307,7 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
         btn.connect_clicked(move |_| {
             println!("Clicked Date: {}/{}/{}", year, month, day_num);
             let date_arg = format!("{}-{}-{}", year, month, day_num);
-            run_in_ghostty(
-                "calendar-tui",
-                "cal-tui",
-                &["--date", date_arg.as_str()],
-            );
+            run_in_ghostty("calendar-tui", "cal-tui", &["--date", date_arg.as_str()]);
         });
 
         grid.attach(&btn, col, row, 1, 1);
@@ -399,10 +397,7 @@ fn log_command_failure(kind: &str, program: &str, args: &[&str], detail: &str) {
         args.join(" ")
     };
 
-    let line = format!(
-        "{} | {} | {} {} | {}\n",
-        ts, kind, program, arg_str, detail
-    );
+    let line = format!("{} | {} | {} {} | {}\n", ts, kind, program, arg_str, detail);
 
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
@@ -450,7 +445,12 @@ fn run_output_with_retry(program: &str, args: &[&str]) -> Option<std::process::O
                         "non_zero_exit",
                         &resolved_program,
                         args,
-                        &format!("attempt={} status={:?} stderr={}", attempt, output.status.code(), stderr),
+                        &format!(
+                            "attempt={} status={:?} stderr={}",
+                            attempt,
+                            output.status.code(),
+                            stderr
+                        ),
                     );
                     return None;
                 }
@@ -554,7 +554,10 @@ pub fn is_process_running(process_name: &str) -> bool {
 
 pub fn pkg_count() -> String {
     match run_output_with_retry("pacman", &["-Q"]) {
-        Some(o) => String::from_utf8_lossy(&o.stdout).lines().count().to_string(),
+        Some(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .count()
+            .to_string(),
         _ => "N/A".to_string(),
     }
 }

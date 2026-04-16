@@ -197,9 +197,10 @@ impl App {
 
     pub fn toggle_sidebar_view(&mut self) {
         if let Some(selected) = self.state.selected()
-            && let Some(stock) = self.stocks.get_mut(selected) {
-                stock.sidebar = !stock.sidebar;
-            }
+            && let Some(stock) = self.stocks.get_mut(selected)
+        {
+            stock.sidebar = !stock.sidebar;
+        }
     }
 
     ///Handles adding a stock and triggers data fetch

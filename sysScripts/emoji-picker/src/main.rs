@@ -1,14 +1,14 @@
 //! Emoji Picker Utility (emoji-picker)
 //!
 //! A Wayland-native utility that allows users to select Unicode emojis via Rofi.
-//! 
+//!
 //! Key Features:
 //! 1. **Zero-Latency Search:** Pre-generates the entire Unicode dataset in memory.
 //! 2. **Hidden Metadata:** Injects invisible Pango markup so users can search by name ("smile")
 //!    without cluttering the visual interface with text.
 //! 3. **Wayland Integration:** Pipes the result directly to `wl-copy` for immediate pasting.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use std::fmt::Write;
 use std::fs;
@@ -18,9 +18,10 @@ use std::process::{Command, Stdio};
 
 fn expand_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        } 
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(stripped);
+    }
     PathBuf::from(path)
 }
 
@@ -40,8 +41,12 @@ fn load_config() -> Result<GlobalConfig> {
     let config_path = dirs::home_dir()
         .context("Cannot find home dir")?
         .join(".config/rust-dotfiles/config.toml");
-    let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config file from path {}", config_path.display()))?;
+    let config_str = fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "Failed to read config file from path {}",
+            config_path.display()
+        )
+    })?;
     let config: GlobalConfig = toml::from_str(&config_str)
         .context("Failed to parse config.toml. Check for syntax errors.")?;
     Ok(config)
@@ -50,10 +55,10 @@ fn load_config() -> Result<GlobalConfig> {
 // --- Core Logic ---
 
 /// Generates the input buffer for Rofi.
-/// 
-/// UX Trick: I want users to be able to search for "fire" and see 🔥, 
+///
+/// UX Trick: I want users to be able to search for "fire" and see 🔥,
 /// but we don't want the word "fire" taking up screen space.
-/// We use Pango markup to make the metadata (name, shortcode) strictly invisible 
+/// We use Pango markup to make the metadata (name, shortcode) strictly invisible
 /// (size 1, transparent color), but Rofi's filter engine still sees it.
 fn build_emoji_list() -> String {
     // Pre-allocate memory to avoid re-allocations during the loop (approx 60kb data)
@@ -62,12 +67,12 @@ fn build_emoji_list() -> String {
         let shortcode = emoji.shortcode().unwrap_or("");
         // Format: <Visible Emoji> <Invisible Keywords>
         let _ = writeln!(
-            buffer, 
-            "{} <span size='1' foreground='#00000000'>{} {}</span>", 
-            emoji.as_str(), 
-            emoji.name(), 
+            buffer,
+            "{} <span size='1' foreground='#00000000'>{} {}</span>",
+            emoji.as_str(),
+            emoji.name(),
             shortcode
-            );
+        );
     }
     buffer
 }
@@ -77,8 +82,8 @@ fn build_emoji_list() -> String {
 fn show_rofi(list: &str, config: &EmojiConfig) -> Result<String> {
     let rofi_config_path = expand_path(&config.rofi_config);
     let mut child = Command::new("rofi")
-        .arg("-i")           // Case insensitive search
-        .arg("-dmenu")       // Dmenu mode (read stdin)
+        .arg("-i") // Case insensitive search
+        .arg("-dmenu") // Dmenu mode (read stdin)
         .arg("-markup-rows") // Enable Pango markup parsing (for the hidden text hack)
         .arg("-config")
         .arg(rofi_config_path)
@@ -94,10 +99,10 @@ fn show_rofi(list: &str, config: &EmojiConfig) -> Result<String> {
         stdin.write_all(list.as_bytes())?;
     }
     let output = child.wait_with_output()?;
-    
+
     // Code 1 usually means the user pressed Esc (Cancel), which isn't a crash.
     if !output.status.success() && output.status.code() != Some(1) {
-         return Err(anyhow!("Rofi failed with an error"));
+        return Err(anyhow!("Rofi failed with an error"));
     }
 
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
@@ -128,7 +133,7 @@ fn parse_and_copy(selection: &str) -> Result<()> {
     if !child.wait()?.success() {
         return Err(anyhow!("wl-copy failed"));
     }
-    
+
     Ok(())
 }
 fn main() -> Result<()> {
@@ -143,4 +148,3 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
-
