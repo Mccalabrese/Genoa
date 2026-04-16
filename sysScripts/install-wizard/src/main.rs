@@ -917,7 +917,7 @@ fn install_aur_packages(home: &Path) -> Result<(), std::io::Error> {
 /// configuring logind and greetd. This function is idempotent and can be safely run multiple times
 /// without causing issues.
 fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
-    sanitize_mkinitcpio()?;
+    sanitize_mkinitcpio(sys)?;
     sys.run_cmd("sudo", &["systemctl", "enable", "geoclue.service"])?;
     sys.run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"])?;
     sys.run_cmd("sudo", &["systemctl", "enable", "bolt.service"])?;
@@ -943,7 +943,7 @@ fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::
 
 /// Cleans up the `mkinitcpio.conf` file to fix the known Archinstall 2025 bug that appends 'o"' to
 /// the end of the file,
-fn sanitize_mkinitcpio() -> Result<(), std::io::Error> {
+fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     // --- SANITIZE MKINITCPIO (Fix Archinstall 2025 Bug) ---
     // This protects NVIDIA users from the 'o"' corruption crash.
     println!("   🧹 Checking mkinitcpio.conf for corruption...");
@@ -951,7 +951,7 @@ fn sanitize_mkinitcpio() -> Result<(), std::io::Error> {
 
     // Check if the file specifically ends with the garbage (ignoring whitespace)
     // We read it first to be safe, rather than firing sed blindly.
-    if let Ok(content) = fs::read_to_string(mkinit_path) {
+    if let Ok(content) = sys.read_file_to_string(mkinit_path) {
         let trimmed = content.trim(); // Removes trailing \n
         if trimmed.ends_with("o\"") || trimmed.ends_with("o”") {
             println!("   ⚠️  Corruption detected at end of file. Cleaning up...");
@@ -969,21 +969,24 @@ fn sanitize_mkinitcpio() -> Result<(), std::io::Error> {
             }
             let mut temp_file = NamedTempFile::new()?;
             writeln!(temp_file, "{}", lines.join("\n"))?;
-            let status = Command::new("sudo")
-                .arg("install")
-                .arg("-m")
-                .arg("644")
-                .arg("-o")
-                .arg("root")
-                .arg("-g")
-                .arg("root")
-                .arg(temp_file.path())
-                .arg(mkinit_path)
-                .status()?;
-            if !status.success() {
-                eprintln!("{}", "❌ Failed to sanitize mkinitcpio.conf.".red());
-                return Err(std::io::Error::other("Failed to sanitize mkinitcpio.conf"));
-            }
+            let temp_path = temp_file
+                .path()
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
+            sys.run_cmd(
+                "sudo",
+                &[
+                    "install",
+                    "-m",
+                    "644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "root",
+                    temp_path,
+                    mkinit_path,
+                ],
+            )?;
         }
     }
     Ok(())
@@ -2426,7 +2429,11 @@ mod tests {
         );
         let result = configure_dns(&env);
         let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            6,
+            "Expected exactly 6 commands to be run for DNS configuration"
+        );
         assert_eq!(
             log[0],
             (
@@ -2489,6 +2496,130 @@ mod tests {
                 "sudo".to_string(),
                 vec!["systemctl".to_string(), "daemon-reload".to_string()]
             )
+        );
+    }
+    #[test]
+    fn test_configure_dns_no_update_needed() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
+            "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']"
+                .to_string(),
+        );
+        let result = configure_dns(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            5,
+            "Expected exactly 5 commands to be run for DNS configuration"
+        );
+        assert_eq!(
+            log[0],
+            (
+                "sudo".to_string(),
+                vec![
+                    "pacman".to_string(),
+                    "-S".to_string(),
+                    "--needed".to_string(),
+                    "--noconfirm".to_string(),
+                    "dnscrypt-proxy".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[1],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "--now".to_string(),
+                    "dnscrypt-proxy".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[2],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "disable".to_string(),
+                    "--now".to_string(),
+                    "cloudflared-dns".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[3],
+            (
+                "sudo".to_string(),
+                vec![
+                    "rm".to_string(),
+                    "-f".to_string(),
+                    "/etc/systemd/system/cloudflared-dns.service".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[4],
+            (
+                "sudo".to_string(),
+                vec!["systemctl".to_string(), "daemon-reload".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn test_mkinit() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            "\ntest config content\no\"".to_string(),
+        );
+        let result = sanitize_mkinitcpio(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected exactly one command to be run for mkinitcpio sanitization"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string()
+                ])
+        );
+    }
+    #[test]
+    fn test_mkinit_clean_config() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            "\ntest config content\n".to_string(),
+        );
+        let result = sanitize_mkinitcpio(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert!(
+            log.is_empty(),
+            "Expected no commands to be run for clean config"
         );
     }
 }
