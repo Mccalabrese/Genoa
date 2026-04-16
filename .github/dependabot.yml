@@ -1,0 +1,69 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/battery-daemon"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/cal-tui"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/clip-manager"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/cloudflare-toggle"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/emoji-picker"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/install-wizard"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/kb-launcher"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/radio-menu"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/rfkill-manager"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/sidebar"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/sway-workspace"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/update-check"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/updater"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/wallpaper-manager"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/waybar-finance"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/waybar-switcher"
+    schedule: { interval: "weekly" }
+
+  - package-ecosystem: "cargo"
+    directory: "/sysScripts/waybar-weather"
+    schedule: { interval: "weekly" }
