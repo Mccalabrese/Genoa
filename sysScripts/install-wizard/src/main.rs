@@ -2429,6 +2429,7 @@ mod tests {
         );
         let result = configure_dns(&env);
         let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
         assert_eq!(
             log.len(),
             6,
