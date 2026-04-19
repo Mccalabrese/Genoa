@@ -33,4 +33,12 @@ impl CmdExecutor for MockEnv {
             ))
         }
     }
+    fn get_env_var(&self, key: &str) -> Option<String> {
+        self.env_vars.get(key).cloned()
+    }
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        path.to_str()
+            .map(|s| self.mock_files.contains_key(s))
+            .unwrap_or(false)
+    }
 }

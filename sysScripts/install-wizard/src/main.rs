@@ -937,7 +937,7 @@ fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::
 
     configure_logind()?;
     configure_greetd()?;
-    configure_shell(home)?;
+    configure_shell(sys, home)?;
     Ok(())
 }
 
@@ -1057,21 +1057,28 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
 
 ///Configures the user's shell to Zsh and sets up Tmux Plugin Manager for enhanced terminal
 ///experience.
-fn configure_shell(home: &Path) -> Result<(), std::io::Error> {
+fn configure_shell(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
     println!("    🔧 Setting Shell to Zsh...");
-    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-    Command::new("sudo")
-        .args(["chsh", "-s", "/usr/bin/zsh", &user])
-        .output()?;
+    let user = sys
+        .get_env_var("USER")
+        .unwrap_or_else(|| "root".to_string());
+    if let Err(e) = sys.run_cmd("sudo", &["chsh", "-s", "/usr/bin/zsh", &user]) {
+        eprintln!("   ⚠️  Failed to change shell: {}", e)
+    };
 
     println!("    ✨ Setting up Tmux Plugin Manager...");
     let tpm_dir = home.join(".tmux/plugins/tpm");
-    if !tpm_dir.exists() {
-        Command::new("git")
-            .arg("clone")
-            .arg("https://github.com/tmux-plugins/tpm")
-            .arg(tpm_dir)
-            .status()?;
+    if !sys.path_exists(&tpm_dir) {
+        if let Some(tpm_str) = tpm_dir.to_str() {
+            if let Err(e) = sys.run_cmd(
+                "git",
+                &["clone", "https://github.com/tmux-plugins/tpm", tpm_str],
+            ) {
+                eprintln!("   ⚠️  Failed to clone TPM: {}", e)
+            }
+        } else {
+            eprintln!("   ⚠️  Invalid path for TPM directory.");
+        };
     }
     Ok(())
 }
@@ -2621,6 +2628,73 @@ mod tests {
         assert!(
             log.is_empty(),
             "Expected no commands to be run for clean config"
+        );
+    }
+    #[test]
+    fn test_config_shell() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.env_vars
+            .insert("USER".to_string(), "testuser".to_string());
+        let result = configure_shell(&env, std::path::Path::new("/home/testuser"));
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            2,
+            "Expected two commands to be run when TPM does not exist"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "chsh".to_string(),
+                    "-s".to_string(),
+                    "/usr/bin/zsh".to_string(),
+                ])
+        );
+        assert_eq!(
+            log[1],
+            (
+                "git".to_string(),
+                vec![
+                    "clone".to_string(),
+                    "https://github.com/tmux-plugins/tpm".to_string(),
+                    "/home/testuser/.tmux/plugins/tpm".to_string()
+                ]
+            )
+        );
+    }
+    #[test]
+    fn test_config_shell_tpm_exists() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.env_vars
+            .insert("USER".to_string(), "testuser".to_string());
+        env.mock_files.insert(
+            "/home/testuser/.tmux/plugins/tpm".to_string(),
+            "".to_string(),
+        );
+        let result = configure_shell(&env, std::path::Path::new("/home/testuser"));
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected one commands to be run when TPM already exists"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "chsh".to_string(),
+                    "-s".to_string(),
+                    "/usr/bin/zsh".to_string(),
+                ])
         );
     }
 }

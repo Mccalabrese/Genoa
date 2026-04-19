@@ -21,4 +21,10 @@ impl CmdExecutor for LiveEnv {
     fn read_file_to_string(&self, path: &str) -> Result<String, std::io::Error> {
         std::fs::read_to_string(path)
     }
+    fn get_env_var(&self, key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
+    fn path_exists(&self, path: &std::path::Path) -> bool {
+        path.exists()
+    }
 }
