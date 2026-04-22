@@ -935,7 +935,7 @@ fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::
     let content = "PATH=$HOME/.cargo/bin:$PATH\n";
     fs::write(&env_file, content)?;
 
-    configure_logind()?;
+    configure_logind(sys)?;
     configure_greetd()?;
     configure_shell(sys, home)?;
     Ok(())
@@ -1085,10 +1085,10 @@ fn configure_shell(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::E
 
 ///Configures systemd-logind to ensure that user processes are killed on logout, preventing
 ///lingering sessions and resource leaks.
-fn configure_logind() -> Result<(), std::io::Error> {
+fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("    🔧 Configuring Logind...");
     let logind_conf = "/etc/systemd/logind.conf";
-    let content = fs::read_to_string(logind_conf)?;
+    let content = sys.read_file_to_string(logind_conf)?;
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     let mut found = false;
     let mut modified = false;
@@ -1121,24 +1121,24 @@ fn configure_logind() -> Result<(), std::io::Error> {
     if modified {
         let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "{}", lines.join("\n"))?;
-        let status = Command::new("sudo")
-            .arg("install")
-            .arg("-m")
-            .arg("644")
-            .arg("-o")
-            .arg("root")
-            .arg("-g")
-            .arg("root")
-            .arg(temp_file.path())
-            .arg(logind_conf)
-            .status()?;
-        if !status.success() {
-            eprintln!(
-                "{}",
-                "❌ Failed to update logind.conf with KillUserProcesses.".red()
-            );
-            return Err(std::io::Error::other("Failed to update logind.conf"));
-        }
+        let temp_path = temp_file
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
+        sys.run_cmd(
+            "sudo",
+            &[
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                temp_path,
+                logind_conf,
+            ],
+        )?;
     }
     Ok(())
 }
@@ -2694,6 +2694,122 @@ mod tests {
                     "chsh".to_string(),
                     "-s".to_string(),
                     "/usr/bin/zsh".to_string(),
+                ])
+        );
+    }
+    #[test]
+    fn test_config_logind_happy_path() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/systemd/logind.conf".to_string(),
+            "\n[Login]\nKillUserProcesses=yes\n".to_string(),
+        );
+        let result = configure_logind(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            0,
+            "Expected No commands to execute and no modifications to be performed"
+        );
+    }
+    #[test]
+    fn test_config_logind_replacement_path() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/systemd/logind.conf".to_string(),
+            "\n[Login]\n#KillUserProcesses=no\n".to_string(),
+        );
+        let result = configure_logind(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected exactly one command to be run for logind configuration"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                ])
+        );
+    }
+    #[test]
+    fn test_config_logind_insertion_path() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/systemd/logind.conf".to_string(),
+            "\n[Login]\n# Some other config\n".to_string(),
+        );
+        let result = configure_logind(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected exactly one command to be run for logind configuration"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                ])
+        );
+    }
+    #[test]
+    fn test_config_logind_no_login_section() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/systemd/logind.conf".to_string(),
+            "\n[SomeOtherSection]\nConfig=Value\n".to_string(),
+        );
+        let result = configure_logind(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected exactly one command to be run for logind configuration"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
                 ])
         );
     }
