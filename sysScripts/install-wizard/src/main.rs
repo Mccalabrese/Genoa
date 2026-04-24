@@ -936,7 +936,7 @@ fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::
     fs::write(&env_file, content)?;
 
     configure_logind(sys)?;
-    configure_greetd()?;
+    configure_greetd(sys)?;
     configure_shell(sys, home)?;
     Ok(())
 }
@@ -1088,7 +1088,7 @@ fn configure_shell(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::E
 fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("    🔧 Configuring Logind...");
     let logind_conf = "/etc/systemd/logind.conf";
-    let content = sys.read_file_to_string(logind_conf)?;
+    let content = sys.read_file_to_string(logind_conf).unwrap_or_default();
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     let mut found = false;
     let mut modified = false;
@@ -1144,8 +1144,10 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
 }
 
 /// Configures Greetd with a custom tuigreet session and disables other DMs.
-fn configure_greetd() -> Result<(), std::io::Error> {
+fn configure_greetd(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("    🔧 Configuring Greetd...");
+    let greetd_path = "/etc/greetd/config.toml";
+    let existing_content = sys.read_file_to_string(greetd_path).unwrap_or_default();
     let greetd_config = r#"
 [terminal]
 vt = 1
@@ -1153,32 +1155,30 @@ vt = 1
 command = "tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
 user = "greeter"
 "#;
-    tempfile::NamedTempFile::new()
-        .and_then(|mut temp_file| {
-            temp_file.write_all(greetd_config.as_bytes())?;
-            Command::new("sudo")
-                .arg("install")
-                .arg("-m")
-                .arg("644")
-                .arg("-o")
-                .arg("root")
-                .arg("-g")
-                .arg("root")
-                .arg(temp_file.path())
-                .arg("/etc/greetd/config.toml")
-                .status()
-        })
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other("Failed to install greetd config"))
-            }
-        })?;
-    Command::new("sudo")
-        .args(["systemctl", "disable", "gdm", "sddm", "lightdm"])
-        .status()?;
-    run_cmd(
+    if existing_content.trim() != greetd_config.trim() {
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        temp_file.write_all(greetd_config.as_bytes())?;
+        let temp_path = temp_file
+            .path()
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
+        sys.run_cmd(
+            "sudo",
+            &[
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                temp_path,
+                greetd_path,
+            ],
+        )?;
+    }
+    sys.run_cmd_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
+    sys.run_cmd(
         "sudo",
         &["systemctl", "enable", "--force", "greetd.service"],
     )?;
@@ -2810,6 +2810,91 @@ mod tests {
                     "root".to_string(),
                     "-g".to_string(),
                     "root".to_string(),
+                ])
+        );
+    }
+    #[test]
+    fn test_config_greetd_happy_path() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/greetd/config.toml".to_string(),
+            "[terminal]\nvt = 1\n[default_session]\ncommand = \"tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions\"\nuser = \"greeter\"".to_string());
+        let result = configure_greetd(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            2,
+            "Expected 2 commands to execute and no modifications to be performed"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "systemctl".to_string(),
+                    "disable".to_string(),
+                    "gdm".to_string(),
+                    "sddm".to_string(),
+                    "lightdm".to_string()
+                ])
+        );
+        assert!(
+            log[1].0 == "sudo"
+                && log[1].1.starts_with(&[
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "--force".to_string(),
+                    "greetd.service".to_string()
+                ])
+        );
+    }
+    #[test]
+    fn test_config_greetd_update_path() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/greetd/config.toml".to_string(),
+            "other data".to_string(),
+        );
+        let result = configure_greetd(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            3,
+            "Expected 3 commands to execute and modifications to be performed"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string()
+                ])
+        );
+        assert!(
+            log[1].0 == "sudo"
+                && log[1].1.starts_with(&[
+                    "systemctl".to_string(),
+                    "disable".to_string(),
+                    "gdm".to_string(),
+                    "sddm".to_string(),
+                    "lightdm".to_string()
+                ])
+        );
+        assert!(
+            log[2].0 == "sudo"
+                && log[2].1.starts_with(&[
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "--force".to_string(),
+                    "greetd.service".to_string()
                 ])
         );
     }
