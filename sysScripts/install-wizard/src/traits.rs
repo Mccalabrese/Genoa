@@ -4,4 +4,6 @@ pub trait CmdExecutor {
     fn read_file_to_string(&self, path: &str) -> Result<String, std::io::Error>;
     fn get_env_var(&self, key: &str) -> Option<String>;
     fn path_exists(&self, path: &std::path::Path) -> bool;
+    fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error>;
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error>;
 }
