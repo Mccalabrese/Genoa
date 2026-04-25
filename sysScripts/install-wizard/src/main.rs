@@ -328,7 +328,7 @@ fn main() {
         enforce_session_order(is_nvidia);
 
         // 4. Check or install battery-daemon
-        if let Err(e) = setup_battery_daemon(&home) {
+        if let Err(e) = setup_battery_daemon(&home, &live_sys) {
             eprintln!("   ❌ Failed to set up battery-daemon: {}", e);
         }
     }
@@ -1177,7 +1177,7 @@ user = "greeter"
             ],
         )?;
     }
-    sys.run_cmd_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
+    let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
     sys.run_cmd(
         "sudo",
         &["systemctl", "enable", "--force", "greetd.service"],
@@ -2261,10 +2261,10 @@ fn get_ignored_packages() -> Vec<String> {
 }
 // Installs the battery life warning and exectes systemctl poweroff to protect battery
 /// Installs the battery life warning and exectes systemctl poweroff to protect battery
-fn setup_battery_daemon(home: &Path) -> Result<(), std::io::Error> {
+fn setup_battery_daemon(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("   🔋 Configuring Battery Safety Daemon...");
 
-    configure_upower()?;
+    configure_upower(sys)?;
 
     let systemd_user_dir = home.join(".config/systemd/user");
     let service_dest = systemd_user_dir.join("battery-daemon.service");
@@ -2272,91 +2272,85 @@ fn setup_battery_daemon(home: &Path) -> Result<(), std::io::Error> {
     println!("   🔋 Setting up Battery Safety Daemon...");
 
     // Make sure the ~/.config/systemd/user/ folder actually exists
-    std::fs::create_dir_all(&systemd_user_dir)?;
+    sys.create_dir_all(
+        systemd_user_dir
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("invalid utf-8 in systemd path"))?,
+    )?;
     let service_content = include_str!("../../battery-daemon/battery-daemon.service");
-    let existing_content = std::fs::read_to_string(&service_dest).unwrap_or_default();
+    let existing_content = sys
+        .read_file_to_string(
+            service_dest
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("invalid"))?,
+        )
+        .unwrap_or_default();
 
     if existing_content != service_content {
-        println!("   ✅ Battery daemon already configured. Skipping systemd setup.");
-
-        std::fs::write(&service_dest, service_content)?;
-
-        let status = std::process::Command::new("systemctl")
-            .arg("--user")
-            .arg("daemon-reload")
-            .status()?;
-        if !status.success() {
-            eprintln!("   ❌ Failed to reload systemd daemon for battery service.");
-            return Err(std::io::Error::other("Failed to reload systemd daemon"));
-        }
+        println!("   📝 Updating battery daemon configuration.");
+        sys.write_string_to_file(
+            service_dest
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("invalid"))?,
+            service_content,
+        )?;
+        sys.run_cmd("systemctl", &["--user", "daemon-reload"])?;
     } else {
         println!("   ✅ Battery daemon already configured. Skipping systemd setup.");
     }
-    let status = std::process::Command::new("systemctl")
-        .arg("--user")
-        .arg("enable")
-        .arg("--now")
-        .arg("battery-daemon.service")
-        .status()?;
-    if !status.success() {
-        eprintln!("   ❌ Failed to enable/start battery daemon service.");
-        return Err(std::io::Error::other(
-            "Failed to enable/start battery daemon",
-        ));
-    }
 
+    sys.run_cmd(
+        "systemctl",
+        &["--user", "enable", "--now", "battery-daemon.service"],
+    )?;
     println!("   ✅ Battery Daemon ready.");
 
     Ok(())
 }
 
-fn configure_upower() -> Result<(), std::io::Error> {
+fn configure_upower(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("🔋 Enforcing UPower Critical Shutdown at 5%...");
 
     let upower_conf = "/etc/UPower/UPower.conf";
-    let file_content = fs::read_to_string(upower_conf)?;
+    let file_content = sys.read_file_to_string(upower_conf)?;
     let mut needs_update = false;
+    let mut found_percentage = false;
+    let mut found_critical = false;
     let mut lines: Vec<String> = file_content.lines().map(|s| s.to_string()).collect();
 
     for line in &mut lines {
         let normalized = line.trim_start().trim_start_matches('#').trim_start();
-        if normalized.starts_with("PercentageAction=") && !line.starts_with("PercentageAction=5.0")
-        {
-            needs_update = true;
-            *line = "PercentageAction=5.0".to_string();
-        } else if normalized.starts_with("CriticalPowerAction=")
-            && !line.starts_with("CriticalPowerAction=PowerOff")
-        {
-            needs_update = true;
-            *line = "CriticalPowerAction=PowerOff".to_string();
+        if normalized.starts_with("PercentageAction=") {
+            found_percentage = true;
+            if !line.starts_with("PercentageAction=5.0") {
+                needs_update = true;
+                *line = "PercentageAction=5.0".to_string();
+            }
+        } else if normalized.starts_with("CriticalPowerAction=") {
+            found_critical = true;
+            if !line.starts_with("CriticalPowerAction=PowerOff") {
+                needs_update = true;
+                *line = "CriticalPowerAction=PowerOff".to_string();
+            }
         }
+    }
+    if !found_critical {
+        needs_update = true;
+        lines.push("CriticalPowerAction=PowerOff".to_string());
+    }
+    if !found_percentage {
+        needs_update = true;
+        lines.push("PercentageAction=5.0".to_string());
     }
     if !needs_update {
         println!("⚡ UPower already configured for critical shutdown. Skipping.");
         return Ok(());
     }
-    let mut temp_upower_file = NamedTempFile::new()?;
-    writeln!(temp_upower_file, "{}", lines.join("\n"))?;
-    let status = Command::new("sudo")
-        .arg("install")
-        .arg("-m")
-        .arg("644")
-        .arg("-o")
-        .arg("root")
-        .arg("-g")
-        .arg("root")
-        .arg(temp_upower_file.path())
-        .arg(upower_conf)
-        .status()?;
-    if !status.success() {
-        eprintln!(
-            "{}",
-            "❌ Failed to update script with new poweroff battery features".red()
-        );
-        return Err(std::io::Error::other("Failed to update upower config"));
-    }
+
+    sys.write_string_to_file(upower_conf, &lines.join("\n"))?;
+
     // restarting to apply changes
-    run_cmd("sudo", &["systemctl", "restart", "upower.service"])?;
+    sys.run_cmd("sudo", &["systemctl", "restart", "upower.service"])?;
 
     Ok(())
 }
@@ -2632,11 +2626,6 @@ mod tests {
     }
     #[test]
     fn test_config_shell() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
         env.env_vars
             .insert("USER".to_string(), "testuser".to_string());
         let result = configure_shell(&env, std::path::Path::new("/home/testuser"));
@@ -2896,6 +2885,131 @@ mod tests {
                     "--force".to_string(),
                     "greetd.service".to_string()
                 ])
+        );
+    }
+    #[test]
+    fn test_setup_battery_daemon() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/home/.config/systemd/user/battery-daemon.service".to_string(),
+            "\nolder content\n".to_string(),
+        );
+        env.mock_files.insert(
+            "/etc/UPower/UPower.conf".to_string(),
+            "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff\n".to_string(),
+        );
+        let result = setup_battery_daemon(std::path::Path::new("/home"), &env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert!(
+            log.contains(&(
+                "systemctl".to_string(),
+                vec!["--user".to_string(), "daemon-reload".to_string()]
+            )),
+            "Expected daemon-reload to be triggered when service file is updated"
+        );
+    }
+    #[test]
+    fn test_setup_battery_daemon_without_update() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/home/.config/systemd/user/battery-daemon.service".to_string(),
+            include_str!("../../battery-daemon/battery-daemon.service").to_string(),
+        );
+        env.mock_files.insert(
+            "/etc/UPower/UPower.conf".to_string(),
+            "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff\n".to_string(),
+        );
+        let result = setup_battery_daemon(std::path::Path::new("/home"), &env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert!(
+            !log.contains(&(
+                "systemctl".to_string(),
+                vec!["--user".to_string(), "daemon-reload".to_string()]
+            )),
+            "Expected no commands to be triggered when service file is already up to date"
+        );
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected exactly one command to be run for battery daemon setup when no update is needed"
+        );
+        assert_eq!(
+            log[0],
+            (
+                "systemctl".to_string(),
+                vec![
+                    "--user".to_string(),
+                    "enable".to_string(),
+                    "--now".to_string(),
+                    "battery-daemon.service".to_string()
+                ]
+            )
+        );
+    }
+    #[test]
+    fn test_configure_upower() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/UPower/UPower.conf".to_string(),
+            "\n#PercentageAction=2.0\nCriticalPowerAction=Hibernate\n".to_string(),
+        );
+        let result = configure_upower(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        let updated_file = env.mock_files.get("/etc/UPower/UPower.conf").unwrap();
+        assert_eq!(
+            updated_file,
+            "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff"
+        );
+        assert_eq!(
+            log.len(),
+            1,
+            "Expected exactly one command to be run for UPower configuration"
+        );
+        assert_eq!(
+            log[0],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "restart".to_string(),
+                    "upower.service".to_string()
+                ]
+            )
+        );
+    }
+    #[test]
+    fn test_configure_upower_without_update() {
+        let mut env = MockEnv {
+            env_vars: std::collections::HashMap::new(),
+            cmd_log: RefCell::new(vec![]),
+            mock_files: std::collections::HashMap::new(),
+        };
+        env.mock_files.insert(
+            "/etc/UPower/UPower.conf".to_string(),
+            "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff\n".to_string(),
+        );
+        let result = configure_upower(&env);
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            0,
+            "Expected no commands to be run when UPower config is already correct"
         );
     }
 }

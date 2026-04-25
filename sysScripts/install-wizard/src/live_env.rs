@@ -27,4 +27,10 @@ impl CmdExecutor for LiveEnv {
     fn path_exists(&self, path: &std::path::Path) -> bool {
         path.exists()
     }
+    fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
+        std::fs::write(path, content)
+    }
+    fn create_dir_all(&self, path: &str) -> Result<(), std::io::Error> {
+        std::fs::create_dir_all(path)
+    }
 }
