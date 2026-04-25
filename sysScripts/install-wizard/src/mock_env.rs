@@ -2,10 +2,11 @@ use crate::traits::CmdExecutor;
 use std::cell::RefCell;
 
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct MockEnv {
     pub env_vars: std::collections::HashMap<String, String>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
-    pub mock_files: std::collections::HashMap<String, String>,
+    pub mock_files: RefCell<std::collections::HashMap<String, String>>,
 }
 
 impl CmdExecutor for MockEnv {
@@ -24,7 +25,7 @@ impl CmdExecutor for MockEnv {
         Ok(())
     }
     fn read_file_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-        if let Some(content) = self.mock_files.get(path) {
+        if let Some(content) = self.mock_files.borrow().get(path) {
             Ok(content.clone())
         } else {
             Err(std::io::Error::new(
@@ -38,7 +39,16 @@ impl CmdExecutor for MockEnv {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         path.to_str()
-            .map(|s| self.mock_files.contains_key(s))
+            .map(|s| self.mock_files.borrow().contains_key(s))
             .unwrap_or(false)
+    }
+    fn create_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+    fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
+        self.mock_files
+            .borrow_mut()
+            .insert(path.to_string(), content.to_string());
+        Ok(())
     }
 }

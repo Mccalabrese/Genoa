@@ -28,9 +28,11 @@ use tempfile::NamedTempFile;
 mod live_env;
 #[cfg(test)]
 mod mock_env;
+mod session;
 mod traits;
 
 use crate::live_env::LiveEnv;
+use crate::session::configure_system;
 use crate::traits::CmdExecutor;
 
 const TURING_IDS: &[&str] = &[
@@ -911,280 +913,6 @@ fn install_aur_packages(home: &Path) -> Result<(), std::io::Error> {
     }
     Ok(())
 }
-
-/// Configures essential system services and settings, including mkinitcpio sanitation, enabling
-/// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, setting up the session environment, and
-/// configuring logind and greetd. This function is idempotent and can be safely run multiple times
-/// without causing issues.
-fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
-    sanitize_mkinitcpio(sys)?;
-    sys.run_cmd("sudo", &["systemctl", "enable", "geoclue.service"])?;
-    sys.run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"])?;
-    sys.run_cmd("sudo", &["systemctl", "enable", "bolt.service"])?;
-    configure_dns(sys)?;
-    // Prevent Pacman from eating the entire hard drive over time
-    println!("   🧹 Enabling automated Pacman cache cleanup...");
-    sys.run_cmd("sudo", &["systemctl", "enable", "--now", "paccache.timer"])?;
-
-    // --- ENVIRONMENT & LOGIND ---
-    println!("    🔧 Configuring Session Environment (PATH)...");
-    let env_dir = home.join(".config/environment.d");
-    let env_file = env_dir.join("99-cargo-path.conf");
-
-    fs::create_dir_all(&env_dir)?;
-    let content = "PATH=$HOME/.cargo/bin:$PATH\n";
-    fs::write(&env_file, content)?;
-
-    configure_logind(sys)?;
-    configure_greetd(sys)?;
-    configure_shell(sys, home)?;
-    Ok(())
-}
-
-/// Cleans up the `mkinitcpio.conf` file to fix the known Archinstall 2025 bug that appends 'o"' to
-/// the end of the file,
-fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
-    // --- SANITIZE MKINITCPIO (Fix Archinstall 2025 Bug) ---
-    // This protects NVIDIA users from the 'o"' corruption crash.
-    println!("   🧹 Checking mkinitcpio.conf for corruption...");
-    let mkinit_path = "/etc/mkinitcpio.conf";
-
-    // Check if the file specifically ends with the garbage (ignoring whitespace)
-    // We read it first to be safe, rather than firing sed blindly.
-    if let Ok(content) = sys.read_file_to_string(mkinit_path) {
-        let trimmed = content.trim(); // Removes trailing \n
-        if trimmed.ends_with("o\"") || trimmed.ends_with("o”") {
-            println!("   ⚠️  Corruption detected at end of file. Cleaning up...");
-            let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-            let mut last_line = lines.pop().unwrap_or_default();
-            if last_line.trim_end().ends_with("o\"") || last_line.trim_end().ends_with("o”") {
-                // Remove the offending characters
-                last_line = last_line.trim_end_matches(['o', '"', '”']).to_string();
-                if !last_line.is_empty() {
-                    lines.push(last_line);
-                }
-            } else {
-                // If the last line doesn't match, we put it back (defensive)
-                lines.push(last_line);
-            }
-            let mut temp_file = NamedTempFile::new()?;
-            writeln!(temp_file, "{}", lines.join("\n"))?;
-            let temp_path = temp_file
-                .path()
-                .to_str()
-                .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-            sys.run_cmd(
-                "sudo",
-                &[
-                    "install",
-                    "-m",
-                    "644",
-                    "-o",
-                    "root",
-                    "-g",
-                    "root",
-                    temp_path,
-                    mkinit_path,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-///Configures dnscrypt-proxy to use Cloudflare's DNS servers for enhanced privacy and security.
-fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
-    // --- DNS Crypt Proxy CONFIGURATION ---
-    println!("   🔧 Configuring dnscrypt-proxy (DNS Proxy)...");
-
-    // 1. Ensure package is installed (failsafe)
-    sys.run_cmd(
-        "sudo",
-        &["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"],
-    )?;
-    // 2. Configure TOML to use Cloudflare
-    let dns_conf = "/etc/dnscrypt-proxy/dnscrypt-proxy.toml";
-    let content = sys.read_file_to_string(dns_conf)?;
-    let mut modified = false;
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-    for line in &mut lines {
-        let normalized = line.trim_start().trim_start_matches('#').trim_start();
-        if normalized.starts_with("server_names =") && normalized.contains("cloudflare") {
-            if line == "server_names = ['cloudflare']" {
-                continue; // Already correct
-            }
-            *line = "server_names = ['cloudflare']".to_string();
-            modified = true;
-        } else if normalized.starts_with("listen_addresses =")
-            && normalized.contains("127.0.0.1:53")
-        {
-            if line == "listen_addresses = ['127.0.0.1:53', '[::1]:53']" {
-                continue; // Already correct
-            }
-            *line = "listen_addresses = ['127.0.0.1:53', '[::1]:53']".to_string();
-            modified = true;
-        }
-    }
-    if modified {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "{}", lines.join("\n"))?;
-        let temp_path = temp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install", "-m", "644", "-o", "root", "-g", "root", temp_path, dns_conf,
-            ],
-        )?;
-    }
-    // 3. Enable the service
-    sys.run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
-
-    // 4. Clean up old Cloudflared artifacts if they exist
-    sys.run_cmd_ignore_err(
-        "sudo",
-        &["systemctl", "disable", "--now", "cloudflared-dns"],
-    )?;
-    sys.run_cmd_ignore_err(
-        "sudo",
-        &["rm", "-f", "/etc/systemd/system/cloudflared-dns.service"],
-    )?;
-    sys.run_cmd("sudo", &["systemctl", "daemon-reload"])?;
-    Ok(())
-}
-
-///Configures the user's shell to Zsh and sets up Tmux Plugin Manager for enhanced terminal
-///experience.
-fn configure_shell(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
-    println!("    🔧 Setting Shell to Zsh...");
-    let user = sys
-        .get_env_var("USER")
-        .unwrap_or_else(|| "root".to_string());
-    if let Err(e) = sys.run_cmd("sudo", &["chsh", "-s", "/usr/bin/zsh", &user]) {
-        eprintln!("   ⚠️  Failed to change shell: {}", e)
-    };
-
-    println!("    ✨ Setting up Tmux Plugin Manager...");
-    let tpm_dir = home.join(".tmux/plugins/tpm");
-    if !sys.path_exists(&tpm_dir) {
-        if let Some(tpm_str) = tpm_dir.to_str() {
-            if let Err(e) = sys.run_cmd(
-                "git",
-                &["clone", "https://github.com/tmux-plugins/tpm", tpm_str],
-            ) {
-                eprintln!("   ⚠️  Failed to clone TPM: {}", e)
-            }
-        } else {
-            eprintln!("   ⚠️  Invalid path for TPM directory.");
-        };
-    }
-    Ok(())
-}
-
-///Configures systemd-logind to ensure that user processes are killed on logout, preventing
-///lingering sessions and resource leaks.
-fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
-    println!("    🔧 Configuring Logind...");
-    let logind_conf = "/etc/systemd/logind.conf";
-    let content = sys.read_file_to_string(logind_conf).unwrap_or_default();
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-    let mut found = false;
-    let mut modified = false;
-    for line in &mut lines {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("KillUserProcesses=") || trimmed.starts_with("#KillUserProcesses=") {
-            if trimmed == "KillUserProcesses=yes" {
-                println!("   ✅ KillUserProcesses is already set to yes.");
-                found = true;
-                break;
-            }
-            found = true;
-            modified = true;
-            *line = "KillUserProcesses=yes".to_string();
-            break;
-        }
-    }
-    if !found {
-        // If the setting is not found, we add it under the [Login] section
-        let login_section = lines.iter().position(|l| l.trim() == "[Login]");
-        if let Some(idx) = login_section {
-            lines.insert(idx + 1, "KillUserProcesses=yes".to_string());
-        } else {
-            // If [Login] section doesn't exist, append it at the end
-            lines.push("[Login]".to_string());
-            lines.push("KillUserProcesses=yes".to_string());
-        }
-        modified = true;
-    }
-    if modified {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "{}", lines.join("\n"))?;
-        let temp_path = temp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                temp_path,
-                logind_conf,
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-/// Configures Greetd with a custom tuigreet session and disables other DMs.
-fn configure_greetd(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
-    println!("    🔧 Configuring Greetd...");
-    let greetd_path = "/etc/greetd/config.toml";
-    let existing_content = sys.read_file_to_string(greetd_path).unwrap_or_default();
-    let greetd_config = r#"
-[terminal]
-vt = 1
-[default_session]
-command = "tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
-user = "greeter"
-"#;
-    if existing_content.trim() != greetd_config.trim() {
-        let mut temp_file = tempfile::NamedTempFile::new()?;
-        temp_file.write_all(greetd_config.as_bytes())?;
-        let temp_path = temp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                temp_path,
-                greetd_path,
-            ],
-        )?;
-    }
-    let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
-    sys.run_cmd(
-        "sudo",
-        &["systemctl", "enable", "--force", "greetd.service"],
-    )?;
-    Ok(())
-}
-
 /// Helper to run a command and check for success, returning an error if it fails.
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
     let status = Command::new(cmd).args(args).status()?;
@@ -2272,11 +2000,7 @@ fn setup_battery_daemon(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::
     println!("   🔋 Setting up Battery Safety Daemon...");
 
     // Make sure the ~/.config/systemd/user/ folder actually exists
-    sys.create_dir_all(
-        systemd_user_dir
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("invalid utf-8 in systemd path"))?,
-    )?;
+    sys.create_dir_all(&systemd_user_dir)?;
     let service_content = include_str!("../../battery-daemon/battery-daemon.service");
     let existing_content = sys
         .read_file_to_string(
@@ -2406,7 +2130,6 @@ fn print_logo() {
                                                *++++* "#
     );
 }
-
 //----------- Unit Tests ---------------------
 //--------------------------------------------
 //
@@ -2415,490 +2138,15 @@ fn print_logo() {
 mod tests {
     use super::*;
     use crate::mock_env::MockEnv;
-    use std::cell::RefCell;
 
-    #[test]
-    fn test_configure_dns_execution_order() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
-            "\nserver_names = cloudflare\nlisten_addresses = [127.0.0.1:53]\n".to_string(),
-        );
-        let result = configure_dns(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            6,
-            "Expected exactly 6 commands to be run for DNS configuration"
-        );
-        assert_eq!(
-            log[0],
-            (
-                "sudo".to_string(),
-                vec![
-                    "pacman".to_string(),
-                    "-S".to_string(),
-                    "--needed".to_string(),
-                    "--noconfirm".to_string(),
-                    "dnscrypt-proxy".to_string()
-                ]
-            )
-        );
-        assert!(
-            log[1].0 == "sudo"
-                && log[1].1.starts_with(&[
-                    "install".to_string(),
-                    "-m".to_string(),
-                    "644".to_string()
-                ])
-        );
-        assert_eq!(
-            log[2],
-            (
-                "sudo".to_string(),
-                vec![
-                    "systemctl".to_string(),
-                    "enable".to_string(),
-                    "--now".to_string(),
-                    "dnscrypt-proxy".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[3],
-            (
-                "sudo".to_string(),
-                vec![
-                    "systemctl".to_string(),
-                    "disable".to_string(),
-                    "--now".to_string(),
-                    "cloudflared-dns".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[4],
-            (
-                "sudo".to_string(),
-                vec![
-                    "rm".to_string(),
-                    "-f".to_string(),
-                    "/etc/systemd/system/cloudflared-dns.service".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[5],
-            (
-                "sudo".to_string(),
-                vec!["systemctl".to_string(), "daemon-reload".to_string()]
-            )
-        );
-    }
-    #[test]
-    fn test_configure_dns_no_update_needed() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
-            "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']"
-                .to_string(),
-        );
-        let result = configure_dns(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            5,
-            "Expected exactly 5 commands to be run for DNS configuration"
-        );
-        assert_eq!(
-            log[0],
-            (
-                "sudo".to_string(),
-                vec![
-                    "pacman".to_string(),
-                    "-S".to_string(),
-                    "--needed".to_string(),
-                    "--noconfirm".to_string(),
-                    "dnscrypt-proxy".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[1],
-            (
-                "sudo".to_string(),
-                vec![
-                    "systemctl".to_string(),
-                    "enable".to_string(),
-                    "--now".to_string(),
-                    "dnscrypt-proxy".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[2],
-            (
-                "sudo".to_string(),
-                vec![
-                    "systemctl".to_string(),
-                    "disable".to_string(),
-                    "--now".to_string(),
-                    "cloudflared-dns".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[3],
-            (
-                "sudo".to_string(),
-                vec![
-                    "rm".to_string(),
-                    "-f".to_string(),
-                    "/etc/systemd/system/cloudflared-dns.service".to_string()
-                ]
-            )
-        );
-        assert_eq!(
-            log[4],
-            (
-                "sudo".to_string(),
-                vec!["systemctl".to_string(), "daemon-reload".to_string()]
-            )
-        );
-    }
-
-    #[test]
-    fn test_mkinit() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/mkinitcpio.conf".to_string(),
-            "\ntest config content\no\"".to_string(),
-        );
-        let result = sanitize_mkinitcpio(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            1,
-            "Expected exactly one command to be run for mkinitcpio sanitization"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "install".to_string(),
-                    "-m".to_string(),
-                    "644".to_string()
-                ])
-        );
-    }
-    #[test]
-    fn test_mkinit_clean_config() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/mkinitcpio.conf".to_string(),
-            "\ntest config content\n".to_string(),
-        );
-        let result = sanitize_mkinitcpio(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert!(
-            log.is_empty(),
-            "Expected no commands to be run for clean config"
-        );
-    }
-    #[test]
-    fn test_config_shell() {
-        env.env_vars
-            .insert("USER".to_string(), "testuser".to_string());
-        let result = configure_shell(&env, std::path::Path::new("/home/testuser"));
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            2,
-            "Expected two commands to be run when TPM does not exist"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "chsh".to_string(),
-                    "-s".to_string(),
-                    "/usr/bin/zsh".to_string(),
-                ])
-        );
-        assert_eq!(
-            log[1],
-            (
-                "git".to_string(),
-                vec![
-                    "clone".to_string(),
-                    "https://github.com/tmux-plugins/tpm".to_string(),
-                    "/home/testuser/.tmux/plugins/tpm".to_string()
-                ]
-            )
-        );
-    }
-    #[test]
-    fn test_config_shell_tpm_exists() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.env_vars
-            .insert("USER".to_string(), "testuser".to_string());
-        env.mock_files.insert(
-            "/home/testuser/.tmux/plugins/tpm".to_string(),
-            "".to_string(),
-        );
-        let result = configure_shell(&env, std::path::Path::new("/home/testuser"));
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            1,
-            "Expected one commands to be run when TPM already exists"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "chsh".to_string(),
-                    "-s".to_string(),
-                    "/usr/bin/zsh".to_string(),
-                ])
-        );
-    }
-    #[test]
-    fn test_config_logind_happy_path() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/systemd/logind.conf".to_string(),
-            "\n[Login]\nKillUserProcesses=yes\n".to_string(),
-        );
-        let result = configure_logind(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            0,
-            "Expected No commands to execute and no modifications to be performed"
-        );
-    }
-    #[test]
-    fn test_config_logind_replacement_path() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/systemd/logind.conf".to_string(),
-            "\n[Login]\n#KillUserProcesses=no\n".to_string(),
-        );
-        let result = configure_logind(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            1,
-            "Expected exactly one command to be run for logind configuration"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "install".to_string(),
-                    "-m".to_string(),
-                    "644".to_string(),
-                    "-o".to_string(),
-                    "root".to_string(),
-                    "-g".to_string(),
-                    "root".to_string(),
-                ])
-        );
-    }
-    #[test]
-    fn test_config_logind_insertion_path() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/systemd/logind.conf".to_string(),
-            "\n[Login]\n# Some other config\n".to_string(),
-        );
-        let result = configure_logind(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            1,
-            "Expected exactly one command to be run for logind configuration"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "install".to_string(),
-                    "-m".to_string(),
-                    "644".to_string(),
-                    "-o".to_string(),
-                    "root".to_string(),
-                    "-g".to_string(),
-                    "root".to_string(),
-                ])
-        );
-    }
-    #[test]
-    fn test_config_logind_no_login_section() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/systemd/logind.conf".to_string(),
-            "\n[SomeOtherSection]\nConfig=Value\n".to_string(),
-        );
-        let result = configure_logind(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            1,
-            "Expected exactly one command to be run for logind configuration"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "install".to_string(),
-                    "-m".to_string(),
-                    "644".to_string(),
-                    "-o".to_string(),
-                    "root".to_string(),
-                    "-g".to_string(),
-                    "root".to_string(),
-                ])
-        );
-    }
-    #[test]
-    fn test_config_greetd_happy_path() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/greetd/config.toml".to_string(),
-            "[terminal]\nvt = 1\n[default_session]\ncommand = \"tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions\"\nuser = \"greeter\"".to_string());
-        let result = configure_greetd(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            2,
-            "Expected 2 commands to execute and no modifications to be performed"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "systemctl".to_string(),
-                    "disable".to_string(),
-                    "gdm".to_string(),
-                    "sddm".to_string(),
-                    "lightdm".to_string()
-                ])
-        );
-        assert!(
-            log[1].0 == "sudo"
-                && log[1].1.starts_with(&[
-                    "systemctl".to_string(),
-                    "enable".to_string(),
-                    "--force".to_string(),
-                    "greetd.service".to_string()
-                ])
-        );
-    }
-    #[test]
-    fn test_config_greetd_update_path() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
-            "/etc/greetd/config.toml".to_string(),
-            "other data".to_string(),
-        );
-        let result = configure_greetd(&env);
-        let log = env.cmd_log.borrow();
-        assert!(result.is_ok());
-        assert_eq!(
-            log.len(),
-            3,
-            "Expected 3 commands to execute and modifications to be performed"
-        );
-        assert!(
-            log[0].0 == "sudo"
-                && log[0].1.starts_with(&[
-                    "install".to_string(),
-                    "-m".to_string(),
-                    "644".to_string()
-                ])
-        );
-        assert!(
-            log[1].0 == "sudo"
-                && log[1].1.starts_with(&[
-                    "systemctl".to_string(),
-                    "disable".to_string(),
-                    "gdm".to_string(),
-                    "sddm".to_string(),
-                    "lightdm".to_string()
-                ])
-        );
-        assert!(
-            log[2].0 == "sudo"
-                && log[2].1.starts_with(&[
-                    "systemctl".to_string(),
-                    "enable".to_string(),
-                    "--force".to_string(),
-                    "greetd.service".to_string()
-                ])
-        );
-    }
     #[test]
     fn test_setup_battery_daemon() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
             "/home/.config/systemd/user/battery-daemon.service".to_string(),
             "\nolder content\n".to_string(),
         );
-        env.mock_files.insert(
+        env.mock_files.borrow_mut().insert(
             "/etc/UPower/UPower.conf".to_string(),
             "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff\n".to_string(),
         );
@@ -2915,16 +2163,12 @@ mod tests {
     }
     #[test]
     fn test_setup_battery_daemon_without_update() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
             "/home/.config/systemd/user/battery-daemon.service".to_string(),
             include_str!("../../battery-daemon/battery-daemon.service").to_string(),
         );
-        env.mock_files.insert(
+        env.mock_files.borrow_mut().insert(
             "/etc/UPower/UPower.conf".to_string(),
             "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff\n".to_string(),
         );
@@ -2958,19 +2202,16 @@ mod tests {
     }
     #[test]
     fn test_configure_upower() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
             "/etc/UPower/UPower.conf".to_string(),
             "\n#PercentageAction=2.0\nCriticalPowerAction=Hibernate\n".to_string(),
         );
         let result = configure_upower(&env);
         let log = env.cmd_log.borrow();
         assert!(result.is_ok());
-        let updated_file = env.mock_files.get("/etc/UPower/UPower.conf").unwrap();
+        let binding = env.mock_files.borrow();
+        let updated_file = binding.get("/etc/UPower/UPower.conf").unwrap();
         assert_eq!(
             updated_file,
             "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff"
@@ -2994,12 +2235,8 @@ mod tests {
     }
     #[test]
     fn test_configure_upower_without_update() {
-        let mut env = MockEnv {
-            env_vars: std::collections::HashMap::new(),
-            cmd_log: RefCell::new(vec![]),
-            mock_files: std::collections::HashMap::new(),
-        };
-        env.mock_files.insert(
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
             "/etc/UPower/UPower.conf".to_string(),
             "\nPercentageAction=5.0\nCriticalPowerAction=PowerOff\n".to_string(),
         );
