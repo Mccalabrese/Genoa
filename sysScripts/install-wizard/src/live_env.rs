@@ -65,4 +65,15 @@ impl CmdExecutor for LiveEnv {
         self.run_cmd("sudo", &["chown", "root:root", path.to_str().unwrap()])?;
         Ok(())
     }
+    fn list_dir_file_names(&self, path: &std::path::Path) -> Result<Vec<String>, std::io::Error> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
 }

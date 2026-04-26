@@ -21,13 +21,13 @@ fi
 SESSION_NAME="$(basename -- "$TARGET_DESKTOP")"
 
 case "$SESSION_NAME" in
-  niri.desktop)
+  *niri.desktop)
     exec /usr/bin/niri
     ;;
-  sway.desktop)
+  *sway.desktop)
     exec /usr/bin/sway
     ;;
-  gnome.desktop|gnome-wayland.desktop)
+  *gnome-wayland.desktop|*gnome.desktop)
     exec /usr/bin/gnome-session
     ;;
   *)

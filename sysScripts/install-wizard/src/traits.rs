@@ -13,4 +13,5 @@ pub trait CmdExecutor {
         mode: &str,
     ) -> Result<(), std::io::Error>;
     fn create_root_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
+    fn list_dir_file_names(&self, path: &std::path::Path) -> Result<Vec<String>, std::io::Error>;
 }

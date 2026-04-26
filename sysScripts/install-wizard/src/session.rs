@@ -245,7 +245,9 @@ pub fn enforce_session_order(
     )?;
 
     sys.create_root_dir_all(Path::new(&proxy_dir))?;
-    // Tuple: (Original Name, Safe Custom Name, Display Name)
+    let session_files = sys.list_dir_file_names(Path::new(sessions_dir))?;
+
+    // Tuple: (Expected Name Fragment, Safe Custom Name, Display Name)
     let updates = vec![
         ("niri.desktop", "10-niri.desktop", "1. Niri"),
         ("sway.desktop", "20-sway.desktop", "2. Sway (Battery)"),
@@ -257,49 +259,53 @@ pub fn enforce_session_order(
         ), // Handle Arch variation
     ];
 
-    for (std_name, custom_name, display_name) in updates {
-        let std_path = format!("{}/{}", sessions_dir, std_name);
+    for (expected_name, custom_name, display_name) in updates {
+        let source_name = match session_files.iter().find(|name| name.contains(expected_name)) {
+            Some(name) => name,
+            None => {
+                println!(
+                    "   ⚠️  Warning: Expected session containing '{}' not found. Skipping.",
+                    expected_name
+                );
+                continue;
+            }
+        };
+
+        let std_path = format!("{}/{}", sessions_dir, source_name);
         let custom_path = format!("{}/{}", proxy_dir, custom_name);
-        if sys.path_exists(Path::new(&std_path)) {
-            let content = match sys.read_file_to_string(&std_path) {
-                Err(e) => {
-                    println!(
-                        "   ⚠️  Warning: Failed to read {}: {}. Skipping.",
-                        std_name, e
-                    );
-                    continue;
-                }
-                Ok(content) => content,
-            };
-            let exec_line = if std_name.contains("sway") && is_nvidia {
-                "Exec=/usr/local/bin/sway-hybrid".to_string()
-            } else {
-                format!(
-                    "Exec=/usr/local/bin/genoa-proxy /usr/share/wayland-sessions/{}",
-                    std_name
-                )
-            };
-            let new_content = content
-                .lines()
-                .map(|line| {
-                    if line.starts_with("Exec=") {
-                        exec_line.to_string()
-                    } else if line.starts_with("Name=") {
-                        format!("Name={}", display_name)
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<String>>()
-                .join("\n");
-            sys.install_string_to_root_file(&custom_path, &new_content, "644")?;
-            session_flag = true;
+        let content = match sys.read_file_to_string(&std_path) {
+            Err(e) => {
+                println!(
+                    "   ⚠️  Warning: Failed to read {}: {}. Skipping.",
+                    source_name, e
+                );
+                continue;
+            }
+            Ok(content) => content,
+        };
+        let exec_line = if expected_name.contains("sway") && is_nvidia {
+            "Exec=/usr/local/bin/sway-hybrid".to_string()
         } else {
-            println!(
-                "   ⚠️  Warning: Expected session file {} not found. Skipping.",
-                std_name
-            );
-        }
+            format!(
+                "Exec=/usr/local/bin/genoa-proxy /usr/share/wayland-sessions/{}",
+                source_name
+            )
+        };
+        let new_content = content
+            .lines()
+            .map(|line| {
+                if line.starts_with("Exec=") {
+                    exec_line.to_string()
+                } else if line.starts_with("Name=") {
+                    format!("Name={}", display_name)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        sys.install_string_to_root_file(&custom_path, &new_content, "644")?;
+        session_flag = true;
     }
     if session_flag {
         configure_greetd(sys)?;
@@ -871,11 +877,11 @@ mod tests {
     fn test_enforce_session_order() {
         let env = MockEnv::default();
         env.mock_files.borrow_mut().insert(
-            "/usr/share/wayland-sessions/niri.desktop".to_string(),
+            "/usr/share/wayland-sessions/10-niri.desktop".to_string(),
             "Name=Niri\nExec=/usr/bin/niri\n".to_string(),
         );
         env.mock_files.borrow_mut().insert(
-            "/usr/share/wayland-sessions/sway.desktop".to_string(),
+            "/usr/share/wayland-sessions/50-sway.desktop".to_string(),
             "Name=Sway\nExec=/usr/bin/sway\n".to_string(),
         );
         let result = enforce_session_order(&env, true, std::path::Path::new("/repo-root"));

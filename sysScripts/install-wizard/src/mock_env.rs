@@ -79,4 +79,26 @@ impl CmdExecutor for MockEnv {
     fn create_root_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
         Ok(())
     }
+    fn list_dir_file_names(&self, path: &std::path::Path) -> Result<Vec<String>, std::io::Error> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Invalid directory path"))?;
+        let prefix = format!("{}/", path_str.trim_end_matches('/'));
+        let files = self.mock_files.borrow();
+        let mut names = Vec::new();
+
+        for key in files.keys() {
+            if key.starts_with(&prefix)
+                && let Some(name) = std::path::Path::new(key)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+            {
+                names.push(name.to_string());
+            }
+        }
+
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
 }
