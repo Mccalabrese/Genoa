@@ -1,11 +1,9 @@
 use crate::CmdExecutor;
-use std::io::Write;
 use std::path::Path;
-use tempfile::NamedTempFile;
 
 /// Configures essential system services and settings, including mkinitcpio sanitation, enabling
-/// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, setting up the session environment, and
-/// configuring logind and greetd. This function is idempotent and can be safely run multiple times
+/// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, and
+/// configuring logind. This function is idempotent and can be safely run multiple times
 /// without causing issues.
 pub fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
     sanitize_mkinitcpio(sys)?;
@@ -30,7 +28,6 @@ pub fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::
     sys.write_string_to_file(env_file, content)?;
 
     configure_logind(sys)?;
-    configure_greetd(sys)?;
     configure_shell(sys, home)?;
     Ok(())
 }
@@ -61,26 +58,8 @@ fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
                 // If the last line doesn't match, we put it back (defensive)
                 lines.push(last_line);
             }
-            let mut temp_file = NamedTempFile::new()?;
-            writeln!(temp_file, "{}", lines.join("\n"))?;
-            let temp_path = temp_file
-                .path()
-                .to_str()
-                .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-            sys.run_cmd(
-                "sudo",
-                &[
-                    "install",
-                    "-m",
-                    "644",
-                    "-o",
-                    "root",
-                    "-g",
-                    "root",
-                    temp_path,
-                    mkinit_path,
-                ],
-            )?;
+            let new_content = lines.join("\n") + "\n";
+            sys.install_string_to_root_file(mkinit_path, new_content.as_str(), "644")?;
         }
     }
     Ok(())
@@ -129,18 +108,8 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         modified = true;
     }
     if modified {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "{}", lines.join("\n"))?;
-        let temp_path = temp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install", "-m", "644", "-o", "root", "-g", "root", temp_path, dns_conf,
-            ],
-        )?;
+        let new_content = lines.join("\n") + "\n";
+        sys.install_string_to_root_file(dns_conf, new_content.as_str(), "644")?;
     }
     // 3. Enable the service
     sys.run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
@@ -228,26 +197,114 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         modified = true;
     }
     if modified {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "{}", lines.join("\n"))?;
-        let temp_path = temp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                temp_path,
-                logind_conf,
-            ],
-        )?;
+        let new_content = lines.join("\n") + "\n";
+        sys.install_string_to_root_file(logind_conf, new_content.as_str(), "644")?;
+    }
+    Ok(())
+}
+
+/// Renames session files to enforce a specific order in Greetd/Tuigreet.
+/// Strategy: Make a proxy directory in /etc/greetd/genoa-sessions and copy/patch the .desktop files
+/// there with new Exec lines pointing to /usr/local/bin/genoa-proxy (or sway-hybrid for the sway
+/// session if NVIDIA is detected). This way we don't mess with the system files directly and can
+/// maintain order and custom display names without risking package manager conflicts.
+pub fn enforce_session_order(
+    sys: &impl CmdExecutor,
+    is_nvidia: bool,
+    repo_root: &Path,
+) -> Result<(), std::io::Error> {
+    println!("   🔧 Enforcing Session Order (Renaming .desktop files)...");
+
+    let sessions_dir = "/usr/share/wayland-sessions";
+    let proxy_dir = "/etc/greetd/genoa-sessions";
+    let script_path = repo_root.join("scripts/session-launch.sh");
+    let script_src = match script_path.to_str() {
+        Some(s) => s,
+        None => {
+            eprintln!("   ⚠️  Invalid path for session launch script.");
+            return Err(std::io::Error::other("Invalid script path"));
+        }
+    };
+    let script_dest = "/usr/local/bin/genoa-proxy";
+    let mut session_flag = false;
+
+    //install /Genoa/scripts/session-launch.sh to /usr/local/bin/genoa-proxy in a single atomic step
+    sys.run_cmd(
+        "sudo",
+        &[
+            "install",
+            "-m",
+            "755",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            script_src,
+            script_dest,
+        ],
+    )?;
+
+    sys.create_root_dir_all(Path::new(&proxy_dir))?;
+    // Tuple: (Original Name, Safe Custom Name, Display Name)
+    let updates = vec![
+        ("niri.desktop", "10-niri.desktop", "1. Niri"),
+        ("sway.desktop", "20-sway.desktop", "2. Sway (Battery)"),
+        ("gnome.desktop", "40-gnome.desktop", "3. Gnome"),
+        (
+            "gnome-wayland.desktop",
+            "40-gnome-wayland.desktop",
+            "3. Gnome-wayland",
+        ), // Handle Arch variation
+    ];
+
+    for (std_name, custom_name, display_name) in updates {
+        let std_path = format!("{}/{}", sessions_dir, std_name);
+        let custom_path = format!("{}/{}", proxy_dir, custom_name);
+        if sys.path_exists(Path::new(&std_path)) {
+            let content = match sys.read_file_to_string(&std_path) {
+                Err(e) => {
+                    println!(
+                        "   ⚠️  Warning: Failed to read {}: {}. Skipping.",
+                        std_name, e
+                    );
+                    continue;
+                }
+                Ok(content) => content,
+            };
+            let exec_line = if std_name.contains("sway") && is_nvidia {
+                "Exec=/usr/local/bin/sway-hybrid".to_string()
+            } else {
+                format!(
+                    "Exec=/usr/local/bin/genoa-proxy /usr/share/wayland-sessions/{}",
+                    std_name
+                )
+            };
+            let new_content = content
+                .lines()
+                .map(|line| {
+                    if line.starts_with("Exec=") {
+                        exec_line.to_string()
+                    } else if line.starts_with("Name=") {
+                        format!("Name={}", display_name)
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
+            sys.install_string_to_root_file(&custom_path, &new_content, "644")?;
+            session_flag = true;
+        } else {
+            println!(
+                "   ⚠️  Warning: Expected session file {} not found. Skipping.",
+                std_name
+            );
+        }
+    }
+    if session_flag {
+        configure_greetd(sys)?;
+    } else {
+        println!("   ⚠️  No session files were updated. Skipping Greetd configuration.");
     }
     Ok(())
 }
@@ -261,30 +318,11 @@ fn configure_greetd(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
 [terminal]
 vt = 1
 [default_session]
-command = "tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions"
+command = "tuigreet --time --remember --sessions /etc/greetd/genoa-sessions"
 user = "greeter"
 "#;
     if existing_content.trim() != greetd_config.trim() {
-        let mut temp_file = tempfile::NamedTempFile::new()?;
-        temp_file.write_all(greetd_config.as_bytes())?;
-        let temp_path = temp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid temp file path"))?;
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                temp_path,
-                greetd_path,
-            ],
-        )?;
+        sys.install_string_to_root_file(greetd_path, greetd_config, "644")?;
     }
     let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
     sys.run_cmd(
@@ -658,7 +696,7 @@ mod tests {
         let env = MockEnv::default();
         env.mock_files.borrow_mut().insert(
             "/etc/greetd/config.toml".to_string(),
-            "[terminal]\nvt = 1\n[default_session]\ncommand = \"tuigreet --time --remember --sessions /usr/share/wayland-sessions:/usr/share/xsessions\"\nuser = \"greeter\"".to_string());
+            "[terminal]\nvt = 1\n[default_session]\ncommand = \"tuigreet --time --remember --sessions /etc/greetd/genoa-sessions\"\nuser = \"greeter\"".to_string());
         let result = configure_greetd(&env);
         let log = env.cmd_log.borrow();
         assert!(result.is_ok());
@@ -827,6 +865,68 @@ mod tests {
                 "sudo".to_string(),
                 vec!["systemctl".to_string(), "daemon-reload".to_string()]
             )
+        );
+    }
+    #[test]
+    fn test_enforce_session_order() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/usr/share/wayland-sessions/niri.desktop".to_string(),
+            "Name=Niri\nExec=/usr/bin/niri\n".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/usr/share/wayland-sessions/sway.desktop".to_string(),
+            "Name=Sway\nExec=/usr/bin/sway\n".to_string(),
+        );
+        let result = enforce_session_order(&env, true, std::path::Path::new("/repo-root"));
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            6,
+            "Expected exactly 6 commands to be run for session order enforcement"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "755".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                    "/repo-root/scripts/session-launch.sh".to_string(),
+                    "/usr/local/bin/genoa-proxy".to_string()
+                ])
+        );
+        assert!(
+            log[1].0 == "sudo"
+                && log[1].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string()
+                ])
+                && log[1].1.last()
+                    == Some(&"/etc/greetd/genoa-sessions/10-niri.desktop".to_string())
+        );
+        assert!(
+            log[2].0 == "sudo"
+                && log[2].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string()
+                ])
+                && log[2].1.last()
+                    == Some(&"/etc/greetd/genoa-sessions/20-sway.desktop".to_string())
         );
     }
 }

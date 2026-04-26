@@ -51,4 +51,32 @@ impl CmdExecutor for MockEnv {
             .insert(path.to_string(), content.to_string());
         Ok(())
     }
+    fn install_string_to_root_file(
+        &self,
+        dest_path: &str,
+        content: &str,
+        mode: &str,
+    ) -> Result<(), std::io::Error> {
+        self.mock_files
+            .borrow_mut()
+            .insert(dest_path.to_string(), content.to_string());
+        self.cmd_log.borrow_mut().push((
+            "sudo".to_string(),
+            vec![
+                "install".to_string(),
+                "-m".to_string(),
+                mode.to_string(),
+                "-o".to_string(),
+                "root".to_string(),
+                "-g".to_string(),
+                "root".to_string(),
+                "/tmp/mock_file".to_string(),
+                dest_path.to_string(),
+            ],
+        ));
+        Ok(())
+    }
+    fn create_root_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }

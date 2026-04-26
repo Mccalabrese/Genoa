@@ -1,5 +1,7 @@
 use crate::traits::CmdExecutor;
+use std::io::Write;
 use std::process::Command;
+use tempfile::NamedTempFile;
 
 pub struct LiveEnv;
 
@@ -32,5 +34,35 @@ impl CmdExecutor for LiveEnv {
     }
     fn create_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(path)
+    }
+    fn install_string_to_root_file(
+        &self,
+        dest_path: &str,
+        content: &str,
+        mode: &str,
+    ) -> Result<(), std::io::Error> {
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(content.as_bytes())?;
+        let temp_path = temp_file.path();
+        self.run_cmd(
+            "sudo",
+            &[
+                "install",
+                "-m",
+                mode,
+                "-o",
+                "root",
+                "-g",
+                "root",
+                temp_path.to_str().unwrap(),
+                dest_path,
+            ],
+        )?;
+        Ok(())
+    }
+    fn create_root_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        self.run_cmd("sudo", &["mkdir", "-p", path.to_str().unwrap()])?;
+        self.run_cmd("sudo", &["chown", "root:root", path.to_str().unwrap()])?;
+        Ok(())
     }
 }

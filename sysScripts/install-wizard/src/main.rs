@@ -33,6 +33,7 @@ mod traits;
 
 use crate::live_env::LiveEnv;
 use crate::session::configure_system;
+use crate::session::enforce_session_order;
 use crate::traits::CmdExecutor;
 
 const TURING_IDS: &[&str] = &[
@@ -327,7 +328,10 @@ fn main() {
             false
         };
 
-        enforce_session_order(is_nvidia);
+        if let Err(e) = enforce_session_order(&live_sys, is_nvidia, &repo_root) {
+            eprintln!("   ❌ Failed to enforce session order: {}", e);
+            std::process::exit(1);
+        }
 
         // 4. Check or install battery-daemon
         if let Err(e) = setup_battery_daemon(&home, &live_sys) {
@@ -1456,75 +1460,6 @@ fn build_custom_apps(home: &Path, repo_root: &Path) -> Result<(), std::io::Error
         }
     }
     Ok(())
-}
-/// Renames session files to enforce a specific order in Greetd/Tuigreet.
-/// Strategy: Move standard files (e.g. niri.desktop) to custom numbered files (10-niri.desktop).
-/// This prevents Pacman from deleting our custom config during updates while NoExtract is active.
-fn enforce_session_order(is_nvidia: bool) {
-    println!("   🔧 Enforcing Session Order (Renaming .desktop files)...");
-
-    let sessions_dir = "/usr/share/wayland-sessions";
-
-    // Tuple: (Original Name, Safe Custom Name, Display Name)
-    let updates = vec![
-        ("niri.desktop", "10-niri.desktop", "1. Niri"),
-        ("sway.desktop", "20-sway.desktop", "2. Sway (Battery)"),
-        ("gnome.desktop", "40-gnome.desktop", "3. Gnome"),
-        (
-            "gnome-wayland.desktop",
-            "40-gnome-wayland.desktop",
-            "3. Gnome-wayland",
-        ), // Handle Arch variation
-    ];
-
-    for (std_name, custom_name, display_name) in updates {
-        let std_path = format!("{}/{}", sessions_dir, std_name);
-        let custom_path = format!("{}/{}", sessions_dir, custom_name);
-
-        // 1. If the standard file exists (fresh install or update), STEAL IT.
-        // We move it to the custom path so Pacman doesn't own it anymore.
-        if Path::new(&std_path).exists() {
-            println!("      Moving {} -> {}", std_name, custom_name);
-            let _ = Command::new("sudo")
-                .args(["mv", "-f", &std_path, &custom_path])
-                .status();
-        }
-
-        // 2. Patch the Name inside the CUSTOM file (if it exists)
-        if Path::new(&custom_path).exists() {
-            let sed_cmd = format!("s/^Name=.*/Name={}/", display_name);
-            let _ = Command::new("sudo")
-                .args(["sed", "-i", &sed_cmd, &custom_path])
-                .status();
-        }
-    }
-
-    let sway_session = "/usr/share/wayland-sessions/20-sway.desktop";
-
-    if Path::new(sway_session).exists() {
-        if is_nvidia {
-            println!("   🔧 Pointing Sway (Battery) to NVIDIA hybrid wrapper...");
-            // Replace Exec=sway with Exec=/usr/local/bin/sway-hybrid
-            let _ = Command::new("sudo")
-                .args([
-                    "sed",
-                    "-i",
-                    "s|^Exec=.*|Exec=/usr/local/bin/sway-hybrid|",
-                    sway_session,
-                ])
-                .status();
-        } else {
-            println!(" 🔧 Ensuring Sway uses native launch (Non-NVIDIA)...");
-            // Standardize back to native sway
-            let _ = Command::new("sudo")
-                .args(["sed", "-i", "s|^Exec=.*|Exec=sway|", sway_session])
-                .status();
-            //Clean up wwrapper script if it exists from a previous hardware config
-            let _ = Command::new("sudo")
-                .args(["rm", "-f", "/usr/local/bin/sway-hybrid"])
-                .status();
-        }
-    }
 }
 
 ///Walks through dotfiles in repo and symlinks them to home directory.
