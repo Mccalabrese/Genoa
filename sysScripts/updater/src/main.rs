@@ -212,15 +212,16 @@ EOF
                 echo "Fetching remote..."
                 git fetch origin main
 
-                # We check if the local 'sysScripts' or 'pkglist.txt' differ from remote.
+                # We check if the local 'sysScripts', 'scripts' or 'pkglist.txt' differ from remote.
                 SCRIPTS_DIFF=0
                 if ! git diff --quiet origin/main -- sysScripts; then SCRIPTS_DIFF=1; fi
                 if ! git diff --quiet origin/main -- pkglist.txt; then SCRIPTS_DIFF=1; fi
+                if ! git diff --quiet origin/main -- scripts; then SCRIPTS_DIFF=1; fi
 
                 if [ $SCRIPTS_DIFF -eq 1 ]; then
                     echo -e "\n✨ Updates detected in Tools or Package List!"
                     echo "🧹 Force-syncing sysScripts & pkglist.txt..."
-                    git checkout origin/main -- sysScripts pkglist.txt
+                    git checkout origin/main -- sysScripts pkglist.txt scripts
                     echo -e "✅ Files synced. Wizard will compile changes."
                 else
                     echo "✔ Rust tools and packages are up to date."
