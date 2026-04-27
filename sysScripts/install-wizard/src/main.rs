@@ -33,6 +33,7 @@ mod traits;
 
 use crate::live_env::LiveEnv;
 use crate::session::configure_system;
+use crate::session::configure_tlp;
 use crate::session::enforce_session_order;
 use crate::traits::CmdExecutor;
 
@@ -292,6 +293,10 @@ fn main() {
         println!("   ⚠️  Failed to build custom Rust apps: {}", e);
     };
 
+    if let Err(e) = configure_tlp(&live_sys, &repo_root) {
+        eprintln!("   ❌ Failed to configure TLP power management: {}", e);
+    }
+
     let update_only_mode = has_existing_install && !refresh_mode;
     if update_only_mode {
         println!(
@@ -352,7 +357,6 @@ fn main() {
                 eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
             }
             patch_waybar_sidebar_toggle_path(&home);
-            ensure_tlp_symlink_and_service(&repo_root);
 
             print_logo();
             println!(
@@ -401,7 +405,6 @@ fn main() {
             eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
         }
         patch_waybar_sidebar_toggle_path(&home);
-        ensure_tlp_symlink_and_service(&repo_root);
 
         print_logo();
         println!(
@@ -1500,14 +1503,6 @@ fn link_dotfiles_and_copy_resources(home: &Path, repo_root: &Path) {
         let nvim_src = repo_root.join(".config/nvim");
         create_symlink(&nvim_src, &nvim_dest);
     }
-    // Link TLP
-    let tlp_src = repo_root.join("tlp.conf");
-    let _ = Command::new("sudo")
-        .args(["ln", "-sf", tlp_src.to_str().unwrap(), "/etc/tlp.conf"])
-        .status();
-    let _ = Command::new("sudo")
-        .args(["systemctl", "enable", "tlp.service"])
-        .output();
 
     // Copy Wallpapers
     println!("   🖼️  Seeding default wallpapers...");
@@ -1703,60 +1698,6 @@ fn patch_waybar_sidebar_toggle_path(home: &Path) {
     }
 }
 
-/// Ensures /etc/tlp.conf follows the current repo root and restarts TLP only when needed.
-fn ensure_tlp_symlink_and_service(repo_root: &Path) {
-    let tlp_src = repo_root.join("tlp.conf");
-    if !tlp_src.exists() {
-        eprintln!(
-            "   ⚠️ Skipping TLP relink: source file not found at {}",
-            tlp_src.display()
-        );
-        return;
-    }
-
-    let desired = tlp_src.to_string_lossy().to_string();
-    let current = fs::read_link("/etc/tlp.conf")
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-
-    let mut relinked = false;
-    if current.as_deref() != Some(desired.as_str()) {
-        match Command::new("sudo")
-            .args(["ln", "-sf", desired.as_str(), "/etc/tlp.conf"])
-            .status()
-        {
-            Ok(status) if status.success() => {
-                relinked = true;
-                println!("   ✅ Updated /etc/tlp.conf symlink to {}", desired);
-            }
-            Ok(_) => eprintln!("   ⚠️ Failed to relink /etc/tlp.conf"),
-            Err(e) => eprintln!("   ⚠️ Failed to run sudo ln for /etc/tlp.conf: {}", e),
-        }
-    }
-
-    let _ = Command::new("sudo")
-        .args(["systemctl", "enable", "tlp.service"])
-        .status();
-
-    let is_active = Command::new("systemctl")
-        .args(["is-active", "--quiet", "tlp.service"])
-        .status()
-        .is_ok_and(|s| s.success());
-
-    if relinked || !is_active {
-        match Command::new("sudo")
-            .args(["systemctl", "restart", "tlp.service"])
-            .status()
-        {
-            Ok(status) if status.success() => println!("   ✅ TLP service restarted"),
-            Ok(_) => eprintln!("   ⚠️ Failed to restart TLP service"),
-            Err(e) => eprintln!(
-                "   ⚠️ Failed to run sudo systemctl restart tlp.service: {}",
-                e
-            ),
-        }
-    }
-}
 /// Runs post-install hooks to set up themes and plugins.
 /// This ensures the user doesn't see "broken" visuals on first launch.
 fn finalize_setup(home: &Path) {

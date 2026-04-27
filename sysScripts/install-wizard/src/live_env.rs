@@ -76,4 +76,7 @@ impl CmdExecutor for LiveEnv {
         names.sort();
         Ok(names)
     }
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        path.is_symlink()
+    }
 }

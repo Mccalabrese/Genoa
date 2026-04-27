@@ -203,6 +203,46 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// First, we check if TLP is currently a depreciated symlink on the users system. If so, we delete the symlink.
+/// Next, on all computers we copy tlp.conf from ~/genoa/tlp.conf to /etc/tlp.conf and start/restart the tlp service.
+/// This is needed to enable battery optimizations on laptops.
+pub fn configure_tlp(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), std::io::Error> {
+    println!("    🔧 Configuring TLP (Power Management)...");
+    let tlp_conf_src = repo_root.join("tlp.conf");
+    let tlp_conf_dest = "/etc/tlp.conf";
+    if sys.path_exists(Path::new(tlp_conf_dest)) && sys.is_symlink(Path::new(tlp_conf_dest)) {
+        println!("   ⚠️  Detected deprecated TLP symlink. Removing...");
+        sys.run_cmd("sudo", &["rm", "-f", "/etc/tlp.conf"])?;
+    }
+    let src_str = tlp_conf_src
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("Invalid tlp.conf source path"))?;
+    let desired_contents = sys.read_file_to_string(src_str)?;
+    let current = sys.read_file_to_string(tlp_conf_dest).ok();
+    if current != Some(desired_contents) {
+        sys.run_cmd(
+            "sudo",
+            &[
+                "install",
+                "-m",
+                "644",
+                "-o",
+                "root",
+                "-g",
+                "root",
+                src_str,
+                tlp_conf_dest,
+            ],
+        )?;
+        let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "enable", "tlp.service"]);
+        let _ = sys.run_cmd_ignore_err("systemctl", &["is-active", "--quiet", "tlp.service"]);
+        sys.run_cmd("sudo", &["systemctl", "restart", "tlp.service"])?;
+    } else {
+        eprintln!("   ✅ TLP is already correctly configured. No changes needed.");
+    }
+    Ok(())
+}
+
 /// Renames session files to enforce a specific order in Greetd/Tuigreet.
 /// Strategy: Make a proxy directory in /etc/greetd/genoa-sessions and copy/patch the .desktop files
 /// there with new Exec lines pointing to /usr/local/bin/genoa-proxy (or sway-hybrid for the sway
@@ -260,7 +300,10 @@ pub fn enforce_session_order(
     ];
 
     for (expected_name, custom_name, display_name) in updates {
-        let source_name = match session_files.iter().find(|name| name.contains(expected_name)) {
+        let source_name = match session_files
+            .iter()
+            .find(|name| name.contains(expected_name))
+        {
             Some(name) => name,
             None => {
                 println!(
@@ -933,6 +976,111 @@ mod tests {
                 ])
                 && log[2].1.last()
                     == Some(&"/etc/greetd/genoa-sessions/20-sway.desktop".to_string())
+        );
+    }
+    #[test]
+    fn test_configure_tlp() {
+        let env = MockEnv::default();
+        env.mock_files
+            .borrow_mut()
+            .insert("/repo-root/tlp.conf".to_string(), "new config".to_string());
+        env.mock_files
+            .borrow_mut()
+            .insert("/etc/tlp.conf".to_string(), "old config".to_string());
+        let result = configure_tlp(&env, std::path::Path::new("/repo-root"));
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            4,
+            "Expected exactly 4 commands to be run for TLP configuration"
+        );
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                    "/repo-root/tlp.conf".to_string(),
+                    "/etc/tlp.conf".to_string()
+                ])
+        );
+        assert!(
+            log[1].0 == "sudo"
+                && log[1].1.starts_with(&[
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "tlp.service".to_string()
+                ])
+        );
+        assert!(
+            log[2].0 == "systemctl"
+                && log[2].1.starts_with(&[
+                    "is-active".to_string(),
+                    "--quiet".to_string(),
+                    "tlp.service".to_string()
+                ])
+        );
+        assert!(
+            log[3].0 == "sudo"
+                && log[3].1.starts_with(&[
+                    "systemctl".to_string(),
+                    "restart".to_string(),
+                    "tlp.service".to_string()
+                ])
+        );
+    }
+
+    #[test]
+    fn test_configure_tlp_symlink_cleanup() {
+        let env = MockEnv::default();
+        env.mock_files
+            .borrow_mut()
+            .insert("/repo-root/tlp.conf".to_string(), "new config".to_string());
+        env.mock_files.borrow_mut().insert(
+            "/etc/tlp.conf".to_string(),
+            "legacy link target contents".to_string(),
+        );
+        env.symlink_paths
+            .borrow_mut()
+            .insert("/etc/tlp.conf".to_string());
+
+        let result = configure_tlp(&env, std::path::Path::new("/repo-root"));
+        let log = env.cmd_log.borrow();
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            5,
+            "Expected symlink cleanup plus install and service commands"
+        );
+        assert_eq!(
+            log[0],
+            (
+                "sudo".to_string(),
+                vec![
+                    "rm".to_string(),
+                    "-f".to_string(),
+                    "/etc/tlp.conf".to_string()
+                ]
+            )
+        );
+        assert!(
+            log[1].0 == "sudo"
+                && log[1].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                    "/repo-root/tlp.conf".to_string(),
+                    "/etc/tlp.conf".to_string()
+                ])
         );
     }
 }

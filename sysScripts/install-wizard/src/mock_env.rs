@@ -7,6 +7,7 @@ pub struct MockEnv {
     pub env_vars: std::collections::HashMap<String, String>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
+    pub symlink_paths: RefCell<std::collections::HashSet<String>>,
 }
 
 impl CmdExecutor for MockEnv {
@@ -100,5 +101,10 @@ impl CmdExecutor for MockEnv {
         names.sort();
         names.dedup();
         Ok(names)
+    }
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        path.to_str()
+            .map(|p| self.symlink_paths.borrow().contains(p))
+            .unwrap_or(false)
     }
 }
