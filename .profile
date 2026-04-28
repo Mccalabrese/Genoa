@@ -6,7 +6,6 @@
 # export CLUTTER_BACKEND=wayland
 
 # XDG Specs
-export XDG_SESSION_TYPE=wayland
 export XDG_MENU_PREFIX=arch-
 export XCURSOR_SIZE=24
 export XCURSOR_THEME=Adwaita

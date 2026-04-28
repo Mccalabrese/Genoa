@@ -21,17 +21,23 @@ fi
 SESSION_NAME="$(basename -- "$TARGET_DESKTOP")"
 
 case "$SESSION_NAME" in
-  *niri.desktop)
-    exec /usr/bin/niri
-    ;;
-  *sway.desktop)
-    exec /usr/bin/sway
-    ;;
-  *gnome-wayland.desktop|*gnome.desktop)
-    exec /usr/bin/gnome-session
-    ;;
-  *)
-    echo "Error: Unsupported session '$SESSION_NAME'." >&2
-    exit 1
-    ;;
+*niri.desktop)
+  unset WAYLAND_DISPLAY
+  unset DISPLAY
+  exec /usr/bin/niri
+  ;;
+*sway.desktop)
+  unset WAYLAND_DISPLAY
+  unset DISPLAY
+  exec /usr/bin/sway
+  ;;
+*gnome-wayland.desktop | *gnome.desktop)
+  unset WAYLAND_DISPLAY
+  unset DISPLAY
+  exec /usr/bin/gnome-session
+  ;;
+*)
+  echo "Error: Unsupported session '$SESSION_NAME'." >&2
+  exit 1
+  ;;
 esac

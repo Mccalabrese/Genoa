@@ -38,7 +38,7 @@ fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     // --- SANITIZE MKINITCPIO (Fix Archinstall 2025 Bug) ---
     // This protects NVIDIA users from the 'o"' corruption crash.
     println!("   🧹 Checking mkinitcpio.conf for corruption...");
-    let mkinit_path = "/etc/mkinitcpio.conf";
+    let mkinit_path = Path::new("/etc/mkinitcpio.conf");
 
     // Check if the file specifically ends with the garbage (ignoring whitespace)
     // We read it first to be safe, rather than firing sed blindly.
@@ -76,9 +76,8 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         &["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"],
     )?;
     // 2. Configure TOML to use Cloudflare
-    let dns_conf = "/etc/dnscrypt-proxy/dnscrypt-proxy.toml";
+    let dns_conf = Path::new("/etc/dnscrypt-proxy/dnscrypt-proxy.toml");
     let content = sys.read_file_to_string(dns_conf)?;
-    let mut modified = false;
     let mut found_names = Vec::new();
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     for line in &mut lines {
@@ -89,28 +88,22 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
                 continue; // Already correct
             }
             *line = "server_names = ['cloudflare']".to_string();
-            modified = true;
         } else if normalized.starts_with("listen_addresses =") {
             found_names.push("listen_addresses".to_string());
             if line == "listen_addresses = ['127.0.0.1:53', '[::1]:53']" {
                 continue; // Already correct
             }
             *line = "listen_addresses = ['127.0.0.1:53', '[::1]:53']".to_string();
-            modified = true;
         }
     }
     if !found_names.contains(&"server_names".to_string()) {
         lines.push("server_names = ['cloudflare']".to_string());
-        modified = true;
     }
     if !found_names.contains(&"listen_addresses".to_string()) {
         lines.push("listen_addresses = ['127.0.0.1:53', '[::1]:53']".to_string());
-        modified = true;
     }
-    if modified {
-        let new_content = lines.join("\n") + "\n";
-        sys.install_string_to_root_file(dns_conf, new_content.as_str(), "644")?;
-    }
+    let new_content = lines.join("\n") + "\n";
+    sys.install_string_to_root_file(dns_conf, new_content.as_str(), "644")?;
     // 3. Enable the service
     sys.run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
 
@@ -159,7 +152,7 @@ fn configure_shell(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::E
 ///lingering sessions and resource leaks.
 fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("    🔧 Configuring Logind...");
-    let logind_conf = "/etc/systemd/logind.conf";
+    let logind_conf = Path::new("/etc/systemd/logind.conf");
     let content = match sys.read_file_to_string(logind_conf) {
         Ok(content) => content,
         Err(e) => {
@@ -169,7 +162,6 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     };
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     let mut found = false;
-    let mut modified = false;
     for line in &mut lines {
         let trimmed = line.trim_start();
         if trimmed.starts_with("KillUserProcesses=") || trimmed.starts_with("#KillUserProcesses=") {
@@ -179,7 +171,6 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
                 break;
             }
             found = true;
-            modified = true;
             *line = "KillUserProcesses=yes".to_string();
             break;
         }
@@ -194,12 +185,9 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
             lines.push("[Login]".to_string());
             lines.push("KillUserProcesses=yes".to_string());
         }
-        modified = true;
     }
-    if modified {
-        let new_content = lines.join("\n") + "\n";
-        sys.install_string_to_root_file(logind_conf, new_content.as_str(), "644")?;
-    }
+    let new_content = lines.join("\n") + "\n";
+    sys.install_string_to_root_file(logind_conf, new_content.as_str(), "644")?;
     Ok(())
 }
 
@@ -209,31 +197,17 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
 pub fn configure_tlp(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), std::io::Error> {
     println!("    🔧 Configuring TLP (Power Management)...");
     let tlp_conf_src = repo_root.join("tlp.conf");
-    let tlp_conf_dest = "/etc/tlp.conf";
+    let tlp_conf_dest = Path::new("/etc/tlp.conf");
     if sys.path_exists(Path::new(tlp_conf_dest)) && sys.is_symlink(Path::new(tlp_conf_dest)) {
         println!("   ⚠️  Detected deprecated TLP symlink. Removing...");
         sys.run_cmd("sudo", &["rm", "-f", "/etc/tlp.conf"])?;
     }
-    let src_str = tlp_conf_src
-        .to_str()
-        .ok_or_else(|| std::io::Error::other("Invalid tlp.conf source path"))?;
-    let desired_contents = sys.read_file_to_string(src_str)?;
-    let current = sys.read_file_to_string(tlp_conf_dest).ok();
-    if current != Some(desired_contents) {
-        sys.run_cmd(
-            "sudo",
-            &[
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                src_str,
-                tlp_conf_dest,
-            ],
-        )?;
+    let modified = sys.install_string_to_root_file(
+        tlp_conf_dest,
+        &sys.read_file_to_string(&tlp_conf_src)?,
+        "644",
+    )?;
+    if modified {
         let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "enable", "tlp.service"]);
         let _ = sys.run_cmd_ignore_err("systemctl", &["is-active", "--quiet", "tlp.service"]);
         sys.run_cmd("sudo", &["systemctl", "restart", "tlp.service"])?;
@@ -266,7 +240,7 @@ pub fn enforce_session_order(
         }
     };
     let script_dest = "/usr/local/bin/genoa-proxy";
-    let mut session_flag = false;
+    let mut found_session = false;
 
     //install /Genoa/scripts/session-launch.sh to /usr/local/bin/genoa-proxy in a single atomic step
     sys.run_cmd(
@@ -313,10 +287,12 @@ pub fn enforce_session_order(
                 continue;
             }
         };
-
-        let std_path = format!("{}/{}", sessions_dir, source_name);
-        let custom_path = format!("{}/{}", proxy_dir, custom_name);
-        let content = match sys.read_file_to_string(&std_path) {
+        found_session = true;
+        let std_path_string = format!("{}/{}", sessions_dir, source_name);
+        let custom_path_string = format!("{}/{}", proxy_dir, custom_name);
+        let std_path = Path::new(&std_path_string);
+        let custom_path = Path::new(&custom_path_string);
+        let content = match sys.read_file_to_string(std_path) {
             Err(e) => {
                 println!(
                     "   ⚠️  Warning: Failed to read {}: {}. Skipping.",
@@ -347,13 +323,12 @@ pub fn enforce_session_order(
             })
             .collect::<Vec<String>>()
             .join("\n");
-        sys.install_string_to_root_file(&custom_path, &new_content, "644")?;
-        session_flag = true;
+        let _ = sys.install_string_to_root_file(custom_path, &new_content, "644")?;
     }
-    if session_flag {
+    if found_session {
         configure_greetd(sys)?;
     } else {
-        println!("   ⚠️  No session files were updated. Skipping Greetd configuration.");
+        println!("   ⚠️  No supported session files were found. Skipping Greetd configuration.");
     }
     Ok(())
 }
@@ -361,8 +336,7 @@ pub fn enforce_session_order(
 /// Configures Greetd with a custom tuigreet session and disables other DMs.
 fn configure_greetd(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("    🔧 Configuring Greetd...");
-    let greetd_path = "/etc/greetd/config.toml";
-    let existing_content = sys.read_file_to_string(greetd_path).unwrap_or_default();
+    let greetd_path = Path::new("/etc/greetd/config.toml");
     let greetd_config = r#"
 [terminal]
 vt = 1
@@ -370,6 +344,7 @@ vt = 1
 command = "tuigreet --time --remember --sessions /etc/greetd/genoa-sessions"
 user = "greeter"
 "#;
+    let existing_content = sys.read_file_to_string(greetd_path).unwrap_or_default();
     if existing_content.trim() != greetd_config.trim() {
         sys.install_string_to_root_file(greetd_path, greetd_config, "644")?;
     }
@@ -475,7 +450,8 @@ mod tests {
         env.mock_files.borrow_mut().insert(
             "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
             "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']"
-                .to_string(),
+                .to_string()
+                + "\n",
         );
         let result = configure_dns(&env);
         let log = env.cmd_log.borrow();
@@ -540,6 +516,14 @@ mod tests {
                 vec!["systemctl".to_string(), "daemon-reload".to_string()]
             )
         );
+        let binding = env.mock_files.borrow();
+        let updated_file = binding
+            .get("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
+            .unwrap();
+        assert_eq!(
+            updated_file,
+            "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']\n"
+        );
     }
 
     #[test]
@@ -565,6 +549,9 @@ mod tests {
                     "644".to_string()
                 ])
         );
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/mkinitcpio.conf").unwrap();
+        assert_eq!(updated, "\ntest config content\n");
     }
     #[test]
     fn test_mkinit_clean_config() {
@@ -683,6 +670,9 @@ mod tests {
                     "root".to_string(),
                 ])
         );
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/systemd/logind.conf").unwrap();
+        assert!(updated.contains("KillUserProcesses=yes"));
     }
     #[test]
     fn test_config_logind_insertion_path() {
@@ -816,6 +806,9 @@ mod tests {
                     "greetd.service".to_string()
                 ])
         );
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/greetd/config.toml").unwrap();
+        assert!(updated.contains("/etc/greetd/genoa-sessions"));
     }
     #[test]
     fn test_config_system_env_setup() {
@@ -915,6 +908,14 @@ mod tests {
                 vec!["systemctl".to_string(), "daemon-reload".to_string()]
             )
         );
+        let binding = env.mock_files.borrow();
+        let updated_file = binding
+            .get("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
+            .unwrap();
+        assert_eq!(
+            updated_file,
+            "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']\n"
+        );
     }
     #[test]
     fn test_enforce_session_order() {
@@ -978,6 +979,68 @@ mod tests {
                     == Some(&"/etc/greetd/genoa-sessions/20-sway.desktop".to_string())
         );
     }
+
+    #[test]
+    fn test_enforce_session_order_no_changes_still_configures_greetd() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/usr/share/wayland-sessions/10-niri.desktop".to_string(),
+            "Name=Niri\nExec=/usr/bin/niri\n".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/usr/share/wayland-sessions/50-sway.desktop".to_string(),
+            "Name=Sway\nExec=/usr/bin/sway\n".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/etc/greetd/genoa-sessions/10-niri.desktop".to_string(),
+            "Name=1. Niri\nExec=/usr/local/bin/genoa-proxy /usr/share/wayland-sessions/10-niri.desktop"
+                .to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/etc/greetd/genoa-sessions/20-sway.desktop".to_string(),
+            "Name=2. Sway (Battery)\nExec=/usr/local/bin/sway-hybrid".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/etc/greetd/config.toml".to_string(),
+            "[terminal]\nvt = 1\n[default_session]\ncommand = \"tuigreet --time --remember --sessions /etc/greetd/genoa-sessions\"\nuser = \"greeter\""
+                .to_string(),
+        );
+
+        let result = enforce_session_order(&env, true, std::path::Path::new("/repo-root"));
+        let log = env.cmd_log.borrow();
+
+        assert!(result.is_ok());
+        assert_eq!(
+            log.len(),
+            3,
+            "Expected script install plus greetd service commands when sessions are already current"
+        );
+        assert_eq!(
+            log[1],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "disable".to_string(),
+                    "gdm".to_string(),
+                    "sddm".to_string(),
+                    "lightdm".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            log[2],
+            (
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "--force".to_string(),
+                    "greetd.service".to_string()
+                ]
+            )
+        );
+    }
     #[test]
     fn test_configure_tlp() {
         let env = MockEnv::default();
@@ -1005,7 +1068,7 @@ mod tests {
                     "root".to_string(),
                     "-g".to_string(),
                     "root".to_string(),
-                    "/repo-root/tlp.conf".to_string(),
+                    "/tmp/mock_file".to_string(),
                     "/etc/tlp.conf".to_string()
                 ])
         );
@@ -1033,6 +1096,9 @@ mod tests {
                     "tlp.service".to_string()
                 ])
         );
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/tlp.conf").unwrap();
+        assert_eq!(updated, "new config");
     }
 
     #[test]
@@ -1078,9 +1144,12 @@ mod tests {
                     "root".to_string(),
                     "-g".to_string(),
                     "root".to_string(),
-                    "/repo-root/tlp.conf".to_string(),
+                    "/tmp/mock_file".to_string(),
                     "/etc/tlp.conf".to_string()
                 ])
         );
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/tlp.conf").unwrap();
+        assert_eq!(updated, "new config");
     }
 }

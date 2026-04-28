@@ -25,13 +25,14 @@ impl CmdExecutor for MockEnv {
         ));
         Ok(())
     }
-    fn read_file_to_string(&self, path: &str) -> Result<String, std::io::Error> {
-        if let Some(content) = self.mock_files.borrow().get(path) {
+    fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
+        let path_str = path.to_str().unwrap();
+        if let Some(content) = self.mock_files.borrow().get(path_str) {
             Ok(content.clone())
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("File '{}' not found in mock environment", path),
+                format!("File '{}' not found in mock environment", path_str),
             ))
         }
     }
@@ -46,6 +47,22 @@ impl CmdExecutor for MockEnv {
     fn create_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
         Ok(())
     }
+    fn read_link_target(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, std::io::Error> {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Invalid path for symlink target"))?;
+        if self.symlink_paths.borrow().contains(path_str) {
+            Ok(std::path::PathBuf::from("/mock/symlink/target"))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Symlink '{}' not found in mock environment", path.display()),
+            ))
+        }
+    }
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         self.mock_files
             .borrow_mut()
@@ -54,13 +71,16 @@ impl CmdExecutor for MockEnv {
     }
     fn install_string_to_root_file(
         &self,
-        dest_path: &str,
+        dest_path: &std::path::Path,
         content: &str,
         mode: &str,
-    ) -> Result<(), std::io::Error> {
-        self.mock_files
-            .borrow_mut()
-            .insert(dest_path.to_string(), content.to_string());
+    ) -> Result<bool, std::io::Error> {
+        let path_str = dest_path.to_str().unwrap();
+        if let Some(existing_content) = self.mock_files.borrow().get(path_str)
+            && existing_content == content
+        {
+            return Ok(false);
+        }
         self.cmd_log.borrow_mut().push((
             "sudo".to_string(),
             vec![
@@ -72,10 +92,13 @@ impl CmdExecutor for MockEnv {
                 "-g".to_string(),
                 "root".to_string(),
                 "/tmp/mock_file".to_string(),
-                dest_path.to_string(),
+                path_str.to_string(),
             ],
         ));
-        Ok(())
+        self.mock_files
+            .borrow_mut()
+            .insert(path_str.to_string(), content.to_string());
+        Ok(true)
     }
     fn create_root_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
         Ok(())

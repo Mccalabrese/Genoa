@@ -20,7 +20,7 @@ impl CmdExecutor for LiveEnv {
         let _ = Command::new(cmd).args(args).status();
         Ok(())
     }
-    fn read_file_to_string(&self, path: &str) -> Result<String, std::io::Error> {
+    fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
         std::fs::read_to_string(path)
     }
     fn get_env_var(&self, key: &str) -> Option<String> {
@@ -28,6 +28,17 @@ impl CmdExecutor for LiveEnv {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         path.exists()
+    }
+    fn read_link_target(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, std::io::Error> {
+        std::fs::read_link(path).map_err(|_| {
+            std::io::Error::other(format!(
+                "Failed to read symlink target for '{}'",
+                path.display()
+            ))
+        })
     }
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         std::fs::write(path, content)
@@ -37,10 +48,15 @@ impl CmdExecutor for LiveEnv {
     }
     fn install_string_to_root_file(
         &self,
-        dest_path: &str,
+        dest_path: &std::path::Path,
         content: &str,
         mode: &str,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<bool, std::io::Error> {
+        if let Ok(existing_content) = self.read_file_to_string(dest_path)
+            && existing_content == content
+        {
+            return Ok(false);
+        }
         let mut temp_file = NamedTempFile::new()?;
         temp_file.write_all(content.as_bytes())?;
         let temp_path = temp_file.path();
@@ -55,10 +71,10 @@ impl CmdExecutor for LiveEnv {
                 "-g",
                 "root",
                 temp_path.to_str().unwrap(),
-                dest_path,
+                dest_path.to_str().unwrap(),
             ],
         )?;
-        Ok(())
+        Ok(true)
     }
     fn create_root_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         self.run_cmd("sudo", &["mkdir", "-p", path.to_str().unwrap()])?;

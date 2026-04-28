@@ -25,39 +25,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 
+mod graphics;
 mod live_env;
 #[cfg(test)]
 mod mock_env;
 mod session;
 mod traits;
 
+use crate::graphics::{GpuVendor, NvidiaArch, apply_nvidia_configs, detect_gpu, setup_turing_gpu};
 use crate::live_env::LiveEnv;
-use crate::session::configure_system;
-use crate::session::configure_tlp;
-use crate::session::enforce_session_order;
+use crate::session::{configure_system, configure_tlp, enforce_session_order};
 use crate::traits::CmdExecutor;
-
-const TURING_IDS: &[&str] = &[
-    "0x1e02", "0x1e04", "0x1e07", "0x1e30", // Titan RTX, 2080 Ti, Quadro...
-    "0x1f02", "0x1f06", "0x1f08", "0x1f82", // 2070, 2060, 1650 (TU106)...
-    "0x2182", "0x2184", "0x2187", "0x2188", // 1660 Ti, 1660, 1650 Super, 1650...
-    "0x2191", "0x21d1", // GTX 1650 Mobile variants..."0x1e02", "0x1e04", "0x1e07", "0x1e30",
-];
-
-// --- Enums for Hardware Detection ---
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum NvidiaArch {
-    Modern,
-    Turing,
-}
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum GpuVendor {
-    Unknown,
-    Intel,
-    Amd,
-    Nvidia(NvidiaArch),
-}
 
 // Hardware Specific: NVIDIA
 const NVIDIA_PACKAGES: &[&str] = &[
@@ -184,11 +162,11 @@ fn main() {
                     .blue()
                     .bold()
             );
-            let gpu = detect_gpu();
+            let gpu = detect_gpu(&live_sys);
             match gpu {
                 GpuVendor::Nvidia(NvidiaArch::Turing) => {
                     println!("   👉 NVIDIA Turing Detected (GTX 16xx / RTX 20xx).");
-                    if let Err(e) = setup_turing_gpu() {
+                    if let Err(e) = setup_turing_gpu(&live_sys) {
                         eprintln!("   ❌ Failed to install legacy NVIDIA drivers: {}", e);
                         std::process::exit(1);
                     }
@@ -315,16 +293,16 @@ fn main() {
         }
 
         // 3. Hardware Enforcement
-        let current_gpu = detect_gpu();
+        let current_gpu = detect_gpu(&live_sys);
 
         let is_nvidia = if let GpuVendor::Nvidia(arch) = current_gpu {
             if arch == NvidiaArch::Turing
-                && let Err(e) = setup_turing_gpu()
+                && let Err(e) = setup_turing_gpu(&live_sys)
             {
                 eprintln!("   ❌ Failed to set up Turing NVIDIA drivers: {}", e);
                 std::process::exit(1);
             }
-            if let Err(e) = apply_nvidia_configs(&arch) {
+            if let Err(e) = apply_nvidia_configs(&arch, &live_sys) {
                 eprintln!("   ❌ Failed to apply NVIDIA configurations: {}", e);
                 std::process::exit(1);
             }
@@ -529,289 +507,6 @@ fn load_packages_from_file(filename: &str, repo_root: &Path) -> std::io::Result<
         .collect::<Vec<String>>())
 }
 
-/// Parses `lspci` output to identify GPU vendor IDs.
-/// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
-fn detect_gpu() -> GpuVendor {
-    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
-        eprintln!("⚠️ Failed to read PCI devices. Defaulting to Unknown");
-        return GpuVendor::Unknown;
-    };
-    let mut gpus = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let class_path = path.join("class");
-        let vendor_path = path.join("vendor");
-        let Ok(class_hex) = fs::read_to_string(&class_path) else {
-            continue;
-        };
-        let Ok(vendor_hex) = fs::read_to_string(&vendor_path) else {
-            continue;
-        };
-        let Ok(device_hex) = fs::read_to_string(path.join("device")) else {
-            continue;
-        };
-        if class_hex.trim() == "0x030000" || class_hex.trim() == "0x038000" {
-            // VGA Controller
-            match vendor_hex.trim() {
-                "0x10de" => {
-                    let dev = device_hex.trim();
-                    if TURING_IDS.contains(&dev)
-                        || dev.starts_with("0x1e")
-                        || dev.starts_with("0x1f")
-                        || dev.starts_with("0x21")
-                    {
-                        gpus.push(GpuVendor::Nvidia(NvidiaArch::Turing));
-                    } else {
-                        gpus.push(GpuVendor::Nvidia(NvidiaArch::Modern));
-                    }
-                }
-                "0x1002" => gpus.push(GpuVendor::Amd),
-                "0x8086" => gpus.push(GpuVendor::Intel),
-                _ => continue,
-            }
-        }
-    }
-    gpus.into_iter().max().unwrap_or(GpuVendor::Unknown) // If multiple GPUs, we prioritize NVIDIA > AMD > Intel
-}
-
-/// Scans /sys/class/drm to find the integrated GPU (Intel or AMD).
-/// Returns a tuple: (Card Path, Vendor Type "intel"|"amd")
-fn find_igpu() -> Option<(String, String)> {
-    let entries = std::fs::read_dir("/sys/class/drm").ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("card") || name.contains("-") {
-            continue;
-        } // We only care about card* entries and want to ignore cables
-        let device_path = path.join("device");
-        let vendor_path = path.join("device/vendor");
-        let Ok(symlink_target) = fs::read_link(&device_path) else {
-            continue;
-        };
-        let Some(link_str) = symlink_target.to_str() else {
-            continue;
-        };
-        if !link_str.contains("0000:00:") {
-            continue;
-        } // iGPU's addresses only
-        let Ok(vendor_hex) = fs::read_to_string(&vendor_path) else {
-            continue;
-        };
-        match vendor_hex.trim() {
-            "0x8086" => return Some((format!("/dev/dri/{}", name), "intel".to_string())),
-            "0x1002" => return Some((format!("/dev/dri/{}", name), "amd".to_string())),
-            _ => continue,
-        }
-    }
-    None
-}
-
-/// 1. Check if user is on old drivers and ignoring updates in their pacman conf.
-/// 2. If they are installingg from scratch, just install AUR nvidia-580-dkms which supports Turing and older cards on newer kernels.
-/// 3. For users on old drivers, halt&warn, execute removing ignore line from pacman conf, pacman
-///    -Rdd old drivers, install mainline kernel, install AUR drivers, run mkinicpio and
-///    grub-mkconfig if user is on grub, and force reboot to load the new drivers safely.
-fn setup_turing_gpu() -> Result<(), std::io::Error> {
-    let pacman_conf = "/etc/pacman.conf";
-    let pac_conf_content = fs::read_to_string(pacman_conf)?;
-    let drivers_installed = Command::new("pacman")
-        .args(["-Q", "nvidia-580xx-dkms"])
-        .stdout(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    let is_legacy_nvidia = pac_conf_content.lines().any(|line| {
-        let trimmed = line.trim_start();
-        !trimmed.starts_with('#')
-            && trimmed.starts_with("IgnorePkg")
-            && (trimmed.contains("nvidia") || trimmed.contains("nvidia-dkms"))
-    });
-    if is_legacy_nvidia
-        && !inquire::Confirm::new("⚠️  Legacy NVIDIA configuration detected. We need to migrate you to the new AUR drivers to restore mainline kernel support. This will rebuild your drivers and reboot your computer. Proceed?").with_default(true).prompt().unwrap_or(false) {        
-            std::process::exit(1);
-        }
-    let mut config_modified = false;
-
-    let mut inside_multilib = false;
-    let mut lines: Vec<String> = pac_conf_content.lines().map(|s| s.to_string()).collect();
-    for line in &mut lines {
-        let trimmed = line.trim_start();
-        if !trimmed.starts_with('#')
-            && trimmed.starts_with("IgnorePkg")
-            && (trimmed.contains("nvidia") || trimmed.contains("nvidia-dkms"))
-        {
-            *line = line
-                .replace("lib32-nvidia-utils", "")
-                .replace("nvidia-settings", "")
-                .replace("nvidia-utils", "")
-                .replace("nvidia-dkms", "")
-                .replace("nvidia", "");
-            config_modified = true;
-            continue;
-        }
-        if trimmed.to_lowercase() == "#[multilib]" {
-            *line = "[multilib]".to_string();
-            config_modified = true;
-            inside_multilib = true;
-        } else if inside_multilib
-            && trimmed.starts_with("#Include")
-            && trimmed.contains("mirrorlist")
-        {
-            *line = "Include = /etc/pacman.d/mirrorlist".to_string();
-            config_modified = true;
-            inside_multilib = false;
-        }
-    }
-    if config_modified {
-        let mut temp_file = NamedTempFile::new()?;
-        write!(temp_file, "{}", lines.join("\n"))?;
-        run_cmd(
-            "sudo",
-            &[
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                temp_file.path().to_str().unwrap(),
-                pacman_conf,
-            ],
-        )?;
-        run_cmd("sudo", &["pacman", "-Sy"])?;
-    }
-    if is_legacy_nvidia || !drivers_installed {
-        let _ = run_cmd(
-            "sudo",
-            &[
-                "pacman",
-                "-Rdd",
-                "--noconfirm",
-                "nvidia-dkms",
-                "nvidia-utils",
-                "nvidia-settings",
-            ],
-        );
-        let _ = run_cmd(
-            "sudo",
-            &["pacman", "-Rdd", "--noconfirm", "lib32-nvidia-utils"],
-        ); // Remove 32-bit drivers if present
-        let _ = run_cmd("sudo", &["pacman", "-Rdd", "--noconfirm", "libxnvctrl"]);
-        run_cmd(
-            "sudo",
-            &["pacman", "-S", "--noconfirm", "linux", "linux-headers"],
-        )?; // Ensure mainline kernel is installed
-    }
-    if is_legacy_nvidia || !drivers_installed {
-        println!("   👉 Installing legacy NVIDIA drivers from AUR...");
-        run_cmd(
-            "yay",
-            &[
-                "-S",
-                "--noconfirm",
-                "nvidia-580xx-dkms",
-                "nvidia-580xx-utils",
-                "nvidia-580xx-settings",
-                "libva-nvidia-driver",
-            ],
-        )?;
-        let _ = run_cmd("yay", &["-S", "--noconfirm", "lib32-nvidia-580xx-utils"]); // Install 32-bit
-    }
-    if is_legacy_nvidia || !drivers_installed {
-        run_cmd("sudo", &["mkinitcpio", "-P"])?; // Regenerate initramfs
-        if Path::new("/boot/grub/grub.cfg").exists() {
-            let _ = run_cmd("sudo", &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"]); // Regenerate GRUB config if GRUB is present
-        }
-        let _ = run_cmd("sudo", &["reboot"]); // Reboot to load new drivers safely
-        std::process::exit(0); // In case reboot command fails, we still want to exit to prevent further issues
-    }
-    Ok(())
-}
-
-/// Generates the sway-hybrid wrapper script with DYNAMIC paths.
-fn create_sway_hybrid_script() -> Result<bool, std::io::Error> {
-    println!("   🔧 Generating dynamic Sway-Hybrid wrapper...");
-
-    // 1. Find the iGPU
-    let (card_path, vendor) = match find_igpu() {
-        Some(tuple) => tuple,
-        None => {
-            println!("   ⚠️  Could not detect iGPU. Defaulting to /dev/dri/card1 (Risky!)");
-            ("/dev/dri/card1".to_string(), "intel".to_string())
-        }
-    };
-
-    println!("      👉 iGPU Found: {} ({})", card_path, vendor);
-
-    // 2. Determine Vulkan JSON path based on vendor
-    let vulkan_driver = if vendor == "amd" {
-        "radeon_icd.x86_64.json"
-    } else {
-        "intel_icd.x86_64.json"
-    };
-
-    // 3. Write the Script
-    let script_content = format!(
-        r#"#!/bin/sh
-# --- Auto-Generated by Rust Installer ---
-# Forces Sway to run on the iGPU ({vendor}) while keeping NVIDIA available for suspend.
-
-# 1. Force OpenGL (Xwayland/X11 apps) to use Mesa
-export __GLX_VENDOR_LIBRARY_NAME=mesa
-
-# 2. Force Vulkan to use the iGPU
-export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/{vulkan}
-
-# 3. Force EGL (Wayland apps) to use Mesa
-export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
-
-# 4. The Critical Fix: Tell Sway (wlroots) explicitly which card to drive
-export WLR_DRM_DEVICES={card}
-
-# Launch Sway
-exec sway
-"#,
-        vendor = vendor,
-        vulkan = vulkan_driver,
-        card = card_path
-    );
-
-    //Idempotency Check: If the file already exists with the same content, skip writing
-    let wrapper_path = "/usr/local/bin/sway-hybrid";
-    if fs::read_to_string(wrapper_path)
-        .is_ok_and(|current_content| current_content == script_content)
-    {
-        println!("   ✅ Sway-Hybrid script is already up to date. No changes made.");
-        return Ok(false);
-    }
-
-    // 4. Write to a secure temp file first (prevents partial writes to /usr/local/bin)
-    let mut local_tmp = NamedTempFile::new()?;
-    local_tmp.write_all(script_content.as_bytes())?;
-
-    // 5. Use sudo to install it to /usr/local/bin with +x permissions
-    let status = Command::new("sudo")
-        .arg("install")
-        .arg("-m")
-        .arg("755")
-        .arg("-o")
-        .arg("root")
-        .arg("-g")
-        .arg("root")
-        .arg(local_tmp.path())
-        .arg(wrapper_path)
-        .status()?;
-
-    if !status.success() {
-        eprintln!("{}", "❌ Failed to install sway-hybrid script.".red());
-        return Err(std::io::Error::other("Failed to install sway-hybrid"));
-    }
-    Ok(true)
-}
 //-------- Main Steps ------
 fn setup_librewolf(home: &Path) -> Result<(), std::io::Error> {
     println!("   🐺 Configuring LibreWolf for Human Beings...");
@@ -920,17 +615,6 @@ fn install_aur_packages(home: &Path) -> Result<(), std::io::Error> {
     }
     Ok(())
 }
-/// Helper to run a command and check for success, returning an error if it fails.
-fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
-    let status = Command::new(cmd).args(args).status()?;
-    if !status.success() {
-        return Err(std::io::Error::other(format!(
-            "Command '{}' with args {:?} failed",
-            cmd, args
-        )));
-    }
-    Ok(())
-}
 
 /// Gleans pacman.conf to remove unwanted sessions and prevent future installs.
 /// Gnome installs a lot of sessions we don't need, this keeps the list clean.
@@ -985,156 +669,6 @@ fn optimize_pacman_config() -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Applies specific fixes for NVIDIA on Wayland.
-/// 1. Sets kernel parameters (`nvidia_drm.modeset=1`).
-/// 2. Creates modprobe rules to fix suspend/resume.
-/// 3. Rebuilds initramfs via `mkinitcpio`.
-///
-/// Security Note: Uses a secure temp file pattern for writing to /etc/.
-/// NOW SMART: Differentiates between Turing (Legacy) and Modern (Ampere/Ada) cards.
-fn apply_nvidia_configs(arch: &NvidiaArch) -> Result<(), std::io::Error> {
-    println!("    Applying Nvidia Configs...");
-
-    let is_turing = *arch == NvidiaArch::Turing;
-    let mut requires_rebuild = false;
-
-    if is_turing {
-        println!("    ℹ️  Configuring for Turing Architecture (GTX 16xx / RTX 20xx)...");
-    } else {
-        println!("    ℹ️  Configuring for Modern NVIDIA Architecture...");
-    }
-
-    // Helper closure: Write to local dir (safe) then install
-    let install_securely = |content: &str, dest: &str| -> Result<bool, std::io::Error> {
-        if let Ok(existing) = fs::read_to_string(dest)
-            && existing == content
-        {
-            println!("   ✅ {} is already up to date.", dest);
-            return Ok(false); // No changes made
-        }
-        //let local_tmp = format!("./{}", filename);
-        let mut temp_file = NamedTempFile::new()?;
-        temp_file.write_all(content.as_bytes())?;
-        // Use 'install' to copy with root:root ownership and 644 permissions
-        let status = Command::new("sudo")
-            .args([
-                "install",
-                "-m",
-                "644",
-                "-o",
-                "root",
-                "-g",
-                "root",
-                temp_file.path().to_str().unwrap(),
-                dest,
-            ])
-            .status()?;
-        if !status.success() {
-            eprintln!("❌ Failed to install file to {}.", dest);
-            return Err(std::io::Error::other(format!(
-                "Failed to install file to {}",
-                dest
-            )));
-        }
-        Ok(true) // Changes were made
-    };
-
-    // --- 1. MODPROBE CONFIGURATION ---
-    // Turing (GTX 16xx/20xx): Needs Firmware=0 to prevent hanging on suspend with legacy drivers.
-    // Modern (RTX 30xx/40xx): Needs Firmware=1 (Default/GSP) for proper power management.
-    let firmware_val = if is_turing { "0" } else { "1" };
-
-    let modprobe_content = format!(
-        "options nvidia NVreg_EnableGpuFirmware={} NVreg_DynamicPowerManagement=0x02 NVreg_EnableS0ixPowerManagement=1\noptions nvidia_drm modeset=1 fbdev=1\n",
-        firmware_val
-    );
-
-    requires_rebuild |= install_securely(&modprobe_content, "/etc/modprobe.d/nvidia.conf")?;
-
-    requires_rebuild |= install_securely(
-        "blacklist nvidia_uvm\n",
-        "/etc/modprobe.d/99-nvidia-uvm-blacklist.conf",
-    )?;
-
-    // --- 2. UDEV RULES (Common) ---
-    // Keeps the dGPU 'auto' suspended when not in use.
-    requires_rebuild |= install_securely(
-        "SUBSYSTEM==\"pci\", ATTR{vendor}==\"0x10de\", ATTR{power/control}=\"auto\"\n",
-        "/etc/udev/rules.d/90-nvidia-pm.rules",
-    )?;
-
-    // --- 4. MKINITCPIO CONFIGURATION ---
-    // Newer cards often need early KMS loading for external display hotplug wakeup.
-    // We only enforce this for non-turing, though it doesn't hurt turing.
-    if !is_turing {
-        requires_rebuild |= ensure_nvidia_modules_in_initcpio()?;
-    }
-
-    create_sway_hybrid_script()?;
-
-    println!("    🏗️  Rebuilding Initramfs...");
-    if requires_rebuild {
-        Command::new("sudo").args(["mkinitcpio", "-P"]).status()?;
-    } else {
-        println!("    ✅ No changes to initramfs configuration. Skipping rebuild.");
-    }
-    Ok(())
-}
-
-/// Helper: Safely adds nvidia modules to mkinitcpio.conf if missing.
-/// Handles the request: "-added nvidia to modules in mkinitcpio"
-fn ensure_nvidia_modules_in_initcpio() -> Result<bool, std::io::Error> {
-    println!("    🔧 Checking mkinitcpio modules for Modern NVIDIA support...");
-    let config_path = "/etc/mkinitcpio.conf";
-    let content = fs::read_to_string(config_path)?;
-
-    let new_content = content
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("MODULES=") {
-                let start = trimmed.find('(').unwrap_or(0);
-                let end = trimmed.find(')').unwrap_or(trimmed.len());
-                if start < end {
-                    let inner = &trimmed[start + 1..end];
-                    let mut modules: Vec<&str> = inner.split_whitespace().collect();
-
-                    for req in ["nvidia", "nvidia_modeset", "nvidia_uvm", "nvidia_drm"] {
-                        if !modules.contains(&req) {
-                            modules.push(req);
-                        }
-                    }
-                    return format!("MODULES=({})", modules.join(" "));
-                }
-            }
-            line.to_string()
-        })
-        .collect::<Vec<String>>()
-        .join("\n");
-    if new_content == content.trim_end() {
-        return Ok(false); // No changes needed
-    }
-    let mut temp_file = NamedTempFile::new()?;
-    writeln!(temp_file, "{}", new_content)?;
-    let status = Command::new("sudo")
-        .arg("install")
-        .arg("-m")
-        .arg("644")
-        .arg("-o")
-        .arg("root")
-        .arg("-g")
-        .arg("root")
-        .arg(temp_file.path())
-        .arg(config_path)
-        .status()?;
-    if status.success() {
-        println!("    ✅ Added nvidia modules to Initramfs config.");
-        Ok(true)
-    } else {
-        eprintln!("    ⚠️  Failed to update mkinitcpio.conf.");
-        Err(std::io::Error::other("Failed to update mkinitcpio.conf"))
-    }
-}
 ///I templated my waybar configs to allow gitignore of my personalization.
 ///This unpacks them if they don't already exist.
 fn setup_waybar_configs(home: &Path) {
@@ -1872,19 +1406,14 @@ fn setup_battery_daemon(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::
 
     let systemd_user_dir = home.join(".config/systemd/user");
     let service_dest = systemd_user_dir.join("battery-daemon.service");
+    let service_path = Path::new(&service_dest);
 
     println!("   🔋 Setting up Battery Safety Daemon...");
 
     // Make sure the ~/.config/systemd/user/ folder actually exists
     sys.create_dir_all(&systemd_user_dir)?;
     let service_content = include_str!("../../battery-daemon/battery-daemon.service");
-    let existing_content = sys
-        .read_file_to_string(
-            service_dest
-                .to_str()
-                .ok_or_else(|| std::io::Error::other("invalid"))?,
-        )
-        .unwrap_or_default();
+    let existing_content = sys.read_file_to_string(service_path).unwrap_or_default();
 
     if existing_content != service_content {
         println!("   📝 Updating battery daemon configuration.");
@@ -1911,7 +1440,7 @@ fn setup_battery_daemon(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::
 fn configure_upower(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("🔋 Enforcing UPower Critical Shutdown at 5%...");
 
-    let upower_conf = "/etc/UPower/UPower.conf";
+    let upower_conf = Path::new("/etc/UPower/UPower.conf");
     let file_content = sys.read_file_to_string(upower_conf)?;
     let mut needs_update = false;
     let mut found_percentage = false;
@@ -1947,7 +1476,7 @@ fn configure_upower(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    sys.write_string_to_file(upower_conf, &lines.join("\n"))?;
+    sys.write_string_to_file(upower_conf.to_str().unwrap(), &lines.join("\n"))?;
 
     // restarting to apply changes
     sys.run_cmd("sudo", &["systemctl", "restart", "upower.service"])?;
