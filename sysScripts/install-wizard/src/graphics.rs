@@ -347,3 +347,87 @@ pub fn ensure_nvidia_modules_in_initcpio(sys: &impl CmdExecutor) -> Result<bool,
     let modified = sys.install_string_to_root_file(config_path, &new_content, "644")?;
     Ok(modified)
 }
+
+//-------- Unit Tests -------------------
+//---------------------------------------
+//
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock_env::MockEnv;
+
+    fn seed_pci_device(
+        env: &MockEnv,
+        bdf: &str,
+        class_hex: &str,
+        vendor_hex: &str,
+        device_hex: &str,
+    ) {
+        env.mock_files.borrow_mut().insert(
+            format!("/sys/bus/pci/devices/{}/class", bdf),
+            class_hex.to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            format!("/sys/bus/pci/devices/{}/vendor", bdf),
+            vendor_hex.to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            format!("/sys/bus/pci/devices/{}/device", bdf),
+            device_hex.to_string(),
+        );
+    }
+
+    #[test]
+    fn test_detect_gpu() {
+        let env = MockEnv::default();
+        seed_pci_device(&env, "0000:00:02.0", "0x030000", "0x8086", "0x1234"); // Intel iGPU
+        let result = detect_gpu(&env);
+        assert_eq!(result, GpuVendor::Intel);
+        seed_pci_device(&env, "0000:01:00.0", "0x030000", "0x10de", "0x2204"); // NVIDIA dGPU
+        let result = detect_gpu(&env);
+        assert_eq!(result, GpuVendor::Nvidia(NvidiaArch::Modern));
+        seed_pci_device(&env, "0000:01:00.0", "0x030000", "0x10de", "0x1e02"); // Turing dGPU
+        let result = detect_gpu(&env);
+        assert_eq!(result, GpuVendor::Nvidia(NvidiaArch::Turing));
+    }
+
+    #[test]
+    fn test_detect_gpu_matrix() {
+        let cases = vec![
+            // class, vendor, device, expected
+            ("0x030000", "0x8086", "0x1234", GpuVendor::Intel),
+            ("0x030000", "0x1002", "0x73bf", GpuVendor::Amd),
+            (
+                "0x030000",
+                "0x10de",
+                "0x1f06",
+                GpuVendor::Nvidia(NvidiaArch::Turing),
+            ),
+            (
+                "0x038000",
+                "0x10de",
+                "0x2684",
+                GpuVendor::Nvidia(NvidiaArch::Modern),
+            ),
+            ("0x020000", "0x10de", "0x2204", GpuVendor::Unknown),
+            ("0x030000", "0x1234", "0x5678", GpuVendor::Unknown),
+        ];
+
+        for (class_hex, vendor_hex, device_hex, expected) in cases {
+            let env = MockEnv::default();
+            seed_pci_device(&env, "0000:01:00.0", class_hex, vendor_hex, device_hex);
+            assert_eq!(detect_gpu(&env), expected);
+        }
+    }
+
+    #[test]
+    fn test_detect_gpu_priority_prefers_nvidia() {
+        let env = MockEnv::default();
+        seed_pci_device(&env, "0000:00:02.0", "0x030000", "0x8086", "0x1234");
+        seed_pci_device(&env, "0000:03:00.0", "0x030000", "0x1002", "0x73bf");
+        seed_pci_device(&env, "0000:01:00.0", "0x030000", "0x10de", "0x2204");
+
+        assert_eq!(detect_gpu(&env), GpuVendor::Nvidia(NvidiaArch::Modern));
+    }
+}

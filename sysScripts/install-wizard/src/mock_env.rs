@@ -112,10 +112,9 @@ impl CmdExecutor for MockEnv {
         let mut names = Vec::new();
 
         for key in files.keys() {
-            if key.starts_with(&prefix)
-                && let Some(name) = std::path::Path::new(key)
-                    .file_name()
-                    .and_then(|n| n.to_str())
+            if let Some(remainder) = key.strip_prefix(&prefix)
+                && let Some(name) = remainder.split('/').next()
+                && !name.is_empty()
             {
                 names.push(name.to_string());
             }
