@@ -29,17 +29,6 @@ impl CmdExecutor for LiveEnv {
     fn path_exists(&self, path: &std::path::Path) -> bool {
         path.exists()
     }
-    fn read_link_target(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<std::path::PathBuf, std::io::Error> {
-        std::fs::read_link(path).map_err(|_| {
-            std::io::Error::other(format!(
-                "Failed to read symlink target for '{}'",
-                path.display()
-            ))
-        })
-    }
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         std::fs::write(path, content)
     }

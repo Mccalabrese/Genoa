@@ -7,7 +7,7 @@ pub struct MockEnv {
     pub env_vars: std::collections::HashMap<String, String>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
-    pub symlink_paths: RefCell<std::collections::HashSet<String>>,
+    pub symlink_paths: RefCell<std::collections::HashMap<String, String>>,
 }
 
 impl CmdExecutor for MockEnv {
@@ -46,22 +46,6 @@ impl CmdExecutor for MockEnv {
     }
     fn create_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
         Ok(())
-    }
-    fn read_link_target(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<std::path::PathBuf, std::io::Error> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid path for symlink target"))?;
-        if self.symlink_paths.borrow().contains(path_str) {
-            Ok(std::path::PathBuf::from("/mock/symlink/target"))
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Symlink '{}' not found in mock environment", path.display()),
-            ))
-        }
     }
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         self.mock_files
@@ -126,7 +110,7 @@ impl CmdExecutor for MockEnv {
     }
     fn is_symlink(&self, path: &std::path::Path) -> bool {
         path.to_str()
-            .map(|p| self.symlink_paths.borrow().contains(p))
+            .map(|p| self.symlink_paths.borrow().contains_key(p))
             .unwrap_or(false)
     }
 }

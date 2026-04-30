@@ -6,10 +6,6 @@ pub trait CmdExecutor {
     fn path_exists(&self, path: &std::path::Path) -> bool;
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error>;
     fn create_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
-    fn read_link_target(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<std::path::PathBuf, std::io::Error>;
     fn install_string_to_root_file(
         &self,
         dest_path: &std::path::Path,

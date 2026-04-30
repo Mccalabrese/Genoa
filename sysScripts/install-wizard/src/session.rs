@@ -1111,9 +1111,10 @@ mod tests {
             "/etc/tlp.conf".to_string(),
             "legacy link target contents".to_string(),
         );
-        env.symlink_paths
-            .borrow_mut()
-            .insert("/etc/tlp.conf".to_string());
+        env.symlink_paths.borrow_mut().insert(
+            "/etc/tlp.conf".to_string(),
+            "mock_symlink_target".to_string(),
+        );
 
         let result = configure_tlp(&env, std::path::Path::new("/repo-root"));
         let log = env.cmd_log.borrow();
