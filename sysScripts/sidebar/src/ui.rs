@@ -240,6 +240,7 @@ pub fn build_ui(app: &Application) {
         .stack(&main_stack)
         .halign(gtk4::Align::Center)
         .build();
+    stack_switcher.add_css_class("calendar-switcher");
 
     // View A: Month Grid
     let month_view_box = gtk4::Box::new(gtk4::Orientation::Vertical, 5);
@@ -253,11 +254,11 @@ pub fn build_ui(app: &Application) {
 
     let btn_prev = gtk4::Button::builder()
         .icon_name("go-previous-symbolic")
-        .css_classes(vec!["flat".to_string()])
+        .css_classes(vec!["flat".to_string(), "calendar-nav-btn".to_string()])
         .build();
     let btn_next = gtk4::Button::builder()
         .icon_name("go-next-symbolic")
-        .css_classes(vec!["flat".to_string()])
+        .css_classes(vec!["flat".to_string(), "calendar-nav-btn".to_string()])
         .build();
     let label_month = gtk4::Label::builder()
         .css_classes(vec!["calendar-title".to_string()])
@@ -384,16 +385,19 @@ pub fn build_ui(app: &Application) {
     let day_nav = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     let btn_day_prev = gtk4::Button::builder()
         .icon_name("go-previous-symbolic")
-        .css_classes(vec!["flat".to_string()])
+        .css_classes(vec!["flat".to_string(), "calendar-nav-btn".to_string()])
         .build();
     let btn_day_next = gtk4::Button::builder()
         .icon_name("go-next-symbolic")
-        .css_classes(vec!["flat".to_string()])
+        .css_classes(vec!["flat".to_string(), "calendar-nav-btn".to_string()])
         .build();
 
     let day_title = gtk4::Label::builder()
         .label("Agenda")
-        .css_classes(vec!["finance-text".to_string()])
+        .css_classes(vec![
+            "finance-text".to_string(),
+            "calendar-day-title".to_string(),
+        ])
         .halign(gtk4::Align::Start)
         .hexpand(true)
         .build();
@@ -451,7 +455,7 @@ pub fn build_ui(app: &Application) {
             let button = gtk4::Button::builder()
                 .label(&text)
                 .halign(gtk4::Align::Fill)
-                .css_classes(vec!["flat".to_string()])
+                .css_classes(vec!["flat".to_string(), "agenda-event".to_string()])
                 .tooltip_text("Open in GNOME Calendar")
                 .build();
 

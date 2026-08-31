@@ -468,8 +468,10 @@ pub fn make_slider_row(icon_name: &str) -> (gtk4::Box, gtk4::Scale) {
         .icon_name(icon_name)
         .pixel_size(20)
         .build();
+    icon.add_css_class("slider-icon");
 
     let scale = gtk4::Scale::with_range(gtk4::Orientation::Horizontal, 0.0, 100.0, 1.0);
+    scale.add_css_class("sidebar-slider");
     scale.set_hexpand(true);
     scale.set_draw_value(false); // Hide the number (we use visual feedback)
 

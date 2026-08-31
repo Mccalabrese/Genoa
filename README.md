@@ -90,16 +90,6 @@ mv ~/.config/nvim ~/.config/nvim.old
 ln -s ~/rust-wayland-power/.config/nvim ~/.config/nvim
 ```
 
-### 🛠️ Post-Install Fixes
-
-**Display Scaling (Everything looks huge/tiny?)**
-This config is optimized for 4k Screens (scale 2.0). If you are on a 1080p Screen, everything will look zoomed in.
-To Fix:
-
-    Niri: Edit ~/.config/niri/config.kdl -> Find output "eDP-1" -> Change scale 2.0 to 1.0.
-
-    Sway: Edit ~/.config/sway/config -> Find output * scale 2 -> Change to scale 1.
-
 ## 🔄 Updates & Maintenance
 
 This system is designed to keep the core tooling fresh without overwriting your personal customizations.
