@@ -26,6 +26,10 @@ fn main() {
     app.connect_activate(|app| {
         if let Some(settings) = gtk4::Settings::default() {
             settings.set_gtk_icon_theme_name(Some("Adwaita"));
+            // The sidebar supplies a dark palette of its own.  Do not let a
+            // system-wide light preference turn GTK's unstyled control nodes
+            // (such as StackSwitcher and Scale) into light widgets.
+            settings.set_gtk_application_prefer_dark_theme(true);
         }
         ui::build_ui(app);
     });

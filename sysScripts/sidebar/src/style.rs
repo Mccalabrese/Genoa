@@ -11,6 +11,7 @@ pub fn load_css() {
         window {
             /* Dark, semi-transparent background (Catppuccin Base) */
             background-color: rgba(30, 30, 46, 0.95);
+            color: #cdd6f4;
         }
 
         .zone {
@@ -18,6 +19,7 @@ pub fn load_css() {
             padding: 12px;
             background-color: rgba(255, 255, 255, 0.08); /* White with low opacity = Glass */
             border-radius: 12px;
+            color: #cdd6f4;
         }
 
         /* --- BUTTONS (Circular & Squared) --- */
@@ -99,8 +101,11 @@ pub fn load_css() {
             margin-bottom: 5px;
         }
 
-        .calendar-day-btn {
+        button.calendar-day-btn,
+        button.calendar-day-btn:focus,
+        button.calendar-day-btn:active {
             background-color: transparent;
+            background-image: none;
             border: none;
             box-shadow: none;
             padding: 0px;
@@ -142,8 +147,87 @@ pub fn load_css() {
         button.calendar-day-btn.today .calendar-dot {
             color: #1e1e2e;
         }
-        
-        /* Navigation Arrows */
+
+        .calendar-switcher {
+            margin-bottom: 4px;
+        }
+
+        .calendar-switcher button {
+            background-image: none;
+            background-color: rgba(255, 255, 255, 0.08);
+            color: #cdd6f4;
+            border: none;
+            box-shadow: none;
+            padding: 4px 12px;
+        }
+
+        .calendar-switcher button:first-child {
+            border-radius: 8px 0 0 8px;
+        }
+
+        .calendar-switcher button:last-child {
+            border-radius: 0 8px 8px 0;
+        }
+
+        .calendar-switcher button:checked {
+            background-color: #89b4fa;
+            color: #1e1e2e;
+        }
+
+        .calendar-switcher button:hover:not(:checked) {
+            background-color: rgba(255, 255, 255, 0.16);
+        }
+
+        .calendar-nav-btn {
+            color: #cdd6f4;
+            min-width: 28px;
+            min-height: 28px;
+        }
+
+        .calendar-nav-btn:hover {
+            background-color: rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+        }
+
+        .calendar-day-title {
+            color: #89b4fa;
+        }
+
+        .agenda-event {
+            color: #cdd6f4;
+            padding: 4px 6px;
+            border-radius: 6px;
+        }
+
+        .agenda-event:hover {
+            background-color: rgba(255, 255, 255, 0.12);
+        }
+
+        .slider-icon {
+            color: #cdd6f4;
+        }
+
+        scale.sidebar-slider trough {
+            background-color: rgba(255, 255, 255, 0.18);
+            border-radius: 999px;
+            min-height: 6px;
+        }
+
+        scale.sidebar-slider highlight {
+            background-color: #89b4fa;
+            border-radius: 999px;
+        }
+
+        scale.sidebar-slider slider {
+            background-color: #cdd6f4;
+            border: none;
+            box-shadow: none;
+            min-width: 14px;
+            min-height: 14px;
+            border-radius: 999px;
+        }
+
+        /* Navigation Arrows and agenda rows */
         .flat {
             background: none;
             border: none;
