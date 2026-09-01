@@ -572,7 +572,9 @@ fn configure_upower(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         return Ok(());
     }
 
-    sys.write_string_to_file(upower_conf.to_str().unwrap(), &lines.join("\n"))?;
+    // sys.write_string_to_file(upower_conf.to_str().unwrap(), &lines.join("\n"))?;
+
+    sys.install_string_to_root_file(upower_conf, &lines.join("\n"), "644")?;
 
     // restarting to apply changes
     sys.run_cmd("sudo", &["systemctl", "restart", "upower.service"])?;
