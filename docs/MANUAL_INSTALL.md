@@ -411,6 +411,17 @@ systemctl --user daemon-reload
 systemctl --user enable --now battery-daemon.service
 ```
 
+Compositor Portals:
+
+```bash
+sudo pacman -S xdg-desktop-portal-gnome
+mkdir -p ~/.config/xdg-desktop-portal
+echo -e "[preferred]\ndefault=wlr;gtk;" > ~/.config/xdg-desktop-portal/portals.conf
+echo -e "[preferred]\ndefault=gnome;gtk;" > ~/.config/xdg-desktop-portal/gnome-portals.conf
+systemctl --user restart xdg-desktop-portal
+
+```
+
 ## 10. Secrets + Generated config.toml
 
 The installer asks for:

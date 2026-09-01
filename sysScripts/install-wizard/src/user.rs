@@ -493,6 +493,7 @@ pub fn link_dotfiles_and_copy_resources(sys: &impl CmdExecutor, home: &Path, rep
         (".config/gtk-4.0", ".config/gtk-4.0"),
         (".config/environment.d", ".config/environment.d"),
         (".config/mako", ".config/mako"),
+        (".config/xdg-desktop-portal", ".config/xdg-desktop-portal"),
     ];
 
     for (src, dest) in links {
