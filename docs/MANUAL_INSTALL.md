@@ -482,6 +482,8 @@ Sync Neovim plugins (if config installed):
 ```bash
 if [ -f "$HOME/.config/nvim/init.lua" ]; then
   nvim --headless "+Lazy! sync" "+qa"
+  rustup component add rust-analyzer clippy
+  nvim --headless "+TSInstall css latex norg scss svelte typst vue" "+qa"
 fi
 ```
 
