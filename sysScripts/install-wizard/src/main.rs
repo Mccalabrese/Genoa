@@ -38,7 +38,10 @@ use crate::helpers::{
     repair_repo_symlink_targets, resolve_repo_root, write_repo_root,
 };
 use crate::live_env::LiveEnv;
-use crate::session::{configure_dns, configure_system, configure_tlp, enforce_session_order};
+use crate::session::{
+    configure_dns, configure_printing_services, configure_system, configure_tlp,
+    enforce_session_order,
+};
 use crate::traits::CmdExecutor;
 use crate::update::{
     get_ignored_packages, install_aur_packages, install_clepsydre_package, install_pacman_packages,
@@ -313,6 +316,12 @@ fn main() {
     println!("\n{}", "🌐 Configuring DNS proxy...".blue().bold());
     if let Err(e) = configure_dns(&live_sys) {
         eprintln!("   ❌ Failed to configure dnscrypt-proxy: {}", e);
+        std::process::exit(1);
+    }
+
+    println!("\n{}", "🖨️  Configuring printing services...".blue().bold());
+    if let Err(e) = configure_printing_services(&live_sys) {
+        eprintln!("   ❌ Failed to configure printing services: {}", e);
         std::process::exit(1);
     }
 

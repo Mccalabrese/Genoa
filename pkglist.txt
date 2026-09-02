@@ -107,6 +107,7 @@ gnome-calculator
 cups
 system-config-printer
 cups-pdf
+avahi
 zsh-autosuggestions
 zsh-syntax-highlighting
 dnscrypt-proxy
