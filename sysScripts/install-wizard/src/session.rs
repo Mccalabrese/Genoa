@@ -32,6 +32,18 @@ pub fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::
     Ok(())
 }
 
+/// Enables local printing and mDNS/DNS-SD discovery. This is deliberately separate from the
+/// fresh-install-only system setup so updates and config-refresh runs repair these services too.
+pub fn configure_printing_services(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+    println!("   🖨️  Enabling printing and network printer discovery...");
+    sys.run_cmd("sudo", &["systemctl", "enable", "--now", "cups.service"])?;
+    sys.run_cmd(
+        "sudo",
+        &["systemctl", "enable", "--now", "avahi-daemon.service"],
+    )?;
+    Ok(())
+}
+
 /// Cleans up the `mkinitcpio.conf` file to fix the known Archinstall 2025 bug that appends 'o"' to
 /// the end of the file,
 fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
@@ -887,6 +899,37 @@ server_names = ['cloudflare']
         assert_eq!(
             env.mock_files.borrow().get(&path).unwrap(),
             "PATH=$HOME/.cargo/bin:$PATH\n"
+        );
+    }
+
+    #[test]
+    fn test_configure_printing_services_enables_cups_and_avahi() {
+        let env = MockEnv::default();
+
+        configure_printing_services(&env).expect("printing services should be enabled");
+
+        assert_eq!(
+            *env.cmd_log.borrow(),
+            vec![
+                (
+                    "sudo".to_string(),
+                    vec![
+                        "systemctl".to_string(),
+                        "enable".to_string(),
+                        "--now".to_string(),
+                        "cups.service".to_string(),
+                    ],
+                ),
+                (
+                    "sudo".to_string(),
+                    vec![
+                        "systemctl".to_string(),
+                        "enable".to_string(),
+                        "--now".to_string(),
+                        "avahi-daemon.service".to_string(),
+                    ],
+                ),
+            ]
         );
     }
     #[test]

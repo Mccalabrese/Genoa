@@ -652,9 +652,41 @@ pub fn finalize_setup(sys: &impl CmdExecutor, home: &Path) {
             .is_ok()
         {
             println!("   ✅ Neovim Plugins Synced");
+            configure_neovim_health(sys);
         } else {
             println!("   ⚠️  Neovim setup skipped (will run on first launch)");
         }
+    }
+}
+
+/// Installs the Rust tooling and Tree-sitter parsers required by this Neovim configuration.
+/// Lazy.nvim is synchronized first so the `:TSInstall` command is available in headless Neovim.
+fn configure_neovim_health(sys: &impl CmdExecutor) {
+    println!("   🦀 Installing Rust analyzer and Clippy...");
+    if sys
+        .run_cmd("rustup", &["component", "add", "rust-analyzer", "clippy"])
+        .is_ok()
+    {
+        println!("   ✅ Rust analyzer and Clippy ready");
+    } else {
+        println!("   ⚠️  Rust component setup failed");
+    }
+
+    println!("   🌳 Installing Neovim Tree-sitter parsers...");
+    if sys
+        .run_cmd(
+            "nvim",
+            &[
+                "--headless",
+                "+TSInstall css latex norg scss svelte typst vue",
+                "+qa",
+            ],
+        )
+        .is_ok()
+    {
+        println!("   ✅ Neovim Tree-sitter parsers installed");
+    } else {
+        println!("   ⚠️  Tree-sitter parser setup failed (run :TSInstall manually in Neovim)");
     }
 }
 
@@ -669,6 +701,36 @@ mod tests {
         let original = "finnhub = \"YOUR_FINNHUB_KEY_HERE\"\n";
         let updated = update_config_placeholders(original, "fin-key").expect("no update");
         assert!(updated.contains("fin-key"));
+    }
+
+    #[test]
+    fn test_configure_neovim_health_installs_rust_and_treesitter_dependencies() {
+        let env = MockEnv::default();
+
+        configure_neovim_health(&env);
+
+        assert_eq!(
+            *env.cmd_log.borrow(),
+            vec![
+                (
+                    "rustup".to_string(),
+                    vec![
+                        "component".to_string(),
+                        "add".to_string(),
+                        "rust-analyzer".to_string(),
+                        "clippy".to_string(),
+                    ],
+                ),
+                (
+                    "nvim".to_string(),
+                    vec![
+                        "--headless".to_string(),
+                        "+TSInstall css latex norg scss svelte typst vue".to_string(),
+                        "+qa".to_string(),
+                    ],
+                ),
+            ]
+        );
     }
 
     #[test]

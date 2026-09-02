@@ -135,8 +135,8 @@ sudo pacman -S --needed --noconfirm \
   waybar wofi rofi awww swaybg grim slurp mako papirus-icon-theme gnome-themes-extra \
   adwaita-icon-theme ttf-jetbrains-mono-nerd ttf-fira-code ttf-jetbrains-mono noto-fonts noto-fonts-emoji otf-font-awesome zsh starship ghostty \
   tmux fzf ripgrep bat btop fastfetch neovim librewolf networkmanager network-manager-applet \
-  discord tigervnc mpv gparted simple-scan gnome-calculator cups system-config-printer cups-pdf zsh-autosuggestions \
-  zsh-syntax-highlighting dnscrypt-proxy wireplumber
+  discord tigervnc mpv gparted simple-scan gnome-calculator cups system-config-printer cups-pdf avahi \
+  zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy wireplumber
 ```
 <!-- PKGLIST:END -->
 
@@ -482,6 +482,8 @@ Sync Neovim plugins (if config installed):
 ```bash
 if [ -f "$HOME/.config/nvim/init.lua" ]; then
   nvim --headless "+Lazy! sync" "+qa"
+  rustup component add rust-analyzer clippy
+  nvim --headless "+TSInstall css latex norg scss svelte typst vue" "+qa"
 fi
 ```
 

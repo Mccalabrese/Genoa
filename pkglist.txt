@@ -107,7 +107,17 @@ gnome-calculator
 cups
 system-config-printer
 cups-pdf
+avahi
 zsh-autosuggestions
 zsh-syntax-highlighting
 dnscrypt-proxy
 wireplumber
+tree-sitter
+tree-sitter-cli
+luarocks
+lazygit
+fd
+python-pynvim
+tectonic
+nodejs
+npm
