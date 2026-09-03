@@ -36,27 +36,7 @@ file = "~/.config/sway/keybinds_sway.txt"
 compositor = "niri"
 ```
 
-- **Window Rules for Cal-Tui**: The calendar tui requires window rules in niri and sway's configs to float in the center of the screen. These should be added:
-
-### Niri (~/.config/niri/config.kdl)
-
-```
-
-window-rule {
-    match app-id="ghostty" title="calendar-tui"
-    open-floating true
-    default-column-width { fixed 1000; }
-    default-window-height { fixed 600; }
-}
-```
-
-### Sway (~/.config/sway/UserConfigs/WindowRules.conf)
-
-```
-for_window [title="^calendar-tui$"] floating enable, resize set 1000 600, move position center
-```
-
-- **Portal Changes: The GNOME backend and Niri/Sway backend require talking to different compositors. To do this:
+- **Portal Changes:** The GNOME backend and Niri/Sway backend require talking to different compositors. To do this:
 
 ```
 sudo pacman -S xdg-desktop-portal-gnome
@@ -66,3 +46,106 @@ echo -e "[preferred]\ndefault=gnome;gtk;" > ~/.config/xdg-desktop-portal/gnome-p
 systemctl --user restart xdg-desktop-portal
 
 ```
+- **Idle & Lock Changes:** The old hypr dependencies are not being kept, and are causing some issues on waking from suspend. 
+
+1. Copy the `gtklock` directory from this repo's .config into your local `~/.config`.
+
+2. In `~/.config/niri/config`:
+Replace:
+
+```
+spawn-sh-at-startup "iDIR=\"$HOME/.config/swaync/images/ja.png\"; export iDIR; swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'pidof hyprlock || hyprlock &' timeout 630 'wlr-randr --output eDP-1 --off; wlr-randr --output DP-2 --off; wlr-randr --output DP-3 --off; wlr-randr --output DP-4 --off' resume 'wlr-randr --output eDP-1 --on; wlr-randr --output DP-2 --on; wlr-randr --output DP-3 --on; wlr-randr --output DP-4 --on' timeout 1200 'systemctl suspend' before-sleep 'pidof hyprlock || hyprlock &'"
+```
+
+with:
+
+```
+spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'flock -n /tmp/gtklock.lock gtklock -d' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep 'flock -n /tmp/gtklock.lock gtklock -d'"
+
+```
+
+**AND** replace:
+
+```
+    //suspend
+    Mod+Alt+S hotkey-overlay-title="Lock and Suspend" {
+        spawn-sh "pidof hyprlock >/dev/null || hyprlock & sleep 0.5; systemctl suspend"
+    }
+    Mod+Alt+K { spawn-sh "pkill swaync && swaync"; }
+
+```
+
+with:
+
+```
+    //suspend
+    Mod+Alt+S hotkey-overlay-title="Lock and Suspend" {
+        spawn-sh "flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend"
+    }
+    Mod+Alt+K { spawn-sh "pkill swaync && swaync"; }
+```
+
+**AND** replace:
+
+```
+    Super+Alt+L hotkey-overlay-title="Lock the Screen: hyprlock" { spawn-sh "pidof hyprlock || hyprlock &"; }
+```
+
+with:
+
+```
+    Super+Alt+L hotkey-overlay-title="Lock the Screen: gtklock" { spawn-sh "flock -n /tmp/gtklock.lock gtklock -d"; }
+```
+
+3. In `~/.config/sway/`:
+
+Replace everything in `` with:
+
+```
+#!/usr/bin/env bash
+
+iDIR="$HOME/.config/swaync/images/ja.png"
+
+# kill any existing instance (in case of reload)
+pkill swayidle 2>/dev/null
+
+swayidle -w \
+  timeout 60 'brightnessctl set 0%' \
+  resume 'brightnessctl set 15%' \
+  timeout 240 'flock -n /tmp/gtklock.lock gtklock -d' \
+  timeout 270 'swaymsg "output * dpms off"' \
+  resume 'swaymsg "output * dpms on"' \
+  timeout 600 'systemctl suspend' \
+  before-sleep 'flock -n /tmp/gtklock.lock gtklock -d'
+
+```
+
+**AND** in `UserConfigs/UserKeybinds.conf` replace:
+
+```
+bindsym $mainMod+Alt+s exec sh -c 'pidof hyprlock >/dev/null || (hyprlock & sleep 0.5); systemctl suspend'
+
+```
+
+with:
+
+```
+bindsym $mainMod+Alt+s exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend'
+
+```
+
+**AND** replace:
+
+```
+bindsym Control+Mod1+l exec pidof hyprlock || hyprlock &
+```
+
+with:
+
+```
+bindsym Control+Mod1+l exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d'
+
+```
+
+
+**After running these steps you should run `sudo pacman -Rns hypridle hyprlock` and `rm -rf ~/.config/hypr`**

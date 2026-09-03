@@ -100,7 +100,7 @@ spawn-at-startup "wl-paste" "--type" "image" "--watch" "cliphist" "store"
 spawn-at-startup "xwayland-satellite"
 // --- IDLE MANAGEMENT (replaces hypridle, calls hyprlock) ---
 
-spawn-sh-at-startup "iDIR=\"$HOME/.config/swaync/images/ja.png\"; export iDIR; swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'pidof hyprlock || hyprlock &' timeout 630 'wlr-randr --output eDP-1 --off; wlr-randr --output DP-2 --off; wlr-randr --output DP-3 --off; wlr-randr --output DP-4 --off' resume 'wlr-randr --output eDP-1 --on; wlr-randr --output DP-2 --on; wlr-randr --output DP-3 --on; wlr-randr --output DP-4 --on' timeout 1200 'systemctl suspend' before-sleep 'pidof hyprlock || hyprlock &'"
+spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'flock -n /tmp/gtklock.lock gtklock -d' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep 'flock -n /tmp/gtklock.lock gtklock -d'"
 
 // Hotkey Overlay
 hotkey-overlay {
@@ -216,7 +216,7 @@ binds {
     Mod+D hotkey-overlay-title="Run an Application: Rofi" { 
         spawn-sh "pkill rofi || rofi -show drun -config ~/.config/rofi/config-launcher.rasi"; 
     }
-    Super+Alt+L hotkey-overlay-title="Lock the Screen: hyprlock" { spawn-sh "pidof hyprlock || hyprlock &"; }
+    Super+Alt+L hotkey-overlay-title="Lock the Screen: gtklock" { spawn-sh "flock -n /tmp/gtklock.lock gtklock -d"; }
 
     // Volume/Brightness/Mic
     XF86AudioRaiseVolume allow-when-locked=true { spawn-sh "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"; }
@@ -234,7 +234,7 @@ binds {
     Mod+Q repeat=false { close-window; }
     //suspend
     Mod+Alt+S hotkey-overlay-title="Lock and Suspend" {
-        spawn-sh "pidof hyprlock >/dev/null || hyprlock & sleep 0.5; systemctl suspend"
+        spawn-sh "flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend"
     }
     Mod+Alt+K { spawn-sh "pkill swaync && swaync"; }
 
