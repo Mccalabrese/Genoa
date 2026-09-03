@@ -76,6 +76,7 @@ const AUR_PACKAGES: &[&str] = &[
     "pinta",
     "ttf-victor-mono",
     "pear-desktop-bin",
+    "gtklock-runshell-module"
 ];
 
 #[derive(Debug, PartialEq, Eq)]

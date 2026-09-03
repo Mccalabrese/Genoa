@@ -30,9 +30,7 @@ vulkan-intel
 sway
 niri
 gnome
-hyprlock
 swayidle
-hypridle
 xdg-user-dirs-gtk
 xdg-utils
 greetd
@@ -121,3 +119,4 @@ python-pynvim
 tectonic
 nodejs
 npm
+gtklock

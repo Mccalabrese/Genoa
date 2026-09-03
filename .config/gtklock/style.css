@@ -1,0 +1,60 @@
+/* Define your Wallust colors */
+@define-color color11 #919496;
+@define-color color12 #9A8B83;
+@define-color color13 #A38170;
+@define-color bg-inner rgba(255, 255, 255, 0.1);
+
+/* Default monitor background */
+window {
+    background-image: url("/home/michael/Pictures/Wallpapers/comp1.jpg");
+    background-size: cover;
+    background-position: center;
+}
+
+/* Specific monitor override using the output name */
+window#eDP-1 {
+    background-image: url("/home/michael/Pictures/Wallpapers/Laptop9.jpg");
+}
+
+/* Time formatting */
+#clock-label {
+    font-family: "JetBrainsMono Nerd Font";
+    font-weight: 800;
+    font-size: 150px;
+    color: @color13;
+    margin-bottom: 20px;
+}
+
+/* Date formatting */
+#date-label {
+    font-family: "Victor Mono";
+    font-style: italic;
+    font-weight: bold;
+    font-size: 18px;
+    color: @color13;
+    margin-bottom: 100px;
+}
+
+/* Password Input Field */
+entry {
+    font-family: "Victor Mono";
+    font-style: oblique;
+    font-weight: bold;
+    color: @color13;
+    background-color: @bg-inner;
+    border: 2px solid @color11;
+    border-radius: 30px;
+    min-width: 300px;
+    min-height: 60px;
+    box-shadow: none;
+}
+
+/* Extrabar (Weather and Uptime) formatting */
+#runshell {
+    font-family: "Victor Mono";
+    font-style: oblique;
+    font-weight: bold;
+    font-size: 18px;
+    color: @color13;
+    padding: 20px;
+}

@@ -558,22 +558,19 @@ pub fn build_ui(app: &Application) {
 
     // Security
     btn_suspend.connect_clicked(move |_| {
-        if !helpers::is_process_running("hyprlock") {
-            helpers::run_command("hyprlock", &[]);
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
+        // flock -n prevents collisions, gtklock -d blocks execution until the surface is securely locked.
+        helpers::run_command("sh", &["-c", "flock -n /tmp/gtklock.lock gtklock -d"]);
         helpers::run_command("systemctl", &["suspend"]);
     });
+
     btn_lock.connect_clicked(move |_| {
-        if !helpers::is_process_running("hyprlock") {
-            helpers::run_command("hyprlock", &[]);
-        }
+        helpers::run_command("sh", &["-c", "flock -n /tmp/gtklock.lock gtklock -d"]);
     });
 
     // --- Idle Inhibit Persistence ---
-    // Query procps-ng for the state of our idle daemons.
+    // Query procps-ng for the state of our idle daemon.
     // A suspended process (SIGSTOP) will have a 'T' in its stat column.
-    let idle_check = helpers::get_stdout("ps", &["-o", "stat=", "-C", "swayidle,hypridle"]);
+    let idle_check = helpers::get_stdout("ps", &["-o", "stat=", "-C", "swayidle"]);
 
     // If the process exists and is stopped, visually mark the button active on boot
     if idle_check.contains('T') {
@@ -585,12 +582,10 @@ pub fn build_ui(app: &Application) {
         if btn.has_css_class("active") {
             // It's currently paused. Remove UI highlight and resume the daemon.
             btn.remove_css_class("active");
-            helpers::run_command("pkill", &["-CONT", "hypridle"]);
             helpers::run_command("pkill", &["-CONT", "swayidle"]);
         } else {
             // It's running normally. Add UI highlight and pause the daemon.
             btn.add_css_class("active");
-            helpers::run_command("pkill", &["-STOP", "hypridle"]);
             helpers::run_command("pkill", &["-STOP", "swayidle"]);
         }
     });

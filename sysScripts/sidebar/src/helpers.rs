@@ -691,9 +691,6 @@ pub fn get_stdout(program: &str, args: &[&str]) -> String {
     }
 }
 
-pub fn is_process_running(process_name: &str) -> bool {
-    run_output_with_retry("pidof", &[process_name]).is_some()
-}
 
 pub fn pkg_count() -> String {
     match run_output_with_retry("pacman", &["-Q"]) {
