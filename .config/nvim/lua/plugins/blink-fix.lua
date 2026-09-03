@@ -22,15 +22,8 @@ return {
         },
       },
       sources = {
-        default = { "lsp", "path", "buffer", "copilot" },
+        default = { "lsp", "path", "buffer", "snippets" },
       },
-    },
-  },
-  {
-    "zbirenbaum/copilot.lua",
-    opts = {
-      suggestion = { enabled = false }, -- disable inline ghost suggestions from Copilot
-      panel = { enabled = false }, -- disable side panel
     },
   },
 }
