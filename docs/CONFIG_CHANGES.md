@@ -60,7 +60,7 @@ spawn-sh-at-startup "iDIR=\"$HOME/.config/swaync/images/ja.png\"; export iDIR; s
 with:
 
 ```
-spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'flock -n /tmp/gtklock.lock gtklock -d' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep 'flock -n /tmp/gtklock.lock gtklock -d'"
+spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'flock -n /tmp/gtklock.lock gtklock -d' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep 'sh -c \"flock -n /tmp/gtklock.lock gtklock &\"'"
 
 ```
 
@@ -116,7 +116,7 @@ swayidle -w \
   timeout 270 'swaymsg "output * dpms off"' \
   resume 'swaymsg "output * dpms on"' \
   timeout 600 'systemctl suspend' \
-  before-sleep 'flock -n /tmp/gtklock.lock gtklock -d'
+  before-sleep 'sh -c "flock -n /tmp/gtklock.lock gtklock &"'
 
 ```
 
