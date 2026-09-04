@@ -12,4 +12,4 @@ swayidle -w \
   timeout 270 'swaymsg "output * dpms off"' \
   resume 'swaymsg "output * dpms on"' \
   timeout 600 'systemctl suspend' \
-  before-sleep 'flock -n /tmp/gtklock.lock gtklock -d'
+  before-sleep 'sh -c "flock -n /tmp/gtklock.lock gtklock &"'
