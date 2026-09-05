@@ -6,14 +6,14 @@
 
 /* Default monitor background */
 window {
-    background-image: url("/home/michael/Pictures/Wallpapers/comp1.jpg");
+    background-image: url("Wallpapers/comp1.jpg");
     background-size: cover;
     background-position: center;
 }
 
 /* Specific monitor override using the output name */
 window#eDP-1 {
-    background-image: url("/home/michael/Pictures/Wallpapers/Laptop9.jpg");
+    background-image: url("Wallpapers/Laptop9.jpg");
 }
 
 /* Time formatting */
