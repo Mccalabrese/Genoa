@@ -71,6 +71,14 @@ pub fn setup_librewolf(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::i
     );
     Ok(())
 }
+
+/// Sets GNOME Papers as the default PDF viewer for a fresh Genoa installation.
+pub fn setup_papers(sys: &impl CmdExecutor) {
+    println!("   📄 Setting GNOME Papers as the default PDF viewer...");
+    for mime in ["application/pdf", "application/x-pdf"] {
+        let _ = sys.run_cmd_ignore_err("xdg-mime", &["default", "org.gnome.Papers.desktop", mime]);
+    }
+}
 ///I templated my waybar configs to allow gitignore of my personalization.
 ///This unpacks them if they don't already exist.
 pub fn setup_waybar_configs(sys: &impl CmdExecutor, home: &Path) {
@@ -727,6 +735,35 @@ mod tests {
                         "--headless".to_string(),
                         "+TSInstall css latex norg scss svelte typst vue".to_string(),
                         "+qa".to_string(),
+                    ],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_setup_papers_sets_pdf_associations() {
+        let env = MockEnv::default();
+
+        setup_papers(&env);
+
+        assert_eq!(
+            *env.cmd_log.borrow(),
+            vec![
+                (
+                    "xdg-mime".to_string(),
+                    vec![
+                        "default".to_string(),
+                        "org.gnome.Papers.desktop".to_string(),
+                        "application/pdf".to_string(),
+                    ],
+                ),
+                (
+                    "xdg-mime".to_string(),
+                    vec![
+                        "default".to_string(),
+                        "org.gnome.Papers.desktop".to_string(),
+                        "application/x-pdf".to_string(),
                     ],
                 ),
             ]

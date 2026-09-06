@@ -49,7 +49,7 @@ use crate::update::{
 };
 use crate::user::{
     build_custom_apps, finalize_setup, link_dotfiles_and_copy_resources,
-    patch_waybar_sidebar_toggle_path, remove_retired_tool_sources, setup_librewolf,
+    patch_waybar_sidebar_toggle_path, remove_retired_tool_sources, setup_librewolf, setup_papers,
     setup_secrets_and_geoclue, setup_waybar_configs,
 };
 
@@ -76,7 +76,7 @@ const AUR_PACKAGES: &[&str] = &[
     "pinta",
     "ttf-victor-mono",
     "pear-desktop-bin",
-    "gtklock-runshell-module"
+    "gtklock-runshell-module",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -442,6 +442,7 @@ fn main() {
             if let Err(e) = setup_librewolf(&live_sys, &home) {
                 eprintln!("   ⚠️ Failed to configure LibreWolf: {}", e);
             }
+            setup_papers(&live_sys);
             setup_waybar_configs(&live_sys, &home);
             patch_waybar_sidebar_toggle_path(&live_sys, &home);
             if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
@@ -773,11 +774,28 @@ mod tests {
         );
         assert_eq!(
             log.len(),
-            1,
-            "Expected exactly one command to be run for UPower configuration"
+            2,
+            "Expected UPower to install the changed config and restart the service"
         );
         assert_eq!(
             log[0],
+            (
+                "sudo".to_string(),
+                vec![
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "644".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                    "/tmp/mock_file".to_string(),
+                    "/etc/UPower/UPower.conf".to_string(),
+                ]
+            )
+        );
+        assert_eq!(
+            log[1],
             (
                 "sudo".to_string(),
                 vec![
