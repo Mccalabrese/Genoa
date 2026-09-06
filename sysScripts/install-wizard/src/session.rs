@@ -57,6 +57,120 @@ pub fn configure_printing_services(sys: &impl CmdExecutor) -> Result<(), std::io
     Ok(())
 }
 
+/// Silences routine kernel and systemd status messages so they cannot draw over tuigreet.
+///
+/// Genoa's normal boot path is managed by kernel-install through `/etc/kernel/cmdline`. GRUB is
+/// supported as a fallback for existing installations. In both cases, only missing parameters are
+/// added; a user's existing kernel log level is deliberately preserved.
+pub fn configure_quiet_boot(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+    const KERNEL_CMDLINE_PATH: &str = "/etc/kernel/cmdline";
+    const GRUB_DEFAULT_PATH: &str = "/etc/default/grub";
+
+    let kernel_cmdline_path = Path::new(KERNEL_CMDLINE_PATH);
+    if sys.path_exists(kernel_cmdline_path) {
+        let content = sys.read_file_to_string(kernel_cmdline_path)?;
+        if let Some(updated) = add_quiet_boot_parameters(&content) {
+            println!("   🔇 Adding quiet boot parameters to /etc/kernel/cmdline...");
+            sys.install_string_to_root_file(kernel_cmdline_path, &updated, "644")?;
+        } else {
+            println!("   ✅ Quiet boot parameters are already configured.");
+        }
+        return Ok(());
+    }
+
+    let grub_default_path = Path::new(GRUB_DEFAULT_PATH);
+    if !sys.path_exists(grub_default_path) {
+        println!("   ℹ️  No supported bootloader command line found; leaving it unchanged.");
+        return Ok(());
+    }
+
+    let content = sys.read_file_to_string(grub_default_path)?;
+    let Some(updated) = add_quiet_boot_parameters_to_grub(&content) else {
+        println!(
+            "   ✅ Quiet boot parameters are already configured or GRUB has no default command line."
+        );
+        return Ok(());
+    };
+
+    println!("   🔇 Adding quiet boot parameters to GRUB's default command line...");
+    sys.install_string_to_root_file(grub_default_path, &updated, "644")?;
+    if sys.path_exists(Path::new("/boot/grub/grub.cfg")) {
+        sys.run_cmd("sudo", &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
+    } else {
+        eprintln!(
+            "   ⚠️  GRUB config was updated, but /boot/grub/grub.cfg was not found to regenerate."
+        );
+    }
+    Ok(())
+}
+
+/// Appends only the quieting flags absent from one kernel command line.
+///
+/// `quiet` suppresses routine kernel and systemd status output. `loglevel=3` further limits
+/// kernel-console output, but an existing loglevel is treated as an explicit user preference.
+fn add_quiet_boot_parameters(content: &str) -> Option<String> {
+    let arguments: Vec<&str> = content.split_whitespace().collect();
+    let mut missing = Vec::new();
+
+    if !arguments.contains(&"quiet") {
+        missing.push("quiet");
+    }
+    if !arguments
+        .iter()
+        .any(|argument| argument.starts_with("loglevel="))
+    {
+        missing.push("loglevel=3");
+    }
+    if missing.is_empty() {
+        return None;
+    }
+
+    let existing = content.trim();
+    Some(match existing {
+        "" => format!("{}\n", missing.join(" ")),
+        _ => format!("{existing} {}\n", missing.join(" ")),
+    })
+}
+
+/// Updates the normal GRUB boot command line while retaining comments and every existing option.
+fn add_quiet_boot_parameters_to_grub(content: &str) -> Option<String> {
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let had_trailing_newline = content.ends_with('\n');
+
+    for line in &mut lines {
+        let replacement = {
+            let trimmed = line.trim_start();
+            let Some(value) = trimmed.strip_prefix("GRUB_CMDLINE_LINUX_DEFAULT=") else {
+                continue;
+            };
+            let Some(value) = value.strip_prefix('"') else {
+                continue;
+            };
+            let Some((command_line, suffix)) = value.split_once('"') else {
+                continue;
+            };
+            let Some(updated_command_line) = add_quiet_boot_parameters(command_line) else {
+                return None;
+            };
+
+            let indentation = &line[..line.len() - trimmed.len()];
+            format!(
+                "{indentation}GRUB_CMDLINE_LINUX_DEFAULT=\"{}\"{suffix}",
+                updated_command_line.trim()
+            )
+        };
+        *line = replacement;
+
+        let mut updated = lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        return Some(updated);
+    }
+
+    None
+}
+
 /// Adds the Avahi NSS resolver to the active `hosts:` lookup chain without disturbing the
 /// system's other name-service settings. `nss-mdns` must run before `resolve`/`dns`, otherwise
 /// CUPS can discover a DNS-SD printer but cannot resolve its `printer.local` hostname.
@@ -982,6 +1096,72 @@ server_names = ['cloudflare']
         let original = "hosts: mymachines mdns4_minimal [NOTFOUND=return] resolve dns\n";
 
         assert_eq!(enable_mdns_hostname_resolution(original), None);
+    }
+
+    #[test]
+    fn test_add_quiet_boot_parameters_is_idempotent_and_preserves_existing_loglevel() {
+        assert_eq!(
+            add_quiet_boot_parameters("root=UUID=example rw\n"),
+            Some("root=UUID=example rw quiet loglevel=3\n".to_string())
+        );
+        assert_eq!(
+            add_quiet_boot_parameters("root=UUID=example quiet loglevel=7\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_configure_quiet_boot_updates_kernel_cmdline_once() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/kernel/cmdline".to_string(),
+            "root=UUID=example rw\n".to_string(),
+        );
+
+        configure_quiet_boot(&env).expect("quiet boot configuration should succeed");
+
+        assert_eq!(
+            env.mock_files.borrow().get("/etc/kernel/cmdline"),
+            Some(&"root=UUID=example rw quiet loglevel=3\n".to_string())
+        );
+        assert_eq!(env.cmd_log.borrow().len(), 1);
+
+        configure_quiet_boot(&env).expect("quiet boot configuration should be idempotent");
+        assert_eq!(env.cmd_log.borrow().len(), 1);
+    }
+
+    #[test]
+    fn test_configure_quiet_boot_updates_and_regenerates_grub() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/default/grub".to_string(),
+            "GRUB_CMDLINE_LINUX_DEFAULT=\"root=UUID=example rw\"\n".to_string(),
+        );
+        env.mock_files
+            .borrow_mut()
+            .insert("/boot/grub/grub.cfg".to_string(), String::new());
+
+        configure_quiet_boot(&env).expect("GRUB quiet boot configuration should succeed");
+
+        assert_eq!(
+            env.mock_files.borrow().get("/etc/default/grub"),
+            Some(
+                &"GRUB_CMDLINE_LINUX_DEFAULT=\"root=UUID=example rw quiet loglevel=3\"\n"
+                    .to_string()
+            )
+        );
+        assert_eq!(env.cmd_log.borrow().len(), 2);
+        assert_eq!(
+            env.cmd_log.borrow()[1],
+            (
+                "sudo".to_string(),
+                vec![
+                    "grub-mkconfig".to_string(),
+                    "-o".to_string(),
+                    "/boot/grub/grub.cfg".to_string(),
+                ],
+            )
+        );
     }
 
     #[test]

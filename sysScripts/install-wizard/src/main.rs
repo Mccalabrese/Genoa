@@ -39,8 +39,8 @@ use crate::helpers::{
 };
 use crate::live_env::LiveEnv;
 use crate::session::{
-    configure_dns, configure_printing_services, configure_system, configure_tlp,
-    enforce_session_order,
+    configure_dns, configure_printing_services, configure_quiet_boot, configure_system,
+    configure_tlp, enforce_session_order,
 };
 use crate::traits::CmdExecutor;
 use crate::update::{
@@ -323,6 +323,12 @@ fn main() {
     println!("\n{}", "🖨️  Configuring printing services...".blue().bold());
     if let Err(e) = configure_printing_services(&live_sys) {
         eprintln!("   ❌ Failed to configure printing services: {}", e);
+        std::process::exit(1);
+    }
+
+    println!("\n{}", "🔇 Configuring quiet boot...".blue().bold());
+    if let Err(e) = configure_quiet_boot(&live_sys) {
+        eprintln!("   ❌ Failed to configure quiet boot: {}", e);
         std::process::exit(1);
     }
 
