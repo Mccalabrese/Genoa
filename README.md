@@ -123,8 +123,8 @@ All the helper scripts in this repo have been rewritten in Rust for maximum perf
 - **`sway-workspace`**: A simple helper that reliably gets the current workspace name for the Waybar module in Sway.
 - **`update-check`**: The update icon in Waybar. It safely checks for new `pacman` and `yay` updates and shows the count. It's network-aware and displays a "stale" count if you're offline.
 - **`cloudflare-toggle`**:
-  - **`cf-status`**: The "CF" icon in Waybar that shows if you are using Cloudflare DNS over HTTPS.
-  - **`cf-toggle`**: The `on-click` script that securely toggles Cloudflare DNS over HTTPS on or off using `pkexec`.
+  - **`cf-status`**: The "CF" icon in Waybar that shows whether Cloudflare DNS over HTTPS is active.
+  - **`cf-toggle`**: The `on-click` script that securely toggles Cloudflare DNS over HTTPS using `pkexec` and a NetworkManager-managed DNS override. It never rewrites `/etc/resolv.conf`.
 
 <p align="center">
   <img src="screenshots/DNS.png" width="80%" alt="Cloudflare DNS over HTTPS status"/>

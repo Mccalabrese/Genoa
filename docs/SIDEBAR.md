@@ -99,7 +99,7 @@ The build needs the GTK4 and layer-shell development libraries available through
 - `brightnessctl` for brightness
 - `wpctl` for volume and mute
 - `gnome-calendar` for opening calendar events
-- `cf-status` and `cf-toggle` for DNS status and toggling
+- `cf-status` and `cf-toggle` for DNS status and toggling. The toggle requires a running NetworkManager and manages a dedicated `/etc/NetworkManager/conf.d/90-dnscrypt-proxy.conf` override instead of editing `/etc/resolv.conf`. When off, it uses direct Cloudflare DNS (`1.1.1.1` and `1.0.0.1`).
 - `update-check` and `updater` for system updates
 - `waybar-finance` for the finance row
 - `wp-select`, `kb-launcher`, and `radio-menu` for their launch buttons

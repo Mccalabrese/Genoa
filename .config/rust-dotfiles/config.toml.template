@@ -89,10 +89,6 @@ text_on = "󰅟"
 class_on = "on"
 text_off = "⚠︎"
 class_off = "off"
-service_name = "dnscrypt-proxy"
-# For cf-toggle.rs (root)
-resolv_content_on = "nameserver 127.0.0.1"
-resolv_content_off = "nameserver 1.1.1.1\nnameserver 1.0.0.1"
 # For cf-toggle.rs (user)
 bar_process_name = "waybar"
 bar_signal_num = 10 # The '10' from 'SIGRTMIN() + 10'
