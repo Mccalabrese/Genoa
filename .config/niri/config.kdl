@@ -329,7 +329,7 @@ binds {
     // User Keybinds (Corrected Syntax)
     Mod+B { spawn "xdg-open" "https://"; } // Browser
     Control+Alt+T { spawn "ghostty"; } // Terminal
-    Mod+E { spawn "thunar"; } // File Manager
+    Mod+E { spawn "nautilus"; } // File Manager
     Mod+Alt+C { spawn "gnome-calculator"; }
 
     // User Scripts (Corrected Syntax)

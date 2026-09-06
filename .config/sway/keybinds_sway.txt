@@ -6,7 +6,7 @@
 * $mod + D       - Rofi (App Launcher)
 * $mod + B       - Default Browser (Firefox)
 * Ctrl + Alt + T - Terminal (ghostty)
-* $mod + E       - File Manager (thunar)
+* $mod + E       - File Manager (GNOME Files)
 * $mod + W       - Wallpaper Selector (wp-select)
 * $mod + Shift + P - Keybind Launcher (kb-launcher)
 * Ctrl + Alt + P - Power Menu (power-menu)

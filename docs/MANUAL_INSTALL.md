@@ -128,15 +128,15 @@ sudo pacman -S --needed --noconfirm \
   base-devel git go rustup openssl pkgconf glibc wget curl jq \
   man-db man-pages unzip tree pciutils pacman-contrib bolt upower tlp bluez \
   bluez-utils blueman brightnessctl udiskie fwupd util-linux intel-media-driver libva-utils vulkan-intel sway \
-  niri gnome hyprlock swayidle hypridle xdg-user-dirs-gtk xdg-utils greetd greetd-tuigreet xwayland-satellite \
-  qt5-wayland qt6-wayland polkit-gnome geoclue xdg-desktop-portal-gnome xdg-desktop-portal-wlr xdg-desktop-portal-gtk wl-clipboard cliphist pipewire \
-  pipewire-pulse pipewire-alsa pipewire-jack pavucontrol sof-firmware playerctl mpv-mpris thunar thunar-volman tumbler \
-  gvfs gvfs-mtp gvfs-smb gvfs-gphoto2 file-roller gnome-disk-utility ufw timeshift seahorse gnome-keyring \
-  waybar wofi rofi awww swaybg grim slurp mako papirus-icon-theme gnome-themes-extra \
-  adwaita-icon-theme ttf-jetbrains-mono-nerd ttf-fira-code ttf-jetbrains-mono noto-fonts noto-fonts-emoji otf-font-awesome zsh starship ghostty \
-  tmux fzf ripgrep bat btop fastfetch neovim librewolf networkmanager network-manager-applet \
-  discord tigervnc mpv gparted simple-scan gnome-calculator cups system-config-printer cups-pdf avahi \
-  zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy wireplumber
+  niri gnome swayidle xdg-user-dirs-gtk xdg-utils greetd greetd-tuigreet xwayland-satellite qt5-wayland qt6-wayland \
+  polkit-gnome geoclue xdg-desktop-portal-gnome xdg-desktop-portal-wlr xdg-desktop-portal-gtk wl-clipboard cliphist pipewire pipewire-pulse pipewire-alsa \
+  pipewire-jack pavucontrol sof-firmware playerctl mpv-mpris gvfs gvfs-mtp gvfs-smb gvfs-gphoto2 file-roller \
+  gnome-disk-utility ufw timeshift seahorse gnome-keyring waybar wofi rofi awww swaybg \
+  grim slurp mako papirus-icon-theme gnome-themes-extra adwaita-icon-theme ttf-jetbrains-mono-nerd ttf-fira-code ttf-jetbrains-mono noto-fonts \
+  noto-fonts-emoji otf-font-awesome zsh starship ghostty tmux fzf ripgrep bat btop \
+  fastfetch neovim librewolf networkmanager network-manager-applet discord tigervnc mpv gparted simple-scan \
+  gnome-calculator cups system-config-printer cups-pdf avahi zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy wireplumber tree-sitter \
+  tree-sitter-cli luarocks lazygit fd python-pynvim tectonic nodejs npm gtklock
 ```
 <!-- PKGLIST:END -->
 
