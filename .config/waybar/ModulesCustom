@@ -21,7 +21,7 @@
 
 "custom/file_manager": {
 	"format": "",
-	"on-click": "thunar &",
+	"on-click": "nautilus &",
 	"tooltip": true,
 	"tooltip-format": "File Manager",
 },

@@ -6,7 +6,7 @@
 * Mod + T       - Terminal (ghostty)
 * Mod + D       - Rofi (App Launcher)
 * Mod + B       - Default Browser
-* Mod + E       - File Manager (thunar)
+* Mod + E       - File Manager (GNOME Files)
 * Mod + W       - Wallpaper Selector (wp-select)
 * Mod + Shift + P - Keybind Launcher (kb-launcher)
 * Ctrl + Alt + P  - Power Menu (power-menu)

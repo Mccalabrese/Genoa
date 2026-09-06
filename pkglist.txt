@@ -53,9 +53,6 @@ pavucontrol
 sof-firmware
 playerctl
 mpv-mpris
-thunar
-thunar-volman
-tumbler
 gvfs
 gvfs-mtp
 gvfs-smb

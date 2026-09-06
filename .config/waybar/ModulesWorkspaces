@@ -89,7 +89,7 @@
 		"class<nwg-look>": " ",
 		"class<[Pp]avucontrol|org.pulseaudio.pavucontrol>": "󱡫 ",
 		"class<steam>": " ",
-		"class<thunar|nemo>": "󰝰 ",	
+		"class<org.gnome.Nautilus>": "󰝰 ",
 		"class<org.kde.dolphin>": "󰉋 ",
 		"class<org.kde.kate>": " ",
 		"class<Vncviewer>": " ",
