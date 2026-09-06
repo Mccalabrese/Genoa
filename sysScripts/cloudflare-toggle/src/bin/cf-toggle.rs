@@ -1,165 +1,71 @@
-//! Cloudflare DNS Toggler (cf-toggle)
-//!
-//! A secure wrapper for toggling system-level DNS-over-HTTPS settings.
-//!
-//! Architecture:
-//! 1. **User Mode:** When run by a normal user (e.g., clicking Waybar), it detects the current state
-//!    and re-executes *itself* using `pkexec` to gain root privileges.
-//! 2. **Root Mode:** When executed with root privileges (via pkexec), it modifies `/etc/resolv.conf`
-//!    and manages the `systemd` service.
-//!
-//! This design avoids needing `sudo` in scripts or storing passwords.
+//! Toggle dnscrypt-proxy through NetworkManager's DNS configuration.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use cloudflare_toggle::DnsManager;
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::process::Command;
 
-// --- Configuration ---
-// Deserialize the full config struct even if we don't use all fields in this binary,
-// ensuring we validate the schema correctness early.
-#[derive(Deserialize, Debug)]
-#[allow(dead_code)]
+#[derive(Deserialize)]
 struct Config {
-    // JSON Output fields (Used by cf-status)
-    text_on: String,
-    class_on: String,
-    text_off: String,
-    class_off: String,
-    // Logic fields (Used by cf-toggle)
-    resolv_content_on: String,  // e.g. "nameserver 127.0.0.1"
-    resolv_content_off: String, // e.g. "nameserver 1.1.1.1"
-    bar_process_name: String,   // "waybar"
-    bar_signal_num: i32,        // Signal offset
-    service_name: String,
+    bar_process_name: String,
+    bar_signal_num: i32,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct GlobalConfig {
     cloudflare_toggle: Config,
 }
 
-fn load_config() -> Result<GlobalConfig> {
+fn load_config() -> Result<Config> {
     let config_path = dirs::home_dir()
         .context("Cannot find home dir")?
         .join(".config/rust-dotfiles/config.toml");
-    let config_str = fs::read_to_string(&config_path).with_context(|| {
-        format!(
-            "Failed to read config file from path: {}",
-            config_path.display()
-        )
-    })?;
-    let config: GlobalConfig = toml::from_str(&config_str)
-        .context("Failed to parse config.toml. Check for syntax errors.")?;
-    Ok(config)
+    let config_str = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+    Ok(toml::from_str::<GlobalConfig>(&config_str)
+        .context("Failed to parse config.toml. Check for syntax errors.")?
+        .cloudflare_toggle)
 }
 
-// --- User Mode (Phase 1) ---
-
-/// The entry point for the standard user.
-/// Determines the desired state change and requests Root access to perform it.
 fn run_as_user() -> Result<()> {
-    let config = load_config()
-        .context("Failed to load config for user")?
-        .cloudflare_toggle;
-
-    // Check current service status to toggle it
-    // Check current service status to toggle it
-    let current_resolv = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
-    let is_running = current_resolv.contains("127.0.0.1");
-
-    let _mode = if is_running { "--stop" } else { "--start" };
-
-    let mode = if is_running { "--stop" } else { "--start" };
-    let content_on = &config.resolv_content_on;
-    let content_off = &config.resolv_content_off;
-    // Self-Reference: Find where this binary lives so we can execute it as root
+    let config = load_config().context("Failed to load config for user")?;
     let self_exe = env::current_exe().context("Failed to get path to own executable")?;
-
-    // Privilege Escalation
-    // We pass the config values as arguments to the root process so the root process
-    // doesn't have to try and locate/read the user's home directory config file.
     let status = Command::new("pkexec")
         .arg(self_exe)
-        .arg(mode)
-        .arg(&config.service_name)
-        .arg(content_on)
-        .arg(content_off)
+        .arg("--toggle")
         .status()
         .context("Failed to run pkexec")?;
-
-    // Signal Waybar to refresh status immediately on success
-    if status.success() {
-        let sig_base = 34;
-        let signal = sig_base + config.bar_signal_num;
-        let _ = Command::new("pkill")
-            .arg(format!("-{}", signal))
-            .arg("-x")
-            .arg(&config.bar_process_name)
-            .status();
+    if !status.success() {
+        bail!("The DNS toggle was cancelled or failed");
     }
+
+    let signal = 34 + config.bar_signal_num;
+    let _ = Command::new("pkill")
+        .arg(format!("-{signal}"))
+        .arg("-x")
+        .arg(&config.bar_process_name)
+        .status();
     Ok(())
 }
 
-// --- Root Mode (Phase 2) ---
-
-/// The privileged worker.
-/// This function only runs when `pkexec` invokes this binary.
-/// It has permission to write to /etc/ and control systemd.
-fn run_as_root(mode: &str, service_name: &str, content_on: &str, content_off: &str) -> Result<()> {
-    // Force delete to ensure we never follow a broken symlink
-    let _ = fs::remove_file("/etc/resolv.conf");
-
-    if mode == "--start" {
-        Command::new("systemctl")
-            .args(["enable", "--now", service_name])
-            .status()?;
-
-        // Add format! to force the newline
-        fs::write("/etc/resolv.conf", format!("{}\n", content_on.trim()))
-            .context("Failed to write /etc/resolv.conf")?;
-    } else if mode == "--stop" {
-        Command::new("systemctl")
-            .args(["disable", "--now", service_name])
-            .status()?;
-
-        // Add format! to force the newline
-        fs::write("/etc/resolv.conf", format!("{}\n", content_off.trim()))
-            .context("Failed to write /etc/resolv.conf")?;
-    }
-    Ok(())
+fn set_dns_mode(enabled: bool) -> Result<()> {
+    let manager = DnsManager::default();
+    manager.set_enabled(enabled)
 }
 
-// --- Main Dispatcher ---
+fn toggle_as_root() -> Result<()> {
+    let manager = DnsManager::default();
+    manager.set_enabled(!manager.is_enabled())
+}
+
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-
-    // Detect Mode based on arguments
-    // Argument order from run_as_user:
-    // [0]: binary_path
-    // [1]: mode (--start / --stop)
-    // [2]: service_name
-    // [3]: content_on
-    // [4]: content_off
-
-    if args.len() > 1 {
-        let mode = &args[1];
-
-        // Safety check: verify we have enough arguments
-        if args.len() < 5 {
-            eprintln!("Internal Error: Missing arguments for root mode.");
-            // We return Ok here to avoid panic, but the operation fails silently.
-            return Ok(());
-        }
-
-        let service_name = &args[2];
-        let content_on = &args[3];
-        let content_off = &args[4];
-
-        run_as_root(mode, service_name, content_on, content_off)
-    } else {
-        // No arguments? We are the user clicking the button.
-        run_as_user()
+    match env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => run_as_user(),
+        [mode] if mode == "--toggle" => toggle_as_root(),
+        [mode] if mode == "--enable" => set_dns_mode(true),
+        [mode] if mode == "--disable" => set_dns_mode(false),
+        _ => bail!("Usage: cf-toggle [--toggle|--enable|--disable]"),
     }
 }

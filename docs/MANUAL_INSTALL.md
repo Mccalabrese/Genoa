@@ -224,6 +224,10 @@ sudo rm -f /etc/systemd/system/cloudflared-dns.service
 sudo systemctl daemon-reload
 ```
 
+`cf-toggle` enables and disables dnscrypt-proxy through a NetworkManager DNS
+override. Do not manually edit `/etc/resolv.conf`; when the toggle is off,
+NetworkManager uses direct Cloudflare DNS (`1.1.1.1` and `1.0.0.1`).
+
 ### 6.4 Session env path
 
 ```bash
