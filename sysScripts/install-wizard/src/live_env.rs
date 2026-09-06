@@ -2,7 +2,7 @@ use crate::traits::CmdExecutor;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 
 pub struct LiveEnv;
@@ -20,6 +20,14 @@ impl CmdExecutor for LiveEnv {
     }
     fn run_cmd_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
         let _ = Command::new(cmd).args(args).status();
+        Ok(())
+    }
+    fn run_cmd_silently_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
+        let _ = Command::new(cmd)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         Ok(())
     }
     fn run_cmd_in_dir(
