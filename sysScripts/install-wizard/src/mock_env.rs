@@ -29,6 +29,13 @@ impl CmdExecutor for MockEnv {
         ));
         Ok(())
     }
+    fn run_cmd_silently_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
+        self.cmd_log.borrow_mut().push((
+            cmd.to_string(),
+            args.iter().map(|s| s.to_string()).collect(),
+        ));
+        Ok(())
+    }
     fn run_cmd_in_dir(
         &self,
         _dir: &std::path::Path,

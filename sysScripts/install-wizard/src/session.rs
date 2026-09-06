@@ -279,8 +279,10 @@ pub fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     // 3. Enable the service
     sys.run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
 
-    // 4. Clean up old Cloudflared artifacts if they exist
-    let _ = sys.run_cmd_ignore_err(
+    // 4. Clean up old Cloudflared artifacts if they exist. These are expected to be absent on
+    // current installs, so keep the probe quiet instead of presenting it as an error.
+    println!("   🧹 Checking for retired Cloudflared DNS service...");
+    let _ = sys.run_cmd_silently_ignore_err(
         "sudo",
         &["systemctl", "disable", "--now", "cloudflared-dns"],
     );
@@ -555,7 +557,11 @@ user = "greeter"
     if existing_content.trim() != greetd_config.trim() {
         sys.install_string_to_root_file(greetd_path, greetd_config, "644")?;
     }
-    let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
+    // These display managers are mutually exclusive with Greetd and are commonly not installed.
+    // Suppress their expected "unit not found" output while retaining the cleanup attempt.
+    println!("   🧹 Checking for legacy display managers...");
+    let _ = sys
+        .run_cmd_silently_ignore_err("sudo", &["systemctl", "disable", "gdm", "sddm", "lightdm"]);
     sys.run_cmd(
         "sudo",
         &["systemctl", "enable", "--force", "greetd.service"],
