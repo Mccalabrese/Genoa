@@ -69,11 +69,21 @@ pub fn configure_quiet_boot(sys: &impl CmdExecutor) -> Result<(), std::io::Error
     let kernel_cmdline_path = Path::new(KERNEL_CMDLINE_PATH);
     if sys.path_exists(kernel_cmdline_path) {
         let content = sys.read_file_to_string(kernel_cmdline_path)?;
-        if let Some(updated) = add_quiet_boot_parameters(&content) {
+        let modified = if let Some(updated) = add_quiet_boot_parameters(&content) {
             println!("   🔇 Adding quiet boot parameters to /etc/kernel/cmdline...");
-            sys.install_string_to_root_file(kernel_cmdline_path, &updated, "644")?;
+            sys.install_string_to_root_file(kernel_cmdline_path, &updated, "644")?
         } else {
             println!("   ✅ Quiet boot parameters are already configured.");
+            false
+        };
+
+        // mkinitcpio embeds /etc/kernel/cmdline in a Unified Kernel Image. Rebuild after a
+        // source change, and also repair systems updated by an earlier installer version that
+        // wrote the source file without rebuilding the image. After the next reboot, `/proc/cmdline`
+        // confirms the flags are active and this remains a no-op.
+        if modified || !active_kernel_has_quiet_parameter(sys) {
+            println!("   🏗️  Rebuilding boot image with the updated command line...");
+            sys.run_cmd("sudo", &["mkinitcpio", "-P"])?;
         }
         return Ok(());
     }
@@ -130,6 +140,15 @@ fn add_quiet_boot_parameters(content: &str) -> Option<String> {
         "" => format!("{}\n", missing.join(" ")),
         _ => format!("{existing} {}\n", missing.join(" ")),
     })
+}
+
+fn active_kernel_has_quiet_parameter(sys: &impl CmdExecutor) -> bool {
+    sys.read_file_to_string(Path::new("/proc/cmdline"))
+        .is_ok_and(|content| {
+            content
+                .split_whitespace()
+                .any(|argument| argument == "quiet")
+        })
 }
 
 /// Updates the normal GRUB boot command line while retaining comments and every existing option.
@@ -1130,10 +1149,45 @@ server_names = ['cloudflare']
             env.mock_files.borrow().get("/etc/kernel/cmdline"),
             Some(&"root=UUID=example rw quiet loglevel=3\n".to_string())
         );
-        assert_eq!(env.cmd_log.borrow().len(), 1);
+        assert_eq!(env.cmd_log.borrow().len(), 2);
+        assert_eq!(
+            env.cmd_log.borrow()[1],
+            (
+                "sudo".to_string(),
+                vec!["mkinitcpio".to_string(), "-P".to_string()],
+            )
+        );
+
+        env.mock_files.borrow_mut().insert(
+            "/proc/cmdline".to_string(),
+            "root=UUID=example rw quiet loglevel=3".to_string(),
+        );
 
         configure_quiet_boot(&env).expect("quiet boot configuration should be idempotent");
-        assert_eq!(env.cmd_log.borrow().len(), 1);
+        assert_eq!(env.cmd_log.borrow().len(), 2);
+    }
+
+    #[test]
+    fn test_configure_quiet_boot_rebuilds_stale_uki_from_existing_cmdline() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/kernel/cmdline".to_string(),
+            "root=UUID=example rw quiet loglevel=3\n".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/proc/cmdline".to_string(),
+            "root=UUID=example rw".to_string(),
+        );
+
+        configure_quiet_boot(&env).expect("stale UKI should be rebuilt");
+
+        assert_eq!(
+            *env.cmd_log.borrow(),
+            vec![(
+                "sudo".to_string(),
+                vec!["mkinitcpio".to_string(), "-P".to_string()],
+            )]
+        );
     }
 
     #[test]
