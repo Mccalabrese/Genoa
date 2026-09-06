@@ -691,7 +691,6 @@ pub fn get_stdout(program: &str, args: &[&str]) -> String {
     }
 }
 
-
 pub fn pkg_count() -> String {
     match run_output_with_retry("pacman", &["-Q"]) {
         Some(o) => String::from_utf8_lossy(&o.stdout)
