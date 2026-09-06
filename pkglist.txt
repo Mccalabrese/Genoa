@@ -103,6 +103,7 @@ cups
 system-config-printer
 cups-pdf
 avahi
+nss-mdns
 zsh-autosuggestions
 zsh-syntax-highlighting
 dnscrypt-proxy

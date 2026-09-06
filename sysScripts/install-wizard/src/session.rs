@@ -32,16 +32,78 @@ pub fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::
     Ok(())
 }
 
-/// Enables local printing and mDNS/DNS-SD discovery. This is deliberately separate from the
-/// fresh-install-only system setup so updates and config-refresh runs repair these services too.
+/// Enables local printing, DNS-SD discovery, and mDNS hostname resolution. This is deliberately
+/// separate from the fresh-install-only system setup so updates and config-refresh runs repair
+/// these services too.
 pub fn configure_printing_services(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("   🖨️  Enabling printing and network printer discovery...");
+    sys.run_cmd(
+        "sudo",
+        &["pacman", "-S", "--needed", "--noconfirm", "nss-mdns"],
+    )?;
+
+    let nsswitch_path = Path::new("/etc/nsswitch.conf");
+    let nsswitch_content = sys.read_file_to_string(nsswitch_path)?;
+    if let Some(updated) = enable_mdns_hostname_resolution(&nsswitch_content) {
+        println!("   🌐 Enabling .local hostname resolution for network printers...");
+        sys.install_string_to_root_file(nsswitch_path, &updated, "644")?;
+    }
+
     sys.run_cmd("sudo", &["systemctl", "enable", "--now", "cups.service"])?;
     sys.run_cmd(
         "sudo",
         &["systemctl", "enable", "--now", "avahi-daemon.service"],
     )?;
     Ok(())
+}
+
+/// Adds the Avahi NSS resolver to the active `hosts:` lookup chain without disturbing the
+/// system's other name-service settings. `nss-mdns` must run before `resolve`/`dns`, otherwise
+/// CUPS can discover a DNS-SD printer but cannot resolve its `printer.local` hostname.
+fn enable_mdns_hostname_resolution(content: &str) -> Option<String> {
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let had_trailing_newline = content.ends_with('\n');
+
+    for line in &mut lines {
+        let replacement = {
+            let trimmed = line.trim_start();
+            let Some(services) = trimmed.strip_prefix("hosts:") else {
+                continue;
+            };
+
+            let (services, comment) = match services.split_once('#') {
+                Some((services, comment)) => (services, Some(comment)),
+                None => (services, None),
+            };
+            let mut services: Vec<&str> = services.split_whitespace().collect();
+            if services.iter().any(|service| service.starts_with("mdns")) {
+                return None;
+            }
+
+            let insert_at = services
+                .iter()
+                .position(|service| *service == "resolve" || *service == "dns")
+                .unwrap_or(services.len());
+            services.splice(insert_at..insert_at, ["mdns_minimal", "[NOTFOUND=return]"]);
+
+            let indentation = &line[..line.len() - trimmed.len()];
+            let mut replacement = format!("{indentation}hosts: {}", services.join(" "));
+            if let Some(comment) = comment {
+                replacement.push_str(" #");
+                replacement.push_str(comment);
+            }
+            replacement
+        };
+        *line = replacement;
+
+        let mut updated = lines.join("\n");
+        if had_trailing_newline {
+            updated.push('\n');
+        }
+        return Some(updated);
+    }
+
+    None
 }
 
 /// Cleans up the `mkinitcpio.conf` file to fix the known Archinstall 2025 bug that appends 'o"' to
@@ -903,14 +965,70 @@ server_names = ['cloudflare']
     }
 
     #[test]
-    fn test_configure_printing_services_enables_cups_and_avahi() {
+    fn test_enable_mdns_hostname_resolution_inserts_before_system_resolvers() {
+        let original = "hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n";
+
+        assert_eq!(
+            enable_mdns_hostname_resolution(original),
+            Some(
+                "hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns\n"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_enable_mdns_hostname_resolution_leaves_existing_mdns_config_unchanged() {
+        let original = "hosts: mymachines mdns4_minimal [NOTFOUND=return] resolve dns\n";
+
+        assert_eq!(enable_mdns_hostname_resolution(original), None);
+    }
+
+    #[test]
+    fn test_configure_printing_services_enables_resolver_cups_and_avahi() {
         let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/nsswitch.conf".to_string(),
+            "hosts: mymachines resolve [!UNAVAIL=return] files myhostname dns\n".to_string(),
+        );
 
         configure_printing_services(&env).expect("printing services should be enabled");
 
         assert_eq!(
+            env.mock_files.borrow().get("/etc/nsswitch.conf"),
+            Some(
+                &"hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns\n"
+                    .to_string()
+            )
+        );
+
+        assert_eq!(
             *env.cmd_log.borrow(),
             vec![
+                (
+                    "sudo".to_string(),
+                    vec![
+                        "pacman".to_string(),
+                        "-S".to_string(),
+                        "--needed".to_string(),
+                        "--noconfirm".to_string(),
+                        "nss-mdns".to_string(),
+                    ],
+                ),
+                (
+                    "sudo".to_string(),
+                    vec![
+                        "install".to_string(),
+                        "-m".to_string(),
+                        "644".to_string(),
+                        "-o".to_string(),
+                        "root".to_string(),
+                        "-g".to_string(),
+                        "root".to_string(),
+                        "/tmp/mock_file".to_string(),
+                        "/etc/nsswitch.conf".to_string(),
+                    ],
+                ),
                 (
                     "sudo".to_string(),
                     vec![
@@ -932,6 +1050,7 @@ server_names = ['cloudflare']
             ]
         );
     }
+
     #[test]
     fn test_dns_config_partial_update() {
         let env = MockEnv::default();

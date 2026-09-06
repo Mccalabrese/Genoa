@@ -135,8 +135,8 @@ sudo pacman -S --needed --noconfirm \
   grim slurp mako papirus-icon-theme gnome-themes-extra adwaita-icon-theme ttf-jetbrains-mono-nerd ttf-fira-code ttf-jetbrains-mono noto-fonts \
   noto-fonts-emoji otf-font-awesome zsh starship ghostty tmux fzf ripgrep bat btop \
   fastfetch neovim librewolf networkmanager network-manager-applet discord tigervnc mpv gparted simple-scan \
-  gnome-calculator cups system-config-printer cups-pdf avahi zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy wireplumber tree-sitter \
-  tree-sitter-cli luarocks lazygit fd python-pynvim tectonic nodejs npm gtklock
+  gnome-calculator cups system-config-printer cups-pdf avahi nss-mdns zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy wireplumber \
+  tree-sitter tree-sitter-cli luarocks lazygit fd python-pynvim tectonic nodejs npm gtklock
 ```
 <!-- PKGLIST:END -->
 
