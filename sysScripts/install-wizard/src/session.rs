@@ -168,10 +168,7 @@ fn add_quiet_boot_parameters_to_grub(content: &str) -> Option<String> {
             let Some((command_line, suffix)) = value.split_once('"') else {
                 continue;
             };
-            let Some(updated_command_line) = add_quiet_boot_parameters(command_line) else {
-                return None;
-            };
-
+            let updated_command_line = add_quiet_boot_parameters(command_line)?;
             let indentation = &line[..line.len() - trimmed.len()];
             format!(
                 "{indentation}GRUB_CMDLINE_LINUX_DEFAULT=\"{}\"{suffix}",
