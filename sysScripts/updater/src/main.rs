@@ -20,6 +20,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const LOGO: &str = "🦀 Genoa system update";
+// Keep every command launched by the updater on Arch's system path. This is
+// set before any child process (including a later sudo prompt) is started, so
+// a user-writable directory such as ~/.local/bin cannot shadow an executable.
+const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+fn restrict_command_path() {
+    // SAFETY: this runs at process entry, before this program creates threads
+    // or launches a child process. Rust 2024 marks environment mutation unsafe
+    // because concurrent mutation is unsound.
+    unsafe { std::env::set_var("PATH", TRUSTED_SYSTEM_PATH) };
+}
 
 fn expand_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
@@ -322,6 +333,7 @@ fn run_launcher(config: &GlobalConfig) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    restrict_command_path();
     if std::env::args()
         .skip(1)
         .any(|arg| arg == "--initialize-release-trust")

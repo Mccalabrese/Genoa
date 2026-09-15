@@ -73,6 +73,17 @@ const AUR_PACKAGES: &[&str] = &[
     "gtklock-runshell-module",
 ];
 
+// The installer reaches sudo after running several helpers. Restrict command
+// lookup at process entry so none of those helpers—or sudo itself—can be
+// shadowed by an executable in a user-writable PATH directory.
+const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
+
+fn restrict_command_path() {
+    // SAFETY: called by main before any threads or child processes exist; see
+    // Rust 2024's environment-mutation safety requirement.
+    unsafe { std::env::set_var("PATH", TRUSTED_SYSTEM_PATH) };
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RunOptions {
     refresh_mode: bool,
@@ -132,6 +143,7 @@ fn parse_run_options(args: &[String]) -> RunOptions {
 // ---------- Main Execution ------_-------
 
 fn main() {
+    restrict_command_path();
     let home = dirs::home_dir().unwrap_or_else(|| {
         eprintln!(
             "{}",

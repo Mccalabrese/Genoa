@@ -1,7 +1,7 @@
 # $HOME/.config/rust-dotfiles/config.toml
 [global]
 pager = "bat --paging=always --style=plain"
-terminal = "ghostty"
+terminal = "/usr/bin/ghostty"
 
 [repo]
 root = "~/Genoa"
@@ -62,7 +62,7 @@ error_icon = "!"
 
 [updater]
 # The command and its arguments
-update_command = ["yay", "-Syu"]
+update_command = ["/usr/bin/yay", "-Syu"]
 # Full paths to your icons (using ~)
 icon_success = "/usr/share/icons/Adwaita/48x48/status/software-update-available.png"
 icon_error = "/usr/share/icons/Adwaita/48x48/status/dialog-error.png"
