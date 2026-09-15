@@ -217,25 +217,27 @@ fn offer_firmware_update() -> Result<()> {
     println!("\n🔌 Checking firmware updates...");
     let refresh = Command::new("/usr/bin/sudo")
         .args(["/usr/bin/fwupdmgr", "refresh"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?;
     if !firmware_refresh_succeeded(&refresh) {
         bail!("Firmware metadata refresh failed with {refresh}");
     }
-    if refresh.code() == Some(2) {
-        println!("   ℹ️  Firmware metadata is already up to date.");
-    }
-    let _ = Command::new("/usr/bin/fwupdmgr")
+    let updates = Command::new("/usr/bin/fwupdmgr")
         .arg("get-updates")
-        .status();
-    if prompt_yes_no("Apply any available firmware updates now?") {
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !firmware_updates_available(&updates) {
+        return Ok(());
+    }
+    if prompt_yes_no("Firmware updates are available. Apply them now?") {
         let status = Command::new("/usr/bin/sudo")
             .args(["/usr/bin/fwupdmgr", "update"])
             .status()?;
         if !status.success() {
             bail!("Firmware update failed with {status}");
         }
-    } else {
-        println!("   ℹ️  Firmware update skipped by user.");
     }
     Ok(())
 }
@@ -244,6 +246,13 @@ fn firmware_refresh_succeeded(status: &std::process::ExitStatus) -> bool {
     // fwupdmgr reserves exit status 2 for a command which had no action to
     // take but still completed successfully, e.g. already-current metadata.
     status.success() || status.code() == Some(2)
+}
+
+fn firmware_updates_available(status: &std::process::ExitStatus) -> bool {
+    // fwupdmgr uses status 2 for an otherwise successful check with no
+    // available updates. Only its normal success status means there is an
+    // update worth asking the user to apply.
+    status.success()
 }
 
 fn refresh_from_release(release_root: &Path) -> Result<()> {
@@ -309,6 +318,9 @@ fn update_release(workspace: Option<&Path>, config: &ReleaseUpdatesConfig) -> Re
         println!("\nℹ️  Genoa release updates are disabled; package update completed.");
         return Ok(());
     };
+    if release.is_active()? {
+        return Ok(());
+    }
 
     println!("\n✨ Verified Genoa release {}", release.tag);
     if !prompt_yes_no("Install this verified release without touching your Genoa workspace?") {
@@ -422,6 +434,19 @@ mod tests {
             &std::process::ExitStatus::from_raw(2 << 8)
         ));
         assert!(!firmware_refresh_succeeded(
+            &std::process::ExitStatus::from_raw(1 << 8)
+        ));
+    }
+
+    #[test]
+    fn firmware_prompt_is_reserved_for_real_updates() {
+        assert!(firmware_updates_available(
+            &std::process::ExitStatus::from_raw(0)
+        ));
+        assert!(!firmware_updates_available(
+            &std::process::ExitStatus::from_raw(2 << 8)
+        ));
+        assert!(!firmware_updates_available(
             &std::process::ExitStatus::from_raw(1 << 8)
         ));
     }

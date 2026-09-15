@@ -15,6 +15,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 // --- Constants ---
 // Single Source of Truth for UI elements ensures consistency across re-renders.
@@ -24,6 +25,8 @@ const PREFIX_FAV: &str = "⭐ ";
 const ICON_REDO: &str = "🔄 Try Again";
 
 const RESULT_LIMIT: usize = 15; // API limit to keep the UI snappy
+const API_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Rofi UI Hints (displayed in menu)
 const SEARCH_PROMPT: &str = "Type to search station name...";
@@ -91,11 +94,25 @@ fn load_config() -> Result<GlobalConfig> {
 /// Queries the Radio Browser API.
 /// Uses a blocking client because the UI (Rofi) cannot display results until the search completes anyway.
 fn search_stations(query: &str) -> Result<Vec<Station>> {
-    let url = format!(
-        "https://de1.api.radio-browser.info/json/stations/byname/{}",
-        query
-    );
-    let response = reqwest::blocking::get(&url)?.json::<Vec<Station>>()?;
+    let mut url = reqwest::Url::parse("https://de1.api.radio-browser.info/json/stations/search")?;
+    url.query_pairs_mut()
+        .append_pair("name", query)
+        .append_pair("limit", &RESULT_LIMIT.to_string());
+
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(API_CONNECT_TIMEOUT)
+        .timeout(API_REQUEST_TIMEOUT)
+        .build()
+        .context("Failed to create Radio Browser client")?;
+    let response = client
+        .get(url)
+        .send()
+        .context("Radio Browser request failed")?
+        .error_for_status()
+        .context("Radio Browser returned an error")?
+        .json::<Vec<Station>>()
+        .context("Failed to decode Radio Browser response")?;
+
     Ok(response.into_iter().take(RESULT_LIMIT).collect())
 }
 
@@ -125,10 +142,10 @@ fn save_favorite(station: Station) -> Result<()> {
     Ok(())
 }
 
-fn remove_favorite(station_name: &str) -> Result<()> {
+fn remove_favorite(station_uuid: &str) -> Result<()> {
     let path = get_favorites_path();
     let mut favorites = load_favorites()?;
-    favorites.retain(|s| s.name != station_name);
+    favorites.retain(|s| s.stationuuid != station_uuid);
     let json = serde_json::to_string_pretty(&favorites)?;
     fs::write(path, json)?;
     Ok(())
@@ -141,14 +158,26 @@ fn stop_radio() {
     let _ = Command::new("pkill").arg("-x").arg("mpv").status();
 }
 
+/// Returns a stream URL that mpv can safely receive as a positional argument.
+fn validated_stream_url(url: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).context("Station supplied an invalid stream URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(anyhow!("Station stream URL must use http or https"));
+    }
+    Ok(parsed)
+}
+
 /// Spawns a detached mpv process to stream the audio.
 fn play_station(station_name: &str, url: &str) -> Result<()> {
+    let stream_url = validated_stream_url(url)?;
     stop_radio(); // Enforce single-instance playback
 
     Command::new("mpv")
         .arg("--no-video")
         .arg(format!("--force-media-title={}", station_name))
-        .arg(url)
+        // Keep a remote URL from being interpreted as an mpv option.
+        .arg("--")
+        .arg(stream_url.as_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -162,6 +191,35 @@ fn play_station(station_name: &str, url: &str) -> Result<()> {
         .show();
 
     Ok(())
+}
+
+/// Makes a remote station name safe to pass as one Rofi row.
+///
+/// Rofi markup is disabled below, and control characters are removed so a station cannot create
+/// extra rows or inject terminal escape sequences into the menu.
+fn station_label(name: &str) -> String {
+    let label: String = name
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let label = label.trim();
+    if label.is_empty() {
+        "Unnamed station".to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+fn station_at_label<'a>(stations: &'a [Station], label: &str) -> Option<&'a Station> {
+    stations
+        .iter()
+        .find(|station| station_label(&station.name) == label)
 }
 
 // --- UI Logic (Rofi Wrapper) ---
@@ -187,7 +245,6 @@ fn show_rofi(
         .arg(rofi_config_path)
         .arg("-mesg")
         .arg(msg)
-        .arg("-markup-rows")
         // Define custom return codes for keybinds
         .arg("-kb-custom-1")
         .arg("Control+s") // Save
@@ -243,7 +300,7 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
                 &[ICON_REDO.to_string()],
                 "No Results",
                 config,
-                Some(&format!("No stations found for '<b>{}</b>'", query)),
+                Some("No stations found."),
             )?;
 
             if retry_code == 1 {
@@ -253,7 +310,7 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
         }
 
         // 4. Show Results
-        let result_names: Vec<String> = results.iter().map(|s| s.name.clone()).collect();
+        let result_names: Vec<String> = results.iter().map(|s| station_label(&s.name)).collect();
         let (r_code, picked_name) = show_rofi(&result_names, "Results", config, Some(SEARCH_HINT))?;
 
         if r_code == 1 {
@@ -261,7 +318,7 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
         } // Esc -> Back to search input
 
         //5. Handle Action
-        if let Some(station) = results.into_iter().find(|s| s.name == picked_name) {
+        if let Some(station) = station_at_label(&results, &picked_name) {
             if r_code == 10 {
                 // Ctrl+S -> Save
                 save_favorite(station.clone())?;
@@ -280,10 +337,14 @@ fn search(initial_query: Option<String>, config: &RadioConfig) -> Result<bool> {
     }
 }
 /// Handles keybind actions on the main menu (Delete Favorite).
-fn handle_favorite_actions(clean_name: &str, code: i32, favorites: &[Station]) -> Result<Action> {
+fn handle_favorite_actions(label: &str, code: i32, favorites: &[Station]) -> Result<Action> {
+    let Some(station) = station_at_label(favorites, label) else {
+        return Ok(Action::Continue);
+    };
+
     if code == 11 {
         // Ctrl+R: Remove Favorite
-        remove_favorite(clean_name)?;
+        remove_favorite(&station.stationuuid)?;
         let _ = Notification::new()
             .summary("Radio")
             .body("Favorite Removed")
@@ -291,12 +352,8 @@ fn handle_favorite_actions(clean_name: &str, code: i32, favorites: &[Station]) -
         Ok(Action::Refresh)
     } else if code == 0 {
         // Enter: Play Favorite
-        if let Some(station) = favorites.iter().find(|s| s.name == clean_name) {
-            play_station(&station.name, &station.url_resolved)?;
-            Ok(Action::Exit)
-        } else {
-            Ok(Action::Continue)
-        }
+        play_station(&station.name, &station.url_resolved)?;
+        Ok(Action::Exit)
     } else {
         Ok(Action::Continue)
     }
@@ -317,7 +374,7 @@ fn main() -> Result<()> {
         menu_options.push(ICON_SEARCH.to_string());
 
         for station in &favorites {
-            menu_options.push([PREFIX_FAV, &station.name].concat());
+            menu_options.push([PREFIX_FAV, &station_label(&station.name)].concat());
         }
 
         let (code, selection) = show_rofi(&menu_options, "Radio", &config, Some(HOME_HINT))?;
@@ -352,4 +409,27 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{station_label, validated_stream_url};
+
+    #[test]
+    fn stream_urls_must_be_http_or_https() {
+        assert!(validated_stream_url("https://radio.example/stream").is_ok());
+        assert!(validated_stream_url("http://radio.example/stream").is_ok());
+        assert!(validated_stream_url("file:///etc/passwd").is_err());
+        assert!(validated_stream_url("--profile=unsafe").is_err());
+        assert!(validated_stream_url("https://").is_err());
+    }
+
+    #[test]
+    fn station_labels_are_single_plain_rows() {
+        assert_eq!(
+            station_label("<b>Station</b>\n\u{1b}[31m"),
+            "<b>Station</b>  [31m"
+        );
+        assert_eq!(station_label("\n\t"), "Unnamed station");
+    }
 }

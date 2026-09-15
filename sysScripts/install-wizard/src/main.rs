@@ -294,8 +294,6 @@ fn main() {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-        } else {
-            println!("   ✅ No JACK audio server detected. Skipping removal.");
         }
 
         // GPU Drivers Checkpoint & Exit Logic
@@ -449,11 +447,6 @@ fn main() {
                 eprintln!("   ❌ Failed to install AUR packages: {}", e);
             };
         }
-    } else {
-        println!(
-            "\n{}",
-            "📦 Skipping package sync (pkglist unchanged).".dimmed()
-        );
     }
 
     println!("\n{}", "🌐 Configuring DNS proxy...".blue().bold());
@@ -716,8 +709,6 @@ fn setup_battery_daemon(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::
             service_content,
         )?;
         sys.run_cmd("systemctl", &["--user", "daemon-reload"])?;
-    } else {
-        println!("   ✅ Battery daemon already configured. Skipping systemd setup.");
     }
 
     sys.run_cmd(
@@ -764,7 +755,6 @@ fn configure_upower(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         lines.push("PercentageAction=5.0".to_string());
     }
     if !needs_update {
-        println!("⚡ UPower already configured for critical shutdown. Skipping.");
         return Ok(());
     }
 

@@ -73,7 +73,6 @@ pub fn configure_quiet_boot(sys: &impl CmdExecutor) -> Result<(), std::io::Error
             println!("   🔇 Adding quiet boot parameters to /etc/kernel/cmdline...");
             sys.install_string_to_root_file(kernel_cmdline_path, &updated, "644")?
         } else {
-            println!("   ✅ Quiet boot parameters are already configured.");
             false
         };
 
@@ -96,9 +95,6 @@ pub fn configure_quiet_boot(sys: &impl CmdExecutor) -> Result<(), std::io::Error
 
     let content = sys.read_file_to_string(grub_default_path)?;
     let Some(updated) = add_quiet_boot_parameters_to_grub(&content) else {
-        println!(
-            "   ✅ Quiet boot parameters are already configured or GRUB has no default command line."
-        );
         return Ok(());
     };
 
@@ -391,7 +387,6 @@ fn configure_logind(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         let trimmed = line.trim_start();
         if trimmed.starts_with("KillUserProcesses=") || trimmed.starts_with("#KillUserProcesses=") {
             if trimmed == "KillUserProcesses=yes" {
-                println!("   ✅ KillUserProcesses is already set to yes.");
                 found = true;
                 break;
             }
@@ -436,8 +431,6 @@ pub fn configure_tlp(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), std
         let _ = sys.run_cmd_ignore_err("sudo", &["systemctl", "enable", "tlp.service"]);
         let _ = sys.run_cmd_ignore_err("systemctl", &["is-active", "--quiet", "tlp.service"]);
         sys.run_cmd("sudo", &["systemctl", "restart", "tlp.service"])?;
-    } else {
-        eprintln!("   ✅ TLP is already correctly configured. No changes needed.");
     }
     Ok(())
 }

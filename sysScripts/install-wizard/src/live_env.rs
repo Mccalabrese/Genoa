@@ -1,12 +1,16 @@
 use crate::traits::CmdExecutor;
 use std::fs::{DirBuilder, Permissions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 
 pub struct LiveEnv;
+
+unsafe extern "C" {
+    fn geteuid() -> u32;
+}
 
 impl CmdExecutor for LiveEnv {
     fn run_cmd(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
@@ -95,7 +99,9 @@ impl CmdExecutor for LiveEnv {
             .permissions(Permissions::from_mode(0o600))
             .tempfile_in(parent)?;
         temp_file.write_all(content.as_bytes())?;
+        temp_file.as_file().sync_all()?;
         temp_file.persist(path).map_err(|error| error.error)?;
+        std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     }
     fn create_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
@@ -104,6 +110,48 @@ impl CmdExecutor for LiveEnv {
     fn create_private_dir_all(&self, path: &Path) -> Result<(), std::io::Error> {
         let mut builder = DirBuilder::new();
         builder.recursive(true).mode(0o700).create(path)
+    }
+    fn ensure_private_dir(&self, path: &Path) -> Result<(), std::io::Error> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(std::io::Error::other(format!(
+                        "{} is not a real directory",
+                        path.display()
+                    )));
+                }
+                if metadata.uid() != unsafe { geteuid() } {
+                    return Err(std::io::Error::other(format!(
+                        "{} is not owned by the active user",
+                        path.display()
+                    )));
+                }
+                if metadata.permissions().mode() & 0o077 != 0 {
+                    std::fs::set_permissions(path, Permissions::from_mode(0o700))?;
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.create_private_dir_all(path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn private_file_needs_repair(&self, path: &Path) -> Result<bool, std::io::Error> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        if metadata.uid() != unsafe { geteuid() } {
+            return Err(std::io::Error::other(format!(
+                "{} is not owned by the active user",
+                path.display()
+            )));
+        }
+        Ok(metadata.permissions().mode() & 0o077 != 0)
     }
     fn remove_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         std::fs::remove_dir_all(path)
@@ -293,5 +341,30 @@ mod tests {
             fs::metadata(&config_path).unwrap().permissions().mode() & 0o077,
             0
         );
+    }
+
+    #[test]
+    fn existing_private_paths_are_repaired_without_changing_their_contents() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config/rust-dotfiles");
+        let config_path = config_dir.join("config.toml");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::set_permissions(&config_dir, Permissions::from_mode(0o755)).unwrap();
+        fs::write(&config_path, "api_key = \"secret\"\n").unwrap();
+        fs::set_permissions(&config_path, Permissions::from_mode(0o644)).unwrap();
+        let env = LiveEnv;
+
+        env.ensure_private_dir(&config_dir).unwrap();
+        assert!(env.private_file_needs_repair(&config_path).unwrap());
+        let contents = fs::read_to_string(&config_path).unwrap();
+        env.write_private_string_to_file(&config_path, &contents)
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), contents);
+        assert_eq!(
+            fs::metadata(&config_dir).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert!(!env.private_file_needs_repair(&config_path).unwrap());
     }
 }

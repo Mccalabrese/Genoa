@@ -49,6 +49,19 @@ pub fn initialize_pinned_release_trust() -> Result<()> {
 }
 
 impl StagedRelease {
+    /// Returns whether this verified checkout is already the active runtime.
+    pub fn is_active(&self) -> Result<bool> {
+        let current = self.data_root.join("current");
+        if !current.exists() {
+            return Ok(false);
+        }
+        let active = fs::canonicalize(&current)
+            .with_context(|| format!("Failed to resolve {}", current.display()))?;
+        let expected = fs::canonicalize(&self.path)
+            .with_context(|| format!("Failed to resolve {}", self.path.display()))?;
+        Ok(active == expected)
+    }
+
     /// Makes this already-verified release the active runtime release.
     pub fn activate(&self) -> Result<()> {
         let current = self.data_root.join("current");
@@ -379,5 +392,21 @@ mod tests {
                 .all(|byte| byte.is_ascii_hexdigit())
         );
         assert!(RELEASE_PUBLIC_KEY.starts_with("-----BEGIN PGP PUBLIC KEY BLOCK-----"));
+    }
+
+    #[test]
+    fn active_release_matches_its_verified_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("data");
+        let release_path = data_root.join("releases/genoa-v0.3.0");
+        fs::create_dir_all(&release_path).unwrap();
+        symlink(&release_path, data_root.join("current")).unwrap();
+
+        let release = StagedRelease {
+            tag: "genoa-v0.3.0".to_string(),
+            path: release_path,
+            data_root,
+        };
+        assert!(release.is_active().unwrap());
     }
 }

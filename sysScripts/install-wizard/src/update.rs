@@ -38,7 +38,6 @@ pub fn install_clepsydre_package(
     home: &Path,
 ) -> Result<(), std::io::Error> {
     if sys.is_package_installed(CLEPSYDRE_PACKAGE_ID) {
-        println!("   ✅ Clepsydre dependency is already installed.");
         return Ok(());
     }
 
