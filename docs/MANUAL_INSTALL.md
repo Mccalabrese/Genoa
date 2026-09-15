@@ -499,55 +499,39 @@ sudo reboot
 
 ## 12. Manual Equivalent of updater
 
-`updater` does more than `yay -Syu`. It runs this sequence:
+`updater` runs your configured package manager without a shell, offers firmware updates separately, then optionally stages a signed Genoa release. It never modifies your `~/Genoa` workspace.
 
-1. Open your configured terminal and run update command from config (`[updater].update_command`, default `yay -Syu`).
-2. If update succeeds, run firmware check/update with `fwupdmgr`.
-3. If `$HOME/rust-wayland-power/.git` exists:
-   - `git fetch origin main`
-   - If `sysScripts` or `pkglist.txt` differ from `origin/main`, force-sync those paths:
-     - `git checkout origin/main -- sysScripts pkglist.txt`
-4. Build install wizard and refresh machine state:
-   - `cd ~/rust-wayland-power/sysScripts/install-wizard`
-   - `cargo build --release -q`
-   - Copy newer binary to `~/.cargo/bin/install-wizard`
-   - Run `~/.cargo/bin/install-wizard --refresh-configs`
-5. Send desktop notification for success/failure.
+Existing installations migrate on their first legacy update: its refreshed installer rebuilds `updater` and opens the trust-initialization prompt in that same terminal. On first release update, `updater` displays the embedded Genoa release fingerprint and asks before importing its bundled public key into a private keyring at `~/.local/share/genoa/keyring`. Verify that fingerprint through an independent announcement before accepting it. It never downloads a key or modifies the user's normal GPG keyring. The updater accepts only signed `genoa-v*` tags made by that pinned key.
 
-If you want to replicate that manually:
+For a manual equivalent:
 
 ```bash
 # 1) Main update
 yay -Syu
 
-# 2) Firmware
+# 2) Firmware is an explicit decision
 if command -v fwupdmgr >/dev/null 2>&1; then
-  sudo fwupdmgr refresh >/dev/null
+  sudo fwupdmgr refresh
   fwupdmgr get-updates || true
-  sudo fwupdmgr update || true
+  # Run only after reviewing the offered firmware:
+  # sudo fwupdmgr update
 fi
 
-# 3) Repo surgical sync
-if [ -d "$HOME/rust-wayland-power/.git" ]; then
-  cd "$HOME/rust-wayland-power"
-  git fetch origin main
-  SCRIPTS_DIFF=0
-  git diff --quiet origin/main -- sysScripts || SCRIPTS_DIFF=1
-  git diff --quiet origin/main -- pkglist.txt || SCRIPTS_DIFF=1
-  if [ "$SCRIPTS_DIFF" -eq 1 ]; then
-    git checkout origin/main -- sysScripts pkglist.txt
-  fi
-fi
+# 3) Verify a release tag. Do not update from origin/main.
+cd "$HOME/Genoa"
+git fetch origin --tags
+git verify-tag genoa-vX.Y.Z
 
-# 4) Rebuild installer and refresh configs
-cd "$HOME/rust-wayland-power/sysScripts/install-wizard"
-cargo build --release -q
-mkdir -p "$HOME/.cargo/bin"
-if [ target/release/install-wizard -nt "$HOME/.cargo/bin/install-wizard" ]; then
-  cp target/release/install-wizard "$HOME/.cargo/bin/"
-fi
-"$HOME/.cargo/bin/install-wizard" --refresh-configs
+# 4) A release checkout belongs outside the editable workspace.
+mkdir -p "$HOME/.local/share/genoa/releases"
+git worktree add --detach "$HOME/.local/share/genoa/releases/genoa-vX.Y.Z" genoa-vX.Y.Z
+cd "$HOME/.local/share/genoa/releases/genoa-vX.Y.Z/sysScripts/install-wizard"
+cargo build --locked --release -q
+REPO_ROOT="$HOME/.local/share/genoa/releases/genoa-vX.Y.Z" \
+  target/release/install-wizard --refresh-configs --release-root
 ```
+
+Personal package additions belong in `~/.config/genoa/pkglist.local`; the installer unions that file with the release-owned `pkglist.txt`.
 
 ## 13. Fast Path (Recommended)
 

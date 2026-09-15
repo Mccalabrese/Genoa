@@ -35,7 +35,7 @@ use crate::graphics::{
     setup_turing_gpu,
 };
 use crate::helpers::{
-    load_packages_from_file, migrate_legacy_users, read_repo_root_from_config,
+    load_effective_packages, migrate_legacy_users, read_repo_root_from_config,
     repair_repo_symlink_targets, resolve_repo_root, write_repo_root,
 };
 use crate::kernel::{
@@ -77,6 +77,41 @@ const AUR_PACKAGES: &[&str] = &[
 struct RunOptions {
     refresh_mode: bool,
     sync_packages: bool,
+    release_root: bool,
+}
+
+/// On the first legacy refresh, the just-built updater can create its isolated
+/// signed-release keyring in the same terminal. Release-owned refreshes and
+/// ordinary installs intentionally never invoke this compatibility handoff.
+fn offer_signed_release_migration(home: &Path, repo_root: &Path, options: &RunOptions) {
+    if !options.refresh_mode || options.release_root {
+        return;
+    }
+    if !repo_root
+        .join("sysScripts/updater/assets/genoa-pubkey.asc")
+        .is_file()
+    {
+        return;
+    }
+
+    let updater = home.join(".cargo/bin/updater");
+    if !updater.is_file() {
+        return;
+    }
+
+    println!("\n🔐 Completing the signed-release updater migration...");
+    match Command::new(&updater)
+        .arg("--initialize-release-trust")
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "   ⚠️  Signed-release verification was not initialized ({status}). You can retry from the next system update."
+        ),
+        Err(error) => eprintln!(
+            "   ⚠️  Could not start the rebuilt updater: {error}. You can retry from the next system update."
+        ),
+    }
 }
 
 fn parse_run_options(args: &[String]) -> RunOptions {
@@ -85,10 +120,12 @@ fn parse_run_options(args: &[String]) -> RunOptions {
     // This flag is an updater-only optimization. A fresh install always syncs
     // packages, and refresh mode keeps its legacy behavior unless told to skip.
     let sync_packages = !refresh_mode || !args.iter().any(|arg| arg == "--skip-package-sync");
+    let release_root = args.iter().any(|arg| arg == "--release-root");
 
     RunOptions {
         refresh_mode,
         sync_packages,
+        release_root,
     }
 }
 
@@ -116,20 +153,25 @@ fn main() {
         eprintln!("The script is designed to safely elevate privileges internally when needed.");
         std::process::exit(1);
     }
+    // 0. Parse Arguments
+    let args: Vec<String> = std::env::args().collect();
+    let run_options = parse_run_options(&args);
+    let refresh_mode = run_options.refresh_mode;
+    if run_options.release_root && !refresh_mode {
+        eprintln!("❌ --release-root may only be used with --refresh-configs.");
+        std::process::exit(1);
+    }
+
     let previous_repo_root = read_repo_root_from_config(&home);
     let has_existing_install = home.join(".config/rust-dotfiles/config.toml").exists();
-
-    migrate_legacy_users(&home);
+    if !run_options.release_root {
+        migrate_legacy_users(&home);
+    }
 
     let repo_root = resolve_repo_root(&home).unwrap_or_else(|e| {
         eprintln!("❌ Error determining repository root: {}", e);
         std::process::exit(1);
     });
-
-    // 0. Parse Arguments
-    let args: Vec<String> = std::env::args().collect();
-    let run_options = parse_run_options(&args);
-    let refresh_mode = run_options.refresh_mode;
     // Existing Genoa systems retain their current behaviour unless they already
     // opted into the persisted LTS policy. New installs choose below, after
     // sudo is available to write that policy safely.
@@ -329,10 +371,10 @@ fn main() {
     // 1. Sync Standard & AUR Packages
     if run_options.sync_packages {
         println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
-        let mut common_pkgs = match load_packages_from_file("pkglist.txt", &repo_root) {
+        let mut common_pkgs = match load_effective_packages(&repo_root, &home) {
             Ok(pkgs) => pkgs,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!("   ⚠️  pkglist.txt not found. Skipping package installation.");
+                println!("   ⚠️  Release package list not found. Skipping package installation.");
                 Vec::new()
             }
             Err(e) => {
@@ -345,7 +387,7 @@ fn main() {
         common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
 
         if common_pkgs.is_empty() {
-            println!("   ⚠️  No packages found in pkglist.txt.");
+            println!("   ⚠️  No packages found in release or local package lists.");
         } else {
             let pkg_refs: Vec<&str> = common_pkgs.iter().map(|s| s.as_str()).collect();
             if let Err(e) = install_pacman_packages(&live_sys, &pkg_refs) {
@@ -417,6 +459,7 @@ fn main() {
     if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
         println!("   ⚠️  Failed to build custom Rust apps: {}", e);
     };
+    offer_signed_release_migration(&home, &repo_root, &run_options);
 
     if let Err(e) = configure_tlp(&live_sys, &repo_root) {
         eprintln!("   ❌ Failed to configure TLP power management: {}", e);
@@ -477,13 +520,22 @@ fn main() {
     if !refresh_mode {
         if has_existing_install {
             // --- UPDATE MODE (safe for personal configs) ---
-            println!(
-                "\n{}",
-                "🔧 Repairing managed symlink targets...".blue().bold()
-            );
-            repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
-            if let Err(e) = write_repo_root(&repo_root) {
-                eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+            if run_options.release_root {
+                println!(
+                    "\n{}",
+                    "🔒 Verified release refresh: keeping personal dotfile links unchanged."
+                        .blue()
+                        .bold()
+                );
+            } else {
+                println!(
+                    "\n{}",
+                    "🔧 Repairing managed symlink targets...".blue().bold()
+                );
+                repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
+                if let Err(e) = write_repo_root(&repo_root) {
+                    eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+                }
             }
             patch_waybar_sidebar_toggle_path(&live_sys, &home);
 
@@ -526,13 +578,22 @@ fn main() {
         }
     } else {
         // --- REFRESH MODE (Updater) ---
-        println!(
-            "\n{}",
-            "🔧 Repairing managed symlink targets...".blue().bold()
-        );
-        repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
-        if let Err(e) = write_repo_root(&repo_root) {
-            eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+        if run_options.release_root {
+            println!(
+                "\n{}",
+                "🔒 Verified release refresh: preserving personal dotfile links."
+                    .blue()
+                    .bold()
+            );
+        } else {
+            println!(
+                "\n{}",
+                "🔧 Repairing managed symlink targets...".blue().bold()
+            );
+            repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
+            if let Err(e) = write_repo_root(&repo_root) {
+                eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+            }
         }
         patch_waybar_sidebar_toggle_path(&live_sys, &home);
         if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
@@ -737,6 +798,7 @@ mod tests {
             RunOptions {
                 refresh_mode: false,
                 sync_packages: true,
+                release_root: false,
             }
         );
     }
@@ -748,6 +810,7 @@ mod tests {
             RunOptions {
                 refresh_mode: true,
                 sync_packages: true,
+                release_root: false,
             }
         );
     }
@@ -759,6 +822,19 @@ mod tests {
             RunOptions {
                 refresh_mode: true,
                 sync_packages: false,
+                release_root: false,
+            }
+        );
+    }
+
+    #[test]
+    fn release_refresh_preserves_user_workspace_links() {
+        assert_eq!(
+            options(&["install-wizard", "--refresh-configs", "--release-root"]),
+            RunOptions {
+                refresh_mode: true,
+                sync_packages: true,
+                release_root: true,
             }
         );
     }

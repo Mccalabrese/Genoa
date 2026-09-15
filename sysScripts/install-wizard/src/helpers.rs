@@ -115,12 +115,41 @@ pub fn load_packages_from_file(filename: &str, repo_root: &Path) -> std::io::Res
 
     let content = fs::read_to_string(&path)?;
     println!("   ✅ Loaded package list from '{}'.", filename);
-    Ok(content
+    Ok(parse_package_list(&content))
+}
+
+/// Combines release-owned defaults with the user's never-overwritten package
+/// additions. The local file is deliberately outside the Genoa checkout so a
+/// release update can never discard it.
+pub fn load_effective_packages(repo_root: &Path, home: &Path) -> std::io::Result<Vec<String>> {
+    let mut packages = load_packages_from_file("pkglist.txt", repo_root)?;
+    let local_path = home.join(".config/genoa/pkglist.local");
+    match fs::read_to_string(&local_path) {
+        Ok(content) => {
+            let local_packages = parse_package_list(&content);
+            println!(
+                "   ✅ Loaded {} local package override(s) from {}.",
+                local_packages.len(),
+                local_path.display()
+            );
+            packages.extend(local_packages);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut seen = HashSet::new();
+    packages.retain(|package| seen.insert(package.clone()));
+    Ok(packages)
+}
+
+fn parse_package_list(content: &str) -> Vec<String> {
+    content
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(String::from)
-        .collect::<Vec<String>>())
+        .collect()
 }
 
 pub fn resolve_repo_root(home: &Path) -> Result<PathBuf, std::io::Error> {
@@ -413,5 +442,13 @@ mod tests {
         let home = Path::new("/home/testuser");
         let parsed = parse_repo_root_from_config(contents, home);
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn package_parser_ignores_comments_and_empty_lines() {
+        assert_eq!(
+            parse_package_list("base-devel\n# optional\n\n  git  \n"),
+            vec!["base-devel", "git"]
+        );
     }
 }

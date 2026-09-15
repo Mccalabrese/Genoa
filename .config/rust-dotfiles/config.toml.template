@@ -70,6 +70,16 @@ icon_error = "/usr/share/icons/Adwaita/48x48/status/dialog-error.png"
 window_title = "System Update"
 
 # -------------------------------
+# [Release Updates]
+# Signed releases are staged outside ~/Genoa so your checkout and dotfile
+# edits are never changed by sys-update. The updater embeds and pins Genoa's
+# public release key in a private verification keyring on first use.
+# -------------------------------
+[release_updates]
+enabled = true
+tag_prefix = "genoa-v"
+
+# -------------------------------
 # [Session Waybar Switcher]
 # Settings for our waybar changes between sessions
 # -------------------------------

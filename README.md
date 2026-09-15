@@ -20,7 +20,7 @@
 
 ## Required Config Changes
 
-My updater will not update your configs, it will only update my rust tools in /sysScripts. Because of this, breaking changes will periodically occur in configs that users must manually fix. I believe this is the best choice for user customization and personalization. That said, I will start maintaining a list of breaking config changes at the top of this readme. This list is not exhaustive and users can always refer back to my configs on this repo for complete and up to date config examples.
+Your dotfiles are yours to change. Genoa releases update managed runtime code separately and never overwrite your checkout or its config edits. Breaking config changes are documented here; users can choose when to adopt them.
 
 **[Config Change Guide](docs/CONFIG_CHANGES.md)**
 
@@ -94,8 +94,17 @@ ln -s ~/rust-wayland-power/.config/nvim ~/.config/nvim
 
 This system is designed to keep the core tooling fresh without overwriting your personal customizations.
 
-- **🦀 Rust Scripts & Daemons (Auto-Updating):**
-  The built-in system updater (triggered via the Waybar "Update" icon) acts as a rolling-release manager for my custom tools. It automatically checks this repository for changes to the `sysScripts` directory. If updates are found, it will pull the code and recompile the binaries (`waybar-finance`, `wp-daemon`, etc.) on the fly.
+- **🦀 Rust Scripts & Daemons (Signed Releases):**
+  `sys-update` updates packages directly, then can stage a signed Genoa release under `~/.local/share/genoa/releases/`. It never checks out over `~/Genoa`; that directory remains your customization workspace. The active runtime release is tracked by `~/.local/share/genoa/current`.
+  - Existing installations migrate on their first legacy update: the refreshed installer rebuilds the updater and opens a trust-initialization prompt in that same terminal. On first use, the updater displays the pinned release-key fingerprint and asks before initializing its private `~/.local/share/genoa/keyring`. It never downloads a key or changes the user's normal GPG keyring.
+  - Releases must use signed tags named `genoa-v*`. An unsigned tag or one signed by a different key is rejected.
+
+  Current release-key fingerprint: `744C D469 098D 940E 32A5 19F4 4E95 7FAC F379 B7A8`.
+
+  Maintainers publish a release with an annotated, signed tag—for example `git tag -s genoa-v2.2.0 -m "Genoa 2.2.0"` followed by `git push origin genoa-v2.2.0`. The public release key must be distributed through a channel independent of the repository being updated.
+
+- **📦 Local Package Additions:**
+  Keep personal packages in `~/.config/genoa/pkglist.local`, one package per line. The installer installs the union of release `pkglist.txt` and this local file, so release updates never discard your additions.
 
 - **⚙️ Dotfiles & Configs (Manual):**
   Your configuration files (`.config/sway`, `.zshrc`, `waybar/config.jsonc`, etc.) are **yours**. The updater will **never** touch them, ensuring your personal tweaks are safe.
