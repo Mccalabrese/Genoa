@@ -77,6 +77,7 @@ const AUR_PACKAGES: &[&str] = &[
 // lookup at process entry so none of those helpers—or sudo itself—can be
 // shadowed by an executable in a user-writable PATH directory.
 const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
+const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
 const CF_TOGGLE_HELPER_SOURCE: &str =
     "sysScripts/cloudflare-toggle/target/release/cf-toggle-helper";
 const CF_TOGGLE_HELPER_PATH: &str = "/usr/libexec/genoa/cf-toggle-helper";
@@ -405,7 +406,9 @@ fn main() {
         }
 
         println!("\n{}", "🦀 Setting up Rust (rustup)...".blue().bold());
-        let _ = Command::new("rustup").args(["default", "stable"]).status();
+        let _ = Command::new(SYSTEM_RUSTUP)
+            .args(["default", "stable"])
+            .status();
     }
 
     // ==========================================
@@ -480,7 +483,7 @@ fn main() {
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
     println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
     // GUARANTEE Rust toolchain is loaded and set to stable (fixes GUI launcher bug)
-    let _ = Command::new("rustup")
+    let _ = Command::new(SYSTEM_RUSTUP)
         .args(["default", "stable"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 const GEOCLUE_CONF_PATH: &str = "/etc/geoclue/geoclue.conf";
 const BEACONDB_GEOLOCATE_URL: &str = "https://api.beacondb.net/v1/geolocate";
+const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
 
 const RETIRED_TOOL_SOURCES: &[&str] = &[
     "sysScripts/sidebar/build.rs",
@@ -401,7 +402,11 @@ pub fn build_custom_apps(
                 };
                 //let app_name = app_path.file_name().unwrap().to_str().unwrap();
                 if sys
-                    .run_cmd_in_dir(&app_path, "cargo", &["build", "--release", "-q"])
+                    .run_cmd_in_dir(
+                        &app_path,
+                        SYSTEM_RUSTUP,
+                        &["run", "stable", "cargo", "build", "--release", "-q"],
+                    )
                     .is_ok()
                 {
                     let release_dir = app_path.join("target/release");
@@ -666,7 +671,10 @@ pub fn finalize_setup(sys: &impl CmdExecutor, home: &Path) {
 fn configure_neovim_health(sys: &impl CmdExecutor) {
     println!("   🦀 Installing Rust analyzer and Clippy...");
     if sys
-        .run_cmd("rustup", &["component", "add", "rust-analyzer", "clippy"])
+        .run_cmd(
+            SYSTEM_RUSTUP,
+            &["component", "add", "rust-analyzer", "clippy"],
+        )
         .is_ok()
     {
         println!("   ✅ Rust analyzer and Clippy ready");
@@ -715,7 +723,7 @@ mod tests {
             *env.cmd_log.borrow(),
             vec![
                 (
-                    "rustup".to_string(),
+                    "/usr/bin/rustup".to_string(),
                     vec![
                         "component".to_string(),
                         "add".to_string(),
