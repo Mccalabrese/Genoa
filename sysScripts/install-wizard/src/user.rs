@@ -106,8 +106,6 @@ pub fn setup_waybar_configs(sys: &impl CmdExecutor, home: &Path) {
                 }
                 Err(e) => println!("   ⚠️  Failed to read {}: {}", config, e),
             }
-        } else if target_exists {
-            println!("   ℹ️  {} already exists", config);
         }
     }
 }
@@ -213,7 +211,6 @@ fn configure_geoclue_for_beacondb(sys: &impl CmdExecutor) -> Result<(), std::io:
     };
 
     let Some(updated) = update_geoclue_config(&content) else {
-        println!("   ℹ️  Geoclue already has a functional Wi-Fi geolocation config.");
         return Ok(());
     };
 
@@ -442,7 +439,6 @@ pub fn build_custom_apps(
                             let target_bin = cargo_bin_dir.join(&filename);
                             let compiled_time = fs::metadata(&bin_path).and_then(|m| m.modified());
                             let target_time = fs::metadata(&target_bin).and_then(|m| m.modified());
-                            let target_exists = target_bin.exists();
                             let should_update = match (compiled_time, target_time) {
                                 (Ok(c_time), Ok(t_time)) => c_time > t_time,
                                 (_, Err(_)) => true,
@@ -464,9 +460,6 @@ pub fn build_custom_apps(
                                         )));
                                     }
                                 }
-                            }
-                            if !should_update && target_exists {
-                                println!("   ✅  {} is already up to date.", filename);
                             }
                         }
                     }

@@ -373,8 +373,6 @@ pub fn apply_nvidia_configs(
     println!("    🏗️  Rebuilding Initramfs...");
     if requires_rebuild {
         sys.run_cmd("sudo", &["mkinitcpio", "-P"])?;
-    } else {
-        println!("    ✅ No changes to initramfs configuration. Skipping rebuild.");
     }
     Ok(())
 }
