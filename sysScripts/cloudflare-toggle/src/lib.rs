@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const DNSCRYPT_SERVICE: &str = "dnscrypt-proxy";
+const SYSTEMCTL: &str = "/usr/bin/systemctl";
+const NMCLI: &str = "/usr/bin/nmcli";
 const NETWORKMANAGER_CONFIG: &str = "90-dnscrypt-proxy.conf";
 // Written by the first NetworkManager-based release. Keep this exact value so
 // existing installations can migrate without treating an unrelated drop-in as
@@ -94,7 +96,7 @@ impl DnsManager {
         }
 
         // Start the listener before NetworkManager begins routing DNS to it.
-        executor.run("systemctl", &["enable", "--now", DNSCRYPT_SERVICE])?;
+        executor.run(SYSTEMCTL, &["enable", "--now", DNSCRYPT_SERVICE])?;
 
         write_managed_config(&self.config_path, MANAGED_DOH_CONFIG)?;
         if let Err(error) = reload_networkmanager_dns(executor, &self.resolver_path) {
@@ -129,7 +131,7 @@ impl DnsManager {
                 .context("NetworkManager did not restore its connection DNS settings");
         }
 
-        executor.run("systemctl", &["disable", "--now", DNSCRYPT_SERVICE])
+        executor.run(SYSTEMCTL, &["disable", "--now", DNSCRYPT_SERVICE])
     }
 
     fn has_doh_config(&self) -> bool {
@@ -155,7 +157,7 @@ impl CommandExecutor for SystemCommandExecutor {
     }
 
     fn service_is_active(&self, service_name: &str) -> bool {
-        Command::new("systemctl")
+        Command::new(SYSTEMCTL)
             .args(["is-active", "--quiet", service_name])
             .status()
             .is_ok_and(|status| status.success())
@@ -164,7 +166,7 @@ impl CommandExecutor for SystemCommandExecutor {
 
 fn ensure_networkmanager_running(executor: &mut impl CommandExecutor) -> Result<()> {
     executor
-        .run("nmcli", &["general", "status"])
+        .run(NMCLI, &["general", "status"])
         .context("NetworkManager must be running to manage the DNS proxy")
 }
 
@@ -175,8 +177,8 @@ fn reload_networkmanager_dns(
     // Reload the drop-in, then explicitly regenerate resolver state. The
     // latter is important when `/etc/resolv.conf` is a regular file rather
     // than a systemd-resolved symlink.
-    executor.run("nmcli", &["general", "reload", "conf"])?;
-    executor.run("nmcli", &["general", "reload", "dns-rc"])?;
+    executor.run(NMCLI, &["general", "reload", "conf"])?;
+    executor.run(NMCLI, &["general", "reload", "dns-rc"])?;
     ensure_regular_file_mode(resolver_path, 0o644)
 }
 
@@ -410,10 +412,10 @@ mod tests {
         assert_eq!(
             executor.calls,
             [
-                "nmcli general status",
-                "systemctl enable --now dnscrypt-proxy",
-                "nmcli general reload conf",
-                "nmcli general reload dns-rc",
+                "/usr/bin/nmcli general status",
+                "/usr/bin/systemctl enable --now dnscrypt-proxy",
+                "/usr/bin/nmcli general reload conf",
+                "/usr/bin/nmcli general reload dns-rc",
             ]
         );
         assert_eq!(fs::read_to_string(path).unwrap(), MANAGED_DOH_CONFIG);
@@ -434,10 +436,10 @@ mod tests {
         assert_eq!(
             executor.calls,
             [
-                "nmcli general status",
-                "nmcli general reload conf",
-                "nmcli general reload dns-rc",
-                "systemctl disable --now dnscrypt-proxy",
+                "/usr/bin/nmcli general status",
+                "/usr/bin/nmcli general reload conf",
+                "/usr/bin/nmcli general reload dns-rc",
+                "/usr/bin/systemctl disable --now dnscrypt-proxy",
             ]
         );
         assert_eq!(fs::read_to_string(path).unwrap(), MANAGED_DIRECT_CONFIG);
@@ -466,7 +468,7 @@ mod tests {
         let manager = test_manager(path.clone());
         fs::create_dir_all(&directory).unwrap();
         fs::write(&path, MANAGED_DOH_CONFIG).unwrap();
-        let mut executor = FakeExecutor::failing_once("nmcli general reload dns-rc");
+        let mut executor = FakeExecutor::failing_once("/usr/bin/nmcli general reload dns-rc");
 
         assert!(manager.set_enabled_with(&mut executor, false).is_err());
 
@@ -475,7 +477,7 @@ mod tests {
             !executor
                 .calls
                 .iter()
-                .any(|call| call == "systemctl disable --now dnscrypt-proxy")
+                .any(|call| call == "/usr/bin/systemctl disable --now dnscrypt-proxy")
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -494,7 +496,7 @@ mod tests {
                 .set_enabled_with(&mut enable_executor, true)
                 .is_err()
         );
-        assert_eq!(enable_executor.calls, ["nmcli general status"]);
+        assert_eq!(enable_executor.calls, ["/usr/bin/nmcli general status"]);
 
         let mut disable_executor = FakeExecutor::default();
         assert!(
@@ -502,7 +504,7 @@ mod tests {
                 .set_enabled_with(&mut disable_executor, false)
                 .is_err()
         );
-        assert_eq!(disable_executor.calls, ["nmcli general status"]);
+        assert_eq!(disable_executor.calls, ["/usr/bin/nmcli general status"]);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "[global-dns-domain-*]\nservers=9.9.9.9\n"

@@ -1,42 +1,37 @@
-//! System Update Wrapper (sys-update)
+//! System update and signed Genoa release updater.
 //!
-//! A robust automation tool for Arch Linux system maintenance.
-//! 1. Reads configuration from `~/.config/rust-dotfiles/config.toml`.
-//! 2. Verifies that necessary binaries (`ghostty`, `yay`, etc.) exist before execution.
-//! 3. Wraps the package manager (`yay`/`pacman`) in a GUI terminal window so the user can see progress and enter `sudo` passwords.
-//! 4. Chains system updates with firmware updates (`fwupdmgr`).
-//! 5. Provides desktop notifications on success/failure using `notify-rust`.
+//! The user's `~/Genoa` checkout is a customization workspace. This binary
+//! never mutates it. Managed code is staged under XDG data storage from a
+//! signed release tag, while user dotfiles and local package choices remain
+//! outside the release checkout.
 
-use anyhow::{Context, Result, anyhow};
+mod release;
+
+use anyhow::{Context, Result, bail};
 use notify_rust::{Notification, Urgency};
+use release::{
+    RELEASE_SIGNER_FINGERPRINT, ReleaseConfig, initialize_pinned_release_trust,
+    release_trust_is_initialized, stage_latest_release,
+};
 use serde::Deserialize;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const LOGO: &str = r#"
-"++++++++++
-     ++++++++++++++
-    ++++++++++++++++
-   ++++++++++++++++++
-  ++++++++++++++++++++
- +++++++++====+++++++++
- ++++++=:......:=++++++
- +++++=:..........:=+++++
- ++++=..............=++++
- +++=.=##=......=##-.=+++
-++++:-%%-.-....-%%:.-:++++
-+++=.*%%. *....#%%..*.=+++
-+++-.#%%#*%....%%%###.-+++
-+++-.#%%%%#....#%%%%#.-+++
-+++-.+%%%%*....*%%%%+.-+++
- ++=.:#%%#:....:#%%#:.=++
- +++..:=+:......:+=:..+++
-++++-................-++++
-+++++:..............:+++++
-"#;
+const LOGO: &str = "🦀 Genoa system update";
+// Keep every command launched by the updater on Arch's system path. This is
+// set before any child process (including a later sudo prompt) is started, so
+// a user-writable directory such as ~/.local/bin cannot shadow an executable.
+const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
 
-/// Expands shell-style paths like `~/` to absolute system paths.
+fn restrict_command_path() {
+    // SAFETY: this runs at process entry, before this program creates threads
+    // or launches a child process. Rust 2024 marks environment mutation unsafe
+    // because concurrent mutation is unsound.
+    unsafe { std::env::set_var("PATH", TRUSTED_SYSTEM_PATH) };
+}
+
 fn expand_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
@@ -45,24 +40,48 @@ fn expand_path(path: &str) -> PathBuf {
     }
     PathBuf::from(path)
 }
-// 🐧🐧🐧 Config Models 🐧🐧🐧
 
 #[derive(Deserialize, Debug)]
 struct Global {
-    terminal: String, // The user's preferred terminal emulator
+    terminal: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct UpdaterConfig {
-    update_command: Vec<String>, //The actual update command (e.g. "yay", "-Syu")
-    icon_success: String,        //Path to success icon
-    icon_error: String,          // Path to error icon
-    window_title: String,        // Title for the window manager to target rules
+    update_command: Vec<String>,
+    icon_success: String,
+    icon_error: String,
+    window_title: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct RepoConfig {
-    root: String, // Path to the root of the dotfiles repo
+    root: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ReleaseUpdatesConfig {
+    #[serde(default = "default_release_updates_enabled")]
+    enabled: bool,
+    #[serde(default = "default_tag_prefix")]
+    tag_prefix: String,
+}
+
+impl Default for ReleaseUpdatesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tag_prefix: default_tag_prefix(),
+        }
+    }
+}
+
+fn default_release_updates_enabled() -> bool {
+    true
+}
+
+fn default_tag_prefix() -> String {
+    "genoa-v".to_string()
 }
 
 #[derive(Deserialize, Debug)]
@@ -70,25 +89,20 @@ struct GlobalConfig {
     global: Global,
     updater: UpdaterConfig,
     repo: Option<RepoConfig>,
+    #[serde(default)]
+    release_updates: ReleaseUpdatesConfig,
 }
 
-/// Loads and parses the TOML configuration file.
-/// Centralizes all settings so recompilation isn't needed for minor changes.
 fn load_config() -> Result<GlobalConfig> {
     let config_path = dirs::home_dir()
         .context("Cannot find home dir")?
         .join(".config/rust-dotfiles/config.toml");
-
     let config_str = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-
-    let config: GlobalConfig =
-        toml::from_str(&config_str).context("Failed to parse config.toml")?;
-
-    Ok(config)
+    toml::from_str(&config_str).context("Failed to parse config.toml")
 }
 
-fn resolve_repo_path(repo_cfg: Option<&RepoConfig>) -> Option<PathBuf> {
+fn resolve_workspace_path(repo_cfg: Option<&RepoConfig>) -> Option<PathBuf> {
     if let Some(repo_cfg) = repo_cfg {
         let configured_path = expand_path(&repo_cfg.root);
         if configured_path.exists() {
@@ -97,262 +111,255 @@ fn resolve_repo_path(repo_cfg: Option<&RepoConfig>) -> Option<PathBuf> {
     }
 
     let home = dirs::home_dir()?;
-
-    let preferred = home.join("Genoa");
-    if preferred.exists() {
-        return Some(preferred);
-    }
-
-    let legacy = home.join("rust-wayland-power");
-    if legacy.exists() {
-        return Some(legacy);
-    }
-
-    None
+    [home.join("Genoa"), home.join("rust-wayland-power")]
+        .into_iter()
+        .find(|path| path.exists())
 }
 
-// 🐧🐧🐧 Helper Functions 🐧🐧🐧
-/// Checks if a binary is executable in the current $PATH.
-/// Used for "Fail Fast" validation before launching the GUI.
 fn check_dependency(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
-        .stdout(Stdio::null()) // Suppress output
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success())
 }
-/// Sends a desktop notification via D-Bus.
+
 fn send_notification(summary: &str, body: &str, icon: &Path, urgency: Urgency) -> Result<()> {
     Notification::new()
         .summary(summary)
         .body(body)
-        .icon(icon.to_str().unwrap_or(""))
+        .icon(icon.to_str().unwrap_or_default())
         .urgency(urgency)
         .show()
         .context("Failed to send desktop notification")?;
     Ok(())
 }
 
-// --- Main Execution Flow ---
-
-fn main() -> Result<()> {
-    // Load Configuration
-    let config = load_config()?;
-    let global_conf = config.global;
-    let updater_conf = config.updater;
-    let repo_path = resolve_repo_path(config.repo.as_ref())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // Resolve relative paths
-    let icon_error = expand_path(&updater_conf.icon_error);
-    let icon_success = expand_path(&updater_conf.icon_success);
-
-    // Dependency Verification
-    let terminal_cmd = &global_conf.terminal;
-    let update_bin = updater_conf
-        .update_command
-        .first()
-        .context("update_command empty")?;
-
-    if !check_dependency(terminal_cmd) {
-        return Err(anyhow!("Terminal not found: {}", terminal_cmd));
-    }
-    if !check_dependency(update_bin) {
-        return Err(anyhow!("Update helper not found: {}", update_bin));
-    }
-
-    let update_cmd_str = updater_conf.update_command.join(" ");
-
-    // --- CONSTRUCT THE BASH SCRIPT ---
-    // We use a raw string literal (r#...#) so we can write Bash naturally.
-    let bash_script = format!(
-        r#"
-        cat << "EOF"
-{}
-EOF
-        echo -e "\n🚀 Starting System Update..."
-
-        # --- 1. SYSTEM UPDATE ---
-        {}
-        sys_exit=$?
-
-        REPO_PATH="{}"
-        REPO_AVAILABLE=0
-        if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH/.git" ]; then
-            REPO_AVAILABLE=1
-        fi
-
-        # --- 2. FIRMWARE UPDATE ---
-        if [ $sys_exit -eq 0 ]; then
-            echo -e "\n\n🔌 Checking for Firmware Updates..."
-            if command -v fwupdmgr &> /dev/null; then
-                sudo fwupdmgr refresh > /dev/null
-                if fwupdmgr get-updates 2>&1 | grep -q "No updates"; then
-                    echo "✔ Firmware is up to date."
-                else
-                    echo -e "\n⚠️  Firmware updates available! Updating..."
-                    sudo fwupdmgr update
-                fi
-            else
-                echo "fwupdmgr not found, skipping."
-            fi
-        else
-            echo -e "\n⚠ System update failed, skipping firmware/scripts."
-        fi
-
-        # --- 3. SURGICAL REPO SYNC ---
-        if [ $sys_exit -eq 0 ]; then
-            echo -e "\n\n🦀 Checking for Rust Script Updates..."
-            if [ $REPO_AVAILABLE -eq 1 ]; then
-                cd "$REPO_PATH"
-
-                echo "Fetching remote..."
-                git fetch origin main
-
-                # Keep personal dotfiles out of this decision. Only managed tool,
-                # package-list, and helper-script changes are force-synced.
-                TOOLS_CHANGED=0
-                PKGLIST_CHANGED=0
-                SCRIPTS_CHANGED=0
-                INSTALLER_CHANGED=0
-                if ! git diff --quiet origin/main -- sysScripts; then
-                    TOOLS_CHANGED=1
-                fi
-                if ! git diff --quiet origin/main -- sysScripts/install-wizard; then
-                    INSTALLER_CHANGED=1
-                fi
-                if ! git diff --quiet origin/main -- pkglist.txt; then PKGLIST_CHANGED=1; fi
-                if ! git diff --quiet origin/main -- scripts; then SCRIPTS_CHANGED=1; fi
-
-                SYNC_OK=1
-                if [ $TOOLS_CHANGED -eq 1 ] || [ $PKGLIST_CHANGED -eq 1 ] || [ $SCRIPTS_CHANGED -eq 1 ]; then
-                    echo -e "\n✨ Updates detected in managed files!"
-                    echo "🧹 Force-syncing sysScripts, pkglist.txt, and scripts..."
-                    if git checkout origin/main -- sysScripts pkglist.txt scripts; then
-                        echo -e "✅ Managed files synced."
-                    else
-                        echo "❌ Repo sync failed; skipping the config refresh."
-                        SYNC_OK=0
-                        sys_exit=1
-                    fi
-                else
-                    echo "✔ Managed tools, packages, and scripts are up to date."
-                fi
-
-                if [ $SYNC_OK -eq 1 ]; then
-                    # Cargo does not remove source files that a previous version retired.
-                    # Keep this migration list explicit and reviewable.
-                    RETIRED_TOOL_SOURCES=(
-                        "sysScripts/sidebar/build.rs"
-                        "sysScripts/sidebar/src/calendar_query.c"
-                    )
-                    RETIRED_SOURCE_REMOVED=0
-                    for retired_source in "${{RETIRED_TOOL_SOURCES[@]}}"; do
-                        retired_path="$REPO_PATH/$retired_source"
-                        if [ -e "$retired_path" ] || [ -L "$retired_path" ]; then
-                            rm -f -- "$retired_path"
-                            RETIRED_SOURCE_REMOVED=1
-                            echo "🧹 Removed retired source: $retired_source"
-                        fi
-                    done
-
-                    if [ $RETIRED_SOURCE_REMOVED -eq 1 ]; then
-                        # The next targeted tool build will rebuild only what this source
-                        # removal affects; do not discard shared Cargo artifacts.
-                        TOOLS_CHANGED=1
-                    fi
-                fi
-            else
-                echo "⚠️ Repo not found. Skipping surgical sync."
-            fi
-        fi
-
-        # --- 4. REFRESH CONFIGS & CACHED TOOLS ---
-        if [ $sys_exit -eq 0 ]; then
-            echo -e "\n\n🔄 Refreshing Machine State..."
-            if [ $REPO_AVAILABLE -eq 1 ] && [ -d "$REPO_PATH/sysScripts/install-wizard" ]; then
-                INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
-                if [ $INSTALLER_CHANGED -eq 1 ] || [ ! -x "$INSTALLER_BIN" ]; then
-                    echo "   🏗️ Building updated installer..."
-                    cd "$REPO_PATH/sysScripts/install-wizard"
-                    if cargo build --release -q; then
-                        echo "  🌠 Updating installer binary..."
-                        cp target/release/install-wizard "$INSTALLER_BIN"
-                    else
-                        echo "❌ Installer build failed; skipping managed refresh."
-                        sys_exit=1
-                    fi
-                fi
-
-                if [ $sys_exit -eq 0 ] && [ -x "$INSTALLER_BIN" ]; then
-                    INSTALLER_ARGS=(--refresh-configs)
-                    if [ $PKGLIST_CHANGED -eq 0 ]; then
-                        INSTALLER_ARGS+=(--skip-package-sync)
-                    fi
-                    # The wizard elevates internally and uses Cargo's cache for
-                    # lightweight tool checks without discarding any artifacts.
-                    REPO_ROOT="$REPO_PATH" "$INSTALLER_BIN" "${{INSTALLER_ARGS[@]}}"
-                elif [ $sys_exit -eq 0 ]; then
-                    echo "⚠️ Installer binary not found. Skipping managed refresh."
-                    echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
-                    sys_exit=1
-                fi
-            else
-                echo "⚠️ Repo not found. Skipping managed refresh."
-                sys_exit=1
-            fi
-        fi
-
-        echo -e "\n\n🏁 Process finished. Closing in 5s..."
-        sleep 5
-
-        if [ $sys_exit -ne 0 ]; then exit 1; else exit 0; fi
-        "#,
-        LOGO, update_cmd_str, repo_path
-    );
-
-    // Interactive Execution
-    let status = Command::new(terminal_cmd)
-        .arg(format!("--title={}", updater_conf.window_title))
-        .arg("-e")
-        .arg("bash")
-        .arg("-c")
-        .arg(&bash_script)
+fn run_update_command(command: &[String]) -> Result<()> {
+    let (program, args) = command
+        .split_first()
+        .context("updater.update_command may not be empty")?;
+    let status = Command::new(program)
+        .args(args)
         .status()
-        .context(format!("Failed to launch terminal: {}", terminal_cmd))?;
-
-    // Notifications
-    if status.success() {
-        send_notification(
-            "System Update Complete",
-            "All updates applied successfully.",
-            &icon_success,
-            Urgency::Low,
-        )?;
-    } else {
-        send_notification(
-            "System Update Failed",
-            "The update process encountered an error.",
-            &icon_error,
-            Urgency::Critical,
-        )?;
+        .with_context(|| format!("Failed to run update command {program}"))?;
+    if !status.success() {
+        bail!("System package update failed with {status}");
     }
     Ok(())
 }
 
+fn prompt_yes_no(question: &str) -> bool {
+    print!("{question} [y/N] ");
+    let _ = io::stdout().flush();
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .is_ok_and(|_| matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+fn initialize_release_trust_interactively() -> Result<()> {
+    if release_trust_is_initialized()? {
+        println!("✅ Signed-release verification is already initialized.");
+        return Ok(());
+    }
+
+    println!("\n🔐 Genoa is moving to signed runtime releases.");
+    println!("   This updater contains the pinned release signing fingerprint:");
+    println!("   {RELEASE_SIGNER_FINGERPRINT}");
+    println!(
+        "   Verify that fingerprint through an independent Genoa announcement before continuing."
+    );
+    println!(
+        "   It will initialize a private Genoa verification keyring under ~/.local/share/genoa."
+    );
+    println!("   No key will be downloaded, and your personal GPG keyring will not be changed.");
+    if !prompt_yes_no("Initialize signed-release verification now?") {
+        println!("   ℹ️  Signed-release verification was not initialized.");
+        return Ok(());
+    }
+    initialize_pinned_release_trust()?;
+    println!(
+        "   ✅ Signed-release verification initialized. Future runtime updates require a verified tag."
+    );
+    Ok(())
+}
+
+fn offer_firmware_update() -> Result<()> {
+    if !check_dependency("/usr/bin/fwupdmgr") {
+        println!("   ℹ️  fwupdmgr is not installed; skipping firmware check.");
+        return Ok(());
+    }
+
+    println!("\n🔌 Checking firmware updates...");
+    let refresh = Command::new("/usr/bin/sudo")
+        .args(["/usr/bin/fwupdmgr", "refresh"])
+        .status()?;
+    if !refresh.success() {
+        bail!("Firmware metadata refresh failed with {refresh}");
+    }
+    let _ = Command::new("/usr/bin/fwupdmgr")
+        .arg("get-updates")
+        .status();
+    if prompt_yes_no("Apply any available firmware updates now?") {
+        let status = Command::new("/usr/bin/sudo")
+            .args(["/usr/bin/fwupdmgr", "update"])
+            .status()?;
+        if !status.success() {
+            bail!("Firmware update failed with {status}");
+        }
+    } else {
+        println!("   ℹ️  Firmware update skipped by user.");
+    }
+    Ok(())
+}
+
+fn refresh_from_release(release_root: &Path) -> Result<()> {
+    let installer_dir = release_root.join("sysScripts/install-wizard");
+    let manifest = installer_dir.join("Cargo.toml");
+    if !manifest.exists() {
+        bail!(
+            "Verified release does not contain install-wizard at {}",
+            installer_dir.display()
+        );
+    }
+
+    println!("\n🦀 Building verified Genoa release...");
+    let build = Command::new("cargo")
+        .args(["build", "--locked", "--release", "-q"])
+        .current_dir(&installer_dir)
+        .status()
+        .context("Failed to build release installer")?;
+    if !build.success() {
+        bail!("Building the verified release installer failed with {build}");
+    }
+
+    let installer = installer_dir.join("target/release/install-wizard");
+    println!("🔄 Refreshing managed runtime components...");
+    let status = Command::new(&installer)
+        .args(["--refresh-configs", "--release-root"])
+        .env("REPO_ROOT", release_root)
+        .status()
+        .with_context(|| format!("Failed to run {}", installer.display()))?;
+    if !status.success() {
+        bail!("Verified release refresh failed with {status}");
+    }
+    Ok(())
+}
+
+fn update_release(workspace: Option<&Path>, config: &ReleaseUpdatesConfig) -> Result<()> {
+    if !config.enabled {
+        println!("\nℹ️  Genoa release updates are disabled; package update completed.");
+        return Ok(());
+    }
+    let Some(workspace) = workspace else {
+        bail!("Cannot stage a Genoa release because no existing Genoa workspace was found");
+    };
+    if !release_trust_is_initialized()? {
+        initialize_release_trust_interactively()?;
+        if !release_trust_is_initialized()? {
+            return Ok(());
+        }
+    }
+    let release_config = ReleaseConfig {
+        enabled: config.enabled,
+        tag_prefix: config.tag_prefix.clone(),
+    };
+    let Some(release) = stage_latest_release(workspace, &release_config)? else {
+        println!("\nℹ️  Genoa release updates are disabled; package update completed.");
+        return Ok(());
+    };
+
+    println!("\n✨ Verified Genoa release {}", release.tag);
+    if !prompt_yes_no("Install this verified release without touching your Genoa workspace?") {
+        println!("   ℹ️  Release installation skipped by user.");
+        return Ok(());
+    }
+    refresh_from_release(&release.path)?;
+    release.activate()?;
+    println!("   ✅ Active Genoa runtime is now {}.", release.tag);
+    Ok(())
+}
+
+fn run_worker(config: &GlobalConfig) -> Result<()> {
+    println!("{LOGO}");
+    println!("🚀 Starting system package update...");
+    run_update_command(&config.updater.update_command)?;
+    offer_firmware_update()?;
+    let workspace = resolve_workspace_path(config.repo.as_ref());
+    update_release(workspace.as_deref(), &config.release_updates)
+}
+
+fn run_launcher(config: &GlobalConfig) -> Result<()> {
+    let update_bin = config
+        .updater
+        .update_command
+        .first()
+        .context("updater.update_command may not be empty")?;
+    if !check_dependency(&config.global.terminal) {
+        bail!("Terminal not found: {}", config.global.terminal);
+    }
+    if !check_dependency(update_bin) {
+        bail!("Update helper not found: {update_bin}");
+    }
+
+    let current_exe = std::env::current_exe().context("Failed to locate sys-update")?;
+    let status = Command::new(&config.global.terminal)
+        .arg(format!("--title={}", config.updater.window_title))
+        .arg("-e")
+        .arg(current_exe)
+        .arg("--worker")
+        .status()
+        .with_context(|| format!("Failed to launch {}", config.global.terminal))?;
+
+    let success_icon = expand_path(&config.updater.icon_success);
+    let error_icon = expand_path(&config.updater.icon_error);
+    if status.success() {
+        send_notification(
+            "System Update Complete",
+            "Packages and selected Genoa release updates completed.",
+            &success_icon,
+            Urgency::Low,
+        )
+    } else {
+        send_notification(
+            "System Update Failed",
+            "The update process encountered an error. Your Genoa workspace was not modified.",
+            &error_icon,
+            Urgency::Critical,
+        )
+    }
+}
+
+fn main() -> Result<()> {
+    restrict_command_path();
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--initialize-release-trust")
+    {
+        return initialize_release_trust_interactively();
+    }
+    let config = load_config()?;
+    if std::env::args().skip(1).any(|arg| arg == "--worker") {
+        run_worker(&config)
+    } else {
+        run_launcher(&config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn update_script_preserves_personal_configs_and_keeps_cached_tool_checks() {
-        let source = include_str!("main.rs");
+    use super::*;
 
-        assert!(source.contains("git diff --quiet origin/main -- sysScripts"));
-        assert!(!source.contains(&["git diff --quiet origin/main --", " .config"].concat()));
-        assert!(source.contains("--skip-package-sync"));
-        assert!(!source.contains(&["--skip-", "tool-build"].concat()));
-        assert!(!source.contains(&["cargo", "clean", "--manifest-path"].join(" ")));
+    #[test]
+    fn workspace_resolution_prefers_the_configured_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let configured = temp.path().join("workspace");
+        fs::create_dir(&configured).unwrap();
+        let resolved = resolve_workspace_path(Some(&RepoConfig {
+            root: configured.to_string_lossy().to_string(),
+        }));
+        assert_eq!(resolved.as_deref(), Some(configured.as_path()));
     }
 }

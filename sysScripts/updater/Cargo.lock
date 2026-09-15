@@ -939,6 +939,7 @@ dependencies = [
  "dirs",
  "notify-rust",
  "serde",
+ "tempfile",
  "time",
  "toml",
 ]

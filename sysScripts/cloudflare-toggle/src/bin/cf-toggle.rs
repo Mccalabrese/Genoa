@@ -1,11 +1,12 @@
 //! Toggle dnscrypt-proxy through NetworkManager's DNS configuration.
 
 use anyhow::{Context, Result, bail};
-use cloudflare_toggle::DnsManager;
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::process::Command;
+
+const ROOT_HELPER: &str = "/usr/libexec/genoa/cf-toggle-helper";
 
 #[derive(Deserialize)]
 struct Config {
@@ -31,10 +32,9 @@ fn load_config() -> Result<Config> {
 
 fn run_as_user() -> Result<()> {
     let config = load_config().context("Failed to load config for user")?;
-    let self_exe = env::current_exe().context("Failed to get path to own executable")?;
-    let status = Command::new("pkexec")
-        .arg(self_exe)
-        .arg("--toggle")
+    let status = Command::new("/usr/bin/pkexec")
+        .arg(ROOT_HELPER)
+        .arg("toggle")
         .status()
         .context("Failed to run pkexec")?;
     if !status.success() {
@@ -50,22 +50,9 @@ fn run_as_user() -> Result<()> {
     Ok(())
 }
 
-fn set_dns_mode(enabled: bool) -> Result<()> {
-    let manager = DnsManager::default();
-    manager.set_enabled(enabled)
-}
-
-fn toggle_as_root() -> Result<()> {
-    let manager = DnsManager::default();
-    manager.set_enabled(!manager.is_enabled())
-}
-
 fn main() -> Result<()> {
-    match env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => run_as_user(),
-        [mode] if mode == "--toggle" => toggle_as_root(),
-        [mode] if mode == "--enable" => set_dns_mode(true),
-        [mode] if mode == "--disable" => set_dns_mode(false),
-        _ => bail!("Usage: cf-toggle [--toggle|--enable|--disable]"),
+    if env::args().len() != 1 {
+        bail!("Usage: cf-toggle");
     }
+    run_as_user()
 }

@@ -29,6 +29,12 @@ pub trait CmdExecutor {
         content: &str,
         mode: &str,
     ) -> Result<bool, std::io::Error>;
+    fn install_file_to_root(
+        &self,
+        source_path: &std::path::Path,
+        dest_path: &std::path::Path,
+        mode: &str,
+    ) -> Result<(), std::io::Error>;
     fn create_root_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
     fn list_dir_file_names(&self, path: &std::path::Path) -> Result<Vec<String>, std::io::Error>;
     fn is_symlink(&self, path: &std::path::Path) -> bool;

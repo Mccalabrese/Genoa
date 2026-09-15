@@ -35,7 +35,7 @@ use crate::graphics::{
     setup_turing_gpu,
 };
 use crate::helpers::{
-    load_packages_from_file, migrate_legacy_users, read_repo_root_from_config,
+    load_effective_packages, migrate_legacy_users, read_repo_root_from_config,
     repair_repo_symlink_targets, resolve_repo_root, write_repo_root,
 };
 use crate::kernel::{
@@ -73,10 +73,88 @@ const AUR_PACKAGES: &[&str] = &[
     "gtklock-runshell-module",
 ];
 
+// The installer reaches sudo after running several helpers. Restrict command
+// lookup at process entry so none of those helpers—or sudo itself—can be
+// shadowed by an executable in a user-writable PATH directory.
+const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
+const CF_TOGGLE_HELPER_SOURCE: &str =
+    "sysScripts/cloudflare-toggle/target/release/cf-toggle-helper";
+const CF_TOGGLE_HELPER_PATH: &str = "/usr/libexec/genoa/cf-toggle-helper";
+const CF_TOGGLE_POLICY_PATH: &str =
+    "/usr/share/polkit-1/actions/io.github.genoa.cloudflare-toggle.policy";
+const CF_TOGGLE_POLICY: &str =
+    include_str!("../../cloudflare-toggle/io.github.genoa.cloudflare-toggle.policy");
+
+fn restrict_command_path() {
+    // SAFETY: called by main before any threads or child processes exist; see
+    // Rust 2024's environment-mutation safety requirement.
+    unsafe { std::env::set_var("PATH", TRUSTED_SYSTEM_PATH) };
+}
+
+/// Deploys the only privileged portion of the DNS toggle outside the
+/// user-writable Cargo bin directory, then ties pkexec to that path and its
+/// single permitted argument.
+fn install_cloudflare_toggle_helper(
+    sys: &impl CmdExecutor,
+    repo_root: &Path,
+) -> Result<(), std::io::Error> {
+    let source = repo_root.join(CF_TOGGLE_HELPER_SOURCE);
+    if !sys.path_exists(&source) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Cloudflare toggle helper was not built: {}",
+                source.display()
+            ),
+        ));
+    }
+
+    sys.create_root_dir_all(Path::new("/usr/libexec/genoa"))?;
+    sys.install_file_to_root(&source, Path::new(CF_TOGGLE_HELPER_PATH), "755")?;
+    sys.create_root_dir_all(Path::new("/usr/share/polkit-1/actions"))?;
+    sys.install_string_to_root_file(Path::new(CF_TOGGLE_POLICY_PATH), CF_TOGGLE_POLICY, "644")?;
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RunOptions {
     refresh_mode: bool,
     sync_packages: bool,
+    release_root: bool,
+}
+
+/// On the first legacy refresh, the just-built updater can create its isolated
+/// signed-release keyring in the same terminal. Release-owned refreshes and
+/// ordinary installs intentionally never invoke this compatibility handoff.
+fn offer_signed_release_migration(home: &Path, repo_root: &Path, options: &RunOptions) {
+    if !options.refresh_mode || options.release_root {
+        return;
+    }
+    if !repo_root
+        .join("sysScripts/updater/assets/genoa-pubkey.asc")
+        .is_file()
+    {
+        return;
+    }
+
+    let updater = home.join(".cargo/bin/updater");
+    if !updater.is_file() {
+        return;
+    }
+
+    println!("\n🔐 Completing the signed-release updater migration...");
+    match Command::new(&updater)
+        .arg("--initialize-release-trust")
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!(
+            "   ⚠️  Signed-release verification was not initialized ({status}). You can retry from the next system update."
+        ),
+        Err(error) => eprintln!(
+            "   ⚠️  Could not start the rebuilt updater: {error}. You can retry from the next system update."
+        ),
+    }
 }
 
 fn parse_run_options(args: &[String]) -> RunOptions {
@@ -85,16 +163,19 @@ fn parse_run_options(args: &[String]) -> RunOptions {
     // This flag is an updater-only optimization. A fresh install always syncs
     // packages, and refresh mode keeps its legacy behavior unless told to skip.
     let sync_packages = !refresh_mode || !args.iter().any(|arg| arg == "--skip-package-sync");
+    let release_root = args.iter().any(|arg| arg == "--release-root");
 
     RunOptions {
         refresh_mode,
         sync_packages,
+        release_root,
     }
 }
 
 // ---------- Main Execution ------_-------
 
 fn main() {
+    restrict_command_path();
     let home = dirs::home_dir().unwrap_or_else(|| {
         eprintln!(
             "{}",
@@ -116,20 +197,25 @@ fn main() {
         eprintln!("The script is designed to safely elevate privileges internally when needed.");
         std::process::exit(1);
     }
+    // 0. Parse Arguments
+    let args: Vec<String> = std::env::args().collect();
+    let run_options = parse_run_options(&args);
+    let refresh_mode = run_options.refresh_mode;
+    if run_options.release_root && !refresh_mode {
+        eprintln!("❌ --release-root may only be used with --refresh-configs.");
+        std::process::exit(1);
+    }
+
     let previous_repo_root = read_repo_root_from_config(&home);
     let has_existing_install = home.join(".config/rust-dotfiles/config.toml").exists();
-
-    migrate_legacy_users(&home);
+    if !run_options.release_root {
+        migrate_legacy_users(&home);
+    }
 
     let repo_root = resolve_repo_root(&home).unwrap_or_else(|e| {
         eprintln!("❌ Error determining repository root: {}", e);
         std::process::exit(1);
     });
-
-    // 0. Parse Arguments
-    let args: Vec<String> = std::env::args().collect();
-    let run_options = parse_run_options(&args);
-    let refresh_mode = run_options.refresh_mode;
     // Existing Genoa systems retain their current behaviour unless they already
     // opted into the persisted LTS policy. New installs choose below, after
     // sudo is available to write that policy safely.
@@ -329,10 +415,10 @@ fn main() {
     // 1. Sync Standard & AUR Packages
     if run_options.sync_packages {
         println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
-        let mut common_pkgs = match load_packages_from_file("pkglist.txt", &repo_root) {
+        let mut common_pkgs = match load_effective_packages(&repo_root, &home) {
             Ok(pkgs) => pkgs,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                println!("   ⚠️  pkglist.txt not found. Skipping package installation.");
+                println!("   ⚠️  Release package list not found. Skipping package installation.");
                 Vec::new()
             }
             Err(e) => {
@@ -345,7 +431,7 @@ fn main() {
         common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
 
         if common_pkgs.is_empty() {
-            println!("   ⚠️  No packages found in pkglist.txt.");
+            println!("   ⚠️  No packages found in release or local package lists.");
         } else {
             let pkg_refs: Vec<&str> = common_pkgs.iter().map(|s| s.as_str()).collect();
             if let Err(e) = install_pacman_packages(&live_sys, &pkg_refs) {
@@ -414,9 +500,19 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
-        println!("   ⚠️  Failed to build custom Rust apps: {}", e);
+    let custom_apps_built = match build_custom_apps(&live_sys, &home, &repo_root) {
+        Ok(()) => true,
+        Err(e) => {
+            println!("   ⚠️  Failed to build custom Rust apps: {}", e);
+            false
+        }
     };
+    if custom_apps_built {
+        if let Err(e) = install_cloudflare_toggle_helper(&live_sys, &repo_root) {
+            eprintln!("   ⚠️  Failed to install the Cloudflare DNS helper: {e}");
+        }
+        offer_signed_release_migration(&home, &repo_root, &run_options);
+    }
 
     if let Err(e) = configure_tlp(&live_sys, &repo_root) {
         eprintln!("   ❌ Failed to configure TLP power management: {}", e);
@@ -477,13 +573,22 @@ fn main() {
     if !refresh_mode {
         if has_existing_install {
             // --- UPDATE MODE (safe for personal configs) ---
-            println!(
-                "\n{}",
-                "🔧 Repairing managed symlink targets...".blue().bold()
-            );
-            repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
-            if let Err(e) = write_repo_root(&repo_root) {
-                eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+            if run_options.release_root {
+                println!(
+                    "\n{}",
+                    "🔒 Verified release refresh: keeping personal dotfile links unchanged."
+                        .blue()
+                        .bold()
+                );
+            } else {
+                println!(
+                    "\n{}",
+                    "🔧 Repairing managed symlink targets...".blue().bold()
+                );
+                repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
+                if let Err(e) = write_repo_root(&repo_root) {
+                    eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+                }
             }
             patch_waybar_sidebar_toggle_path(&live_sys, &home);
 
@@ -526,13 +631,22 @@ fn main() {
         }
     } else {
         // --- REFRESH MODE (Updater) ---
-        println!(
-            "\n{}",
-            "🔧 Repairing managed symlink targets...".blue().bold()
-        );
-        repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
-        if let Err(e) = write_repo_root(&repo_root) {
-            eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+        if run_options.release_root {
+            println!(
+                "\n{}",
+                "🔒 Verified release refresh: preserving personal dotfile links."
+                    .blue()
+                    .bold()
+            );
+        } else {
+            println!(
+                "\n{}",
+                "🔧 Repairing managed symlink targets...".blue().bold()
+            );
+            repair_repo_symlink_targets(&home, previous_repo_root.as_deref(), &repo_root);
+            if let Err(e) = write_repo_root(&repo_root) {
+                eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
+            }
         }
         patch_waybar_sidebar_toggle_path(&live_sys, &home);
         if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
@@ -737,6 +851,7 @@ mod tests {
             RunOptions {
                 refresh_mode: false,
                 sync_packages: true,
+                release_root: false,
             }
         );
     }
@@ -748,6 +863,7 @@ mod tests {
             RunOptions {
                 refresh_mode: true,
                 sync_packages: true,
+                release_root: false,
             }
         );
     }
@@ -759,8 +875,55 @@ mod tests {
             RunOptions {
                 refresh_mode: true,
                 sync_packages: false,
+                release_root: false,
             }
         );
+    }
+
+    #[test]
+    fn release_refresh_preserves_user_workspace_links() {
+        assert_eq!(
+            options(&["install-wizard", "--refresh-configs", "--release-root"]),
+            RunOptions {
+                refresh_mode: true,
+                sync_packages: true,
+                release_root: true,
+            }
+        );
+    }
+
+    #[test]
+    fn cloudflare_helper_deployment_uses_a_root_owned_fixed_path_and_policy() {
+        let env = MockEnv::default();
+        let repo = Path::new("/repo");
+        let source = repo.join(CF_TOGGLE_HELPER_SOURCE);
+        env.mock_files.borrow_mut().insert(
+            source.to_string_lossy().to_string(),
+            "compiled helper".to_string(),
+        );
+
+        install_cloudflare_toggle_helper(&env, repo).unwrap();
+
+        let log = env.cmd_log.borrow();
+        assert!(log.iter().any(|(command, args)| {
+            command == "sudo"
+                && args
+                    == &vec![
+                        "install".to_string(),
+                        "-m".to_string(),
+                        "755".to_string(),
+                        "-o".to_string(),
+                        "root".to_string(),
+                        "-g".to_string(),
+                        "root".to_string(),
+                        source.to_string_lossy().to_string(),
+                        CF_TOGGLE_HELPER_PATH.to_string(),
+                    ]
+        }));
+        let policy = env.mock_files.borrow();
+        let contents = policy.get(CF_TOGGLE_POLICY_PATH).unwrap();
+        assert!(contents.contains("org.freedesktop.policykit.exec.path"));
+        assert!(contents.contains("org.freedesktop.policykit.exec.argv1\">toggle"));
     }
 
     #[test]
