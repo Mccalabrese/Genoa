@@ -77,11 +77,43 @@ const AUR_PACKAGES: &[&str] = &[
 // lookup at process entry so none of those helpers—or sudo itself—can be
 // shadowed by an executable in a user-writable PATH directory.
 const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
+const CF_TOGGLE_HELPER_SOURCE: &str =
+    "sysScripts/cloudflare-toggle/target/release/cf-toggle-helper";
+const CF_TOGGLE_HELPER_PATH: &str = "/usr/libexec/genoa/cf-toggle-helper";
+const CF_TOGGLE_POLICY_PATH: &str =
+    "/usr/share/polkit-1/actions/io.github.genoa.cloudflare-toggle.policy";
+const CF_TOGGLE_POLICY: &str =
+    include_str!("../../cloudflare-toggle/io.github.genoa.cloudflare-toggle.policy");
 
 fn restrict_command_path() {
     // SAFETY: called by main before any threads or child processes exist; see
     // Rust 2024's environment-mutation safety requirement.
     unsafe { std::env::set_var("PATH", TRUSTED_SYSTEM_PATH) };
+}
+
+/// Deploys the only privileged portion of the DNS toggle outside the
+/// user-writable Cargo bin directory, then ties pkexec to that path and its
+/// single permitted argument.
+fn install_cloudflare_toggle_helper(
+    sys: &impl CmdExecutor,
+    repo_root: &Path,
+) -> Result<(), std::io::Error> {
+    let source = repo_root.join(CF_TOGGLE_HELPER_SOURCE);
+    if !sys.path_exists(&source) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Cloudflare toggle helper was not built: {}",
+                source.display()
+            ),
+        ));
+    }
+
+    sys.create_root_dir_all(Path::new("/usr/libexec/genoa"))?;
+    sys.install_file_to_root(&source, Path::new(CF_TOGGLE_HELPER_PATH), "755")?;
+    sys.create_root_dir_all(Path::new("/usr/share/polkit-1/actions"))?;
+    sys.install_string_to_root_file(Path::new(CF_TOGGLE_POLICY_PATH), CF_TOGGLE_POLICY, "644")?;
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -468,10 +500,19 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
-        println!("   ⚠️  Failed to build custom Rust apps: {}", e);
+    let custom_apps_built = match build_custom_apps(&live_sys, &home, &repo_root) {
+        Ok(()) => true,
+        Err(e) => {
+            println!("   ⚠️  Failed to build custom Rust apps: {}", e);
+            false
+        }
     };
-    offer_signed_release_migration(&home, &repo_root, &run_options);
+    if custom_apps_built {
+        if let Err(e) = install_cloudflare_toggle_helper(&live_sys, &repo_root) {
+            eprintln!("   ⚠️  Failed to install the Cloudflare DNS helper: {e}");
+        }
+        offer_signed_release_migration(&home, &repo_root, &run_options);
+    }
 
     if let Err(e) = configure_tlp(&live_sys, &repo_root) {
         eprintln!("   ❌ Failed to configure TLP power management: {}", e);
@@ -849,6 +890,40 @@ mod tests {
                 release_root: true,
             }
         );
+    }
+
+    #[test]
+    fn cloudflare_helper_deployment_uses_a_root_owned_fixed_path_and_policy() {
+        let env = MockEnv::default();
+        let repo = Path::new("/repo");
+        let source = repo.join(CF_TOGGLE_HELPER_SOURCE);
+        env.mock_files.borrow_mut().insert(
+            source.to_string_lossy().to_string(),
+            "compiled helper".to_string(),
+        );
+
+        install_cloudflare_toggle_helper(&env, repo).unwrap();
+
+        let log = env.cmd_log.borrow();
+        assert!(log.iter().any(|(command, args)| {
+            command == "sudo"
+                && args
+                    == &vec![
+                        "install".to_string(),
+                        "-m".to_string(),
+                        "755".to_string(),
+                        "-o".to_string(),
+                        "root".to_string(),
+                        "-g".to_string(),
+                        "root".to_string(),
+                        source.to_string_lossy().to_string(),
+                        CF_TOGGLE_HELPER_PATH.to_string(),
+                    ]
+        }));
+        let policy = env.mock_files.borrow();
+        let contents = policy.get(CF_TOGGLE_POLICY_PATH).unwrap();
+        assert!(contents.contains("org.freedesktop.policykit.exec.path"));
+        assert!(contents.contains("org.freedesktop.policykit.exec.argv1\">toggle"));
     }
 
     #[test]

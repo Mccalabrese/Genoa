@@ -124,6 +124,42 @@ impl CmdExecutor for LiveEnv {
         )?;
         Ok(true)
     }
+    fn install_file_to_root(
+        &self,
+        source_path: &Path,
+        dest_path: &Path,
+        mode: &str,
+    ) -> Result<(), std::io::Error> {
+        if !source_path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "Root helper source is not a regular file: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        let source = source_path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Root helper source path is not valid UTF-8"))?;
+        let destination = dest_path.to_str().ok_or_else(|| {
+            std::io::Error::other("Root helper destination path is not valid UTF-8")
+        })?;
+        self.run_cmd(
+            "sudo",
+            &[
+                "install",
+                "-m",
+                mode,
+                "-o",
+                "root",
+                "-g",
+                "root",
+                source,
+                destination,
+            ],
+        )
+    }
     fn create_root_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         self.run_cmd("sudo", &["mkdir", "-p", path.to_str().unwrap()])?;
         self.run_cmd("sudo", &["chown", "root:root", path.to_str().unwrap()])?;

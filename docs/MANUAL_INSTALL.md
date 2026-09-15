@@ -228,6 +228,10 @@ sudo systemctl daemon-reload
 override. Do not manually edit `/etc/resolv.conf`; when the toggle is off,
 NetworkManager uses direct Cloudflare DNS (`1.1.1.1` and `1.0.0.1`).
 
+The Waybar-facing binary is unprivileged. It invokes only the root-owned
+`/usr/libexec/genoa/cf-toggle-helper toggle` path through Genoa's dedicated
+Polkit action; the helper accepts no other operation.
+
 ### 6.4 Session env path
 
 ```bash
