@@ -1,9 +1,10 @@
 use crate::traits::CmdExecutor;
+use std::fs::{DirBuilder, Permissions};
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use tempfile::NamedTempFile;
+use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 
 pub struct LiveEnv;
 
@@ -81,8 +82,28 @@ impl CmdExecutor for LiveEnv {
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         std::fs::write(path, content)
     }
+    fn write_private_string_to_file(
+        &self,
+        path: &Path,
+        content: &str,
+    ) -> Result<(), std::io::Error> {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Missing config parent")
+        })?;
+        let mut temp_file = TempFileBuilder::new()
+            .prefix(".config.toml.")
+            .permissions(Permissions::from_mode(0o600))
+            .tempfile_in(parent)?;
+        temp_file.write_all(content.as_bytes())?;
+        temp_file.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    }
     fn create_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(path)
+    }
+    fn create_private_dir_all(&self, path: &Path) -> Result<(), std::io::Error> {
+        let mut builder = DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(path)
     }
     fn remove_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         std::fs::remove_dir_all(path)
@@ -251,5 +272,26 @@ mod tests {
 
         make_executable(&cmd_path);
         assert!(env.command_exists(cmd));
+    }
+
+    #[test]
+    fn private_config_paths_exclude_group_and_other_users() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("config/rust-dotfiles");
+        let config_path = config_dir.join("config.toml");
+        let env = LiveEnv;
+
+        env.create_private_dir_all(&config_dir).unwrap();
+        env.write_private_string_to_file(&config_path, "api_key = \"secret\"\n")
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&config_dir).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o077,
+            0
+        );
     }
 }

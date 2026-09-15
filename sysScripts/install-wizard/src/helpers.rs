@@ -373,8 +373,16 @@ pub fn expected_binary_names(app_path: &Path, app_name: &str) -> HashSet<String>
         );
         HashSet::from([app_name.to_string()])
     };
-    let metadata = match Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
+    let metadata = match Command::new("/usr/bin/rustup")
+        .args([
+            "run",
+            "stable",
+            "cargo",
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ])
         .current_dir(app_path)
         .output()
     {

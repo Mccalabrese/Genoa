@@ -557,15 +557,9 @@ pub fn build_ui(app: &Application) {
     });
 
     // Security
-    btn_suspend.connect_clicked(move |_| {
-        // flock -n prevents collisions, gtklock -d blocks execution until the surface is securely locked.
-        helpers::run_command("sh", &["-c", "flock -n /tmp/gtklock.lock gtklock -d"]);
-        helpers::run_command("systemctl", &["suspend"]);
-    });
+    btn_suspend.connect_clicked(move |_| helpers::lock_screen(true));
 
-    btn_lock.connect_clicked(move |_| {
-        helpers::run_command("sh", &["-c", "flock -n /tmp/gtklock.lock gtklock -d"]);
-    });
+    btn_lock.connect_clicked(move |_| helpers::lock_screen(false));
 
     // --- Idle Inhibit Persistence ---
     // Query procps-ng for the state of our idle daemon.

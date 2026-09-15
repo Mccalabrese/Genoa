@@ -16,7 +16,13 @@ pub trait CmdExecutor {
     fn path_exists(&self, path: &std::path::Path) -> bool;
     fn path_is_dir(&self, path: &std::path::Path) -> bool;
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error>;
+    fn write_private_string_to_file(
+        &self,
+        path: &std::path::Path,
+        content: &str,
+    ) -> Result<(), std::io::Error>;
     fn create_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
+    fn create_private_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
     fn remove_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
     fn rename_path(
         &self,

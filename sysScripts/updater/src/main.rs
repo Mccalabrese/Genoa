@@ -19,11 +19,33 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const LOGO: &str = "🦀 Genoa system update";
+const LOGO: &str = concat!(
+    "\n",
+    "\"++++++++++\n",
+    "     ++++++++++++++\n",
+    "    ++++++++++++++++\n",
+    "   ++++++++++++++++++\n",
+    "  ++++++++++++++++++++\n",
+    " +++++++++====+++++++++\n",
+    " ++++++=:......:=++++++\n",
+    " +++++=:..........:=+++++\n",
+    " ++++=..............=++++\n",
+    " +++=.=##=......=##-.=+++\n",
+    "++++:-%%-.-....-%%:.-:++++\n",
+    "+++=.*%%. *....#%%..*.=+++\n",
+    "+++-.#%%#*%....%%%###.-+++\n",
+    "+++-.#%%%%#....#%%%%#.-+++\n",
+    "+++-.+%%%%*....*%%%%+.-+++\n",
+    " ++=.:#%%#:....:#%%#:.=++\n",
+    " +++..:=+:......:+=:..+++\n",
+    "++++-................-++++\n",
+    "+++++:..............:+++++\n",
+);
 // Keep every command launched by the updater on Arch's system path. This is
 // set before any child process (including a later sudo prompt) is started, so
 // a user-writable directory such as ~/.local/bin cannot shadow an executable.
 const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
+const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
 
 fn restrict_command_path() {
     // SAFETY: this runs at process entry, before this program creates threads
@@ -196,8 +218,11 @@ fn offer_firmware_update() -> Result<()> {
     let refresh = Command::new("/usr/bin/sudo")
         .args(["/usr/bin/fwupdmgr", "refresh"])
         .status()?;
-    if !refresh.success() {
+    if !firmware_refresh_succeeded(&refresh) {
         bail!("Firmware metadata refresh failed with {refresh}");
+    }
+    if refresh.code() == Some(2) {
+        println!("   ℹ️  Firmware metadata is already up to date.");
     }
     let _ = Command::new("/usr/bin/fwupdmgr")
         .arg("get-updates")
@@ -215,6 +240,12 @@ fn offer_firmware_update() -> Result<()> {
     Ok(())
 }
 
+fn firmware_refresh_succeeded(status: &std::process::ExitStatus) -> bool {
+    // fwupdmgr reserves exit status 2 for a command which had no action to
+    // take but still completed successfully, e.g. already-current metadata.
+    status.success() || status.code() == Some(2)
+}
+
 fn refresh_from_release(release_root: &Path) -> Result<()> {
     let installer_dir = release_root.join("sysScripts/install-wizard");
     let manifest = installer_dir.join("Cargo.toml");
@@ -226,8 +257,16 @@ fn refresh_from_release(release_root: &Path) -> Result<()> {
     }
 
     println!("\n🦀 Building verified Genoa release...");
-    let build = Command::new("cargo")
-        .args(["build", "--locked", "--release", "-q"])
+    let build = Command::new(SYSTEM_RUSTUP)
+        .args([
+            "run",
+            "stable",
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "-q",
+        ])
         .current_dir(&installer_dir)
         .status()
         .context("Failed to build release installer")?;
@@ -310,6 +349,7 @@ fn run_launcher(config: &GlobalConfig) -> Result<()> {
         .arg("-e")
         .arg(current_exe)
         .arg("--worker")
+        .arg("--pause-on-exit")
         .status()
         .with_context(|| format!("Failed to launch {}", config.global.terminal))?;
 
@@ -341,8 +381,17 @@ fn main() -> Result<()> {
         return initialize_release_trust_interactively();
     }
     let config = load_config()?;
-    if std::env::args().skip(1).any(|arg| arg == "--worker") {
-        run_worker(&config)
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().skip(1).any(|arg| arg == "--worker") {
+        let result = run_worker(&config);
+        if args.iter().any(|arg| arg == "--pause-on-exit") {
+            match &result {
+                Ok(()) => println!("\n🏁 Process finished successfully. Closing in 5s..."),
+                Err(error) => eprintln!("\n❌ Process failed:\n{error:#}\n\nClosing in 5s..."),
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        result
     } else {
         run_launcher(&config)
     }
@@ -351,6 +400,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
 
     #[test]
     fn workspace_resolution_prefers_the_configured_workspace() {
@@ -361,5 +411,18 @@ mod tests {
             root: configured.to_string_lossy().to_string(),
         }));
         assert_eq!(resolved.as_deref(), Some(configured.as_path()));
+    }
+
+    #[test]
+    fn firmware_refresh_accepts_the_documented_no_action_status() {
+        assert!(firmware_refresh_succeeded(
+            &std::process::ExitStatus::from_raw(0)
+        ));
+        assert!(firmware_refresh_succeeded(
+            &std::process::ExitStatus::from_raw(2 << 8)
+        ));
+        assert!(!firmware_refresh_succeeded(
+            &std::process::ExitStatus::from_raw(1 << 8)
+        ));
     }
 }

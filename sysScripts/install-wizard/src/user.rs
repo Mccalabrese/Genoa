@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 const GEOCLUE_CONF_PATH: &str = "/etc/geoclue/geoclue.conf";
 const BEACONDB_GEOLOCATE_URL: &str = "https://api.beacondb.net/v1/geolocate";
+const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
 
 const RETIRED_TOOL_SOURCES: &[&str] = &[
     "sysScripts/sidebar/build.rs",
@@ -124,15 +125,11 @@ pub fn setup_secrets_and_geoclue(
             println!("   ⚠️  Found a file blocking config directory. Backing it up...");
             let backup = PathBuf::from(format!("{}.bak", config_dir.display()));
             sys.rename_path(&config_dir, &backup)?;
-            sys.create_dir_all(&config_dir)?;
+            sys.create_private_dir_all(&config_dir)?;
         }
     } else {
-        sys.create_dir_all(&config_dir)?;
+        sys.create_private_dir_all(&config_dir)?;
     }
-
-    let config_path_str = config_path
-        .to_str()
-        .ok_or_else(|| std::io::Error::other("Invalid config path"))?;
 
     if !sys.path_exists(&config_path) {
         println!(
@@ -144,16 +141,14 @@ pub fn setup_secrets_and_geoclue(
         .prompt()
         .unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
         let template = render_config_template(&finnhub_api);
-        sys.write_string_to_file(config_path_str, &template)?;
-        let _ = sys.run_cmd_ignore_err("chmod", &["600", config_path_str]);
+        sys.write_private_string_to_file(&config_path, &template)?;
         println!("  ✅ Config generated securely at {:?}", config_path);
     } else {
         let contents = sys.read_file_to_string(&config_path)?;
         if contents.contains("YOUR_FINNHUB_KEY") {
             let finnhub_api = Text::new("Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):").prompt().unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
             if let Some(updated) = update_config_placeholders(&contents, &finnhub_api) {
-                sys.write_string_to_file(config_path_str, &updated)?;
-                let _ = sys.run_cmd_ignore_err("chmod", &["600", config_path_str]);
+                sys.write_private_string_to_file(&config_path, &updated)?;
             }
         }
     }
@@ -407,7 +402,11 @@ pub fn build_custom_apps(
                 };
                 //let app_name = app_path.file_name().unwrap().to_str().unwrap();
                 if sys
-                    .run_cmd_in_dir(&app_path, "cargo", &["build", "--release", "-q"])
+                    .run_cmd_in_dir(
+                        &app_path,
+                        SYSTEM_RUSTUP,
+                        &["run", "stable", "cargo", "build", "--release", "-q"],
+                    )
                     .is_ok()
                 {
                     let release_dir = app_path.join("target/release");
@@ -672,7 +671,10 @@ pub fn finalize_setup(sys: &impl CmdExecutor, home: &Path) {
 fn configure_neovim_health(sys: &impl CmdExecutor) {
     println!("   🦀 Installing Rust analyzer and Clippy...");
     if sys
-        .run_cmd("rustup", &["component", "add", "rust-analyzer", "clippy"])
+        .run_cmd(
+            SYSTEM_RUSTUP,
+            &["component", "add", "rust-analyzer", "clippy"],
+        )
         .is_ok()
     {
         println!("   ✅ Rust analyzer and Clippy ready");
@@ -721,7 +723,7 @@ mod tests {
             *env.cmd_log.borrow(),
             vec![
                 (
-                    "rustup".to_string(),
+                    "/usr/bin/rustup".to_string(),
                     vec![
                         "component".to_string(),
                         "add".to_string(),
