@@ -21,6 +21,7 @@ use std::process::{Command, Stdio};
 
 mod graphics;
 mod helpers;
+mod kernel;
 mod live_env;
 #[cfg(test)]
 mod mock_env;
@@ -37,10 +38,14 @@ use crate::helpers::{
     load_packages_from_file, migrate_legacy_users, read_repo_root_from_config,
     repair_repo_symlink_targets, resolve_repo_root, write_repo_root,
 };
+use crate::kernel::{
+    KernelFlavor, finalize_lts_uki, modern_nvidia_packages, persist_kernel_flavor, prepare_lts_uki,
+    prompt_for_kernel_flavor, read_kernel_flavor, resign_lts_uki_if_needed,
+};
 use crate::live_env::LiveEnv;
 use crate::session::{
     configure_dns, configure_printing_services, configure_quiet_boot, configure_system,
-    configure_tlp, enforce_session_order,
+    configure_tlp, enforce_session_order, sanitize_mkinitcpio,
 };
 use crate::traits::CmdExecutor;
 use crate::update::{
@@ -52,17 +57,6 @@ use crate::user::{
     patch_waybar_sidebar_toggle_path, remove_retired_tool_sources, setup_librewolf, setup_papers,
     setup_secrets_and_geoclue, setup_waybar_configs,
 };
-
-// Hardware Specific: NVIDIA
-const NVIDIA_PACKAGES: &[&str] = &[
-    // New NVIDIA GPUs, including the RTX generation used in current Dell Pro
-    // Max systems, require the open kernel module package.
-    "nvidia-open",
-    "nvidia-utils",
-    "nvidia-prime",
-    "nvidia-settings",
-    "libva-nvidia-driver",
-];
 
 // Hardware Specific: AMD
 const AMD_PACKAGES: &[&str] = &["vulkan-radeon", "libva-mesa-driver", "xf86-video-amdgpu"];
@@ -136,6 +130,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let run_options = parse_run_options(&args);
     let refresh_mode = run_options.refresh_mode;
+    // Existing Genoa systems retain their current behaviour unless they already
+    // opted into the persisted LTS policy. New installs choose below, after
+    // sudo is available to write that policy safely.
+    let mut kernel_flavor = read_kernel_flavor(&live_sys).unwrap_or(KernelFlavor::Mainline);
 
     if refresh_mode {
         println!("{}", "🔄 Running in CONFIG REFRESH MODE".magenta().bold());
@@ -162,6 +160,36 @@ fn main() {
         if !status.success() {
             std::process::exit(1);
         }
+
+        if !has_existing_install {
+            if read_kernel_flavor(&live_sys).is_none() {
+                println!("\n{}", "🐧 Choosing kernel policy...".blue().bold());
+                kernel_flavor = prompt_for_kernel_flavor();
+                if let Err(e) = persist_kernel_flavor(&live_sys, kernel_flavor) {
+                    eprintln!("   ❌ Failed to save kernel policy: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            // This must run before either graphics path can rebuild an image.
+            if let Err(e) = sanitize_mkinitcpio(&live_sys) {
+                eprintln!("   ❌ Failed to sanitize mkinitcpio configuration: {}", e);
+                std::process::exit(1);
+            }
+        }
+
+        let lts_uki = if !has_existing_install && kernel_flavor == KernelFlavor::Lts {
+            println!("\n{}", "🐧 Preparing LTS kernel...".blue().bold());
+            match prepare_lts_uki(&live_sys) {
+                Ok(uki) => uki,
+                Err(e) => {
+                    eprintln!("   ❌ Failed to prepare the LTS kernel: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
 
         println!(
             "\n{}",
@@ -203,14 +231,16 @@ fn main() {
             match gpu {
                 GpuVendor::Nvidia(NvidiaArch::Turing) => {
                     println!("   👉 NVIDIA Turing Detected (GTX 16xx / RTX 20xx).");
-                    if let Err(e) = setup_turing_gpu(&live_sys) {
+                    if let Err(e) = setup_turing_gpu(kernel_flavor, &live_sys) {
                         eprintln!("   ❌ Failed to install legacy NVIDIA drivers: {}", e);
                         std::process::exit(1);
                     }
                 }
                 GpuVendor::Nvidia(NvidiaArch::Modern) => {
                     println!("   👉 Modern NVIDIA Detected (RTX 30xx/40xx/Blackwell).");
-                    if let Err(e) = install_pacman_packages(&live_sys, NVIDIA_PACKAGES) {
+                    if let Err(e) =
+                        install_pacman_packages(&live_sys, modern_nvidia_packages(kernel_flavor))
+                    {
                         eprintln!("   ❌ Failed to install NVIDIA drivers: {}", e);
                         std::process::exit(1);
                     }
@@ -235,6 +265,16 @@ fn main() {
                 }
                 GpuVendor::Intel => println!("   👉 Intel Detected (Drivers in common)."),
                 GpuVendor::Unknown => println!("   ⚠️  No dedicated GPU detected."),
+            }
+
+            if let Some(uki) = &lts_uki
+                && let Err(e) = finalize_lts_uki(&live_sys, uki)
+            {
+                eprintln!(
+                    "   ❌ Failed to validate and select the LTS boot entry: {}",
+                    e
+                );
+                std::process::exit(1);
             }
 
             let is_gui =
@@ -263,6 +303,19 @@ fn main() {
                 }
                 std::process::exit(0);
             }
+        }
+
+        // A second installer pass skips the graphics checkpoint, but it still
+        // needs to rebuild and select the LTS image prepared above.
+        if state_file.exists()
+            && let Some(uki) = &lts_uki
+            && let Err(e) = finalize_lts_uki(&live_sys, uki)
+        {
+            eprintln!(
+                "   ❌ Failed to validate and select the LTS boot entry: {}",
+                e
+            );
+            std::process::exit(1);
         }
 
         println!("\n{}", "🦀 Setting up Rust (rustup)...".blue().bold());
@@ -331,6 +384,12 @@ fn main() {
         eprintln!("   ❌ Failed to configure quiet boot: {}", e);
         std::process::exit(1);
     }
+    if kernel_flavor == KernelFlavor::Lts
+        && let Err(e) = resign_lts_uki_if_needed(&live_sys)
+    {
+        eprintln!("   ❌ Failed to re-sign the LTS boot image: {}", e);
+        std::process::exit(1);
+    }
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
     println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
@@ -375,7 +434,7 @@ fn main() {
         // Existing installations normally skip system configuration. NVIDIA
         // power-management repairs are safe and needed to migrate older runs
         // that completed the driver checkpoint without reaching that stage.
-        match configure_detected_nvidia(&live_sys) {
+        match configure_detected_nvidia(kernel_flavor, &live_sys) {
             Ok(true) => {
                 if let Err(e) = enforce_session_order(&live_sys, true, &repo_root) {
                     eprintln!("   ❌ Failed to refresh NVIDIA session integration: {}", e);
@@ -398,7 +457,7 @@ fn main() {
         }
 
         // 3. Hardware Enforcement
-        let is_nvidia = configure_detected_nvidia(&live_sys).unwrap_or_else(|e| {
+        let is_nvidia = configure_detected_nvidia(kernel_flavor, &live_sys).unwrap_or_else(|e| {
             eprintln!("   ❌ Failed to configure NVIDIA hardware: {}", e);
             std::process::exit(1);
         });
@@ -493,17 +552,20 @@ fn main() {
 /// Applies the NVIDIA runtime configuration whenever NVIDIA hardware is present.
 /// Kept separate from the broader system setup so update-only runs can repair
 /// the driver checkpoint safely.
-fn configure_detected_nvidia(sys: &impl CmdExecutor) -> Result<bool, std::io::Error> {
+fn configure_detected_nvidia(
+    kernel_flavor: KernelFlavor,
+    sys: &impl CmdExecutor,
+) -> Result<bool, std::io::Error> {
     let GpuVendor::Nvidia(arch) = detect_gpu(sys) else {
         return Ok(false);
     };
 
     if arch == NvidiaArch::Turing {
-        setup_turing_gpu(sys)?;
+        setup_turing_gpu(kernel_flavor, sys)?;
     } else {
         // Update runs also repair systems where older GPU detection skipped an
         // NVIDIA 3D controller and therefore never installed its driver.
-        install_pacman_packages(sys, NVIDIA_PACKAGES)?;
+        install_pacman_packages(sys, modern_nvidia_packages(kernel_flavor))?;
     }
     apply_nvidia_configs(&arch, sys)?;
     configure_rhit_dell_pro_max_niri(sys)?;

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::CmdExecutor;
+use crate::kernel::KernelFlavor;
 
 const TURING_IDS: &[&str] = &[
     "0x1e02", "0x1e04", "0x1e07", "0x1e30", // Titan RTX, 2080 Ti, Quadro...
@@ -161,11 +162,15 @@ pub fn find_igpu(sys: &impl CmdExecutor) -> Option<(String, String)> {
 }
 
 /// 1. Check if user is on old drivers and ignoring updates in their pacman conf.
-/// 2. If they are installingg from scratch, just install AUR nvidia-580-dkms which supports Turing and older cards on newer kernels.
+/// 2. If they are installing from scratch, install the AUR nvidia-580-dkms driver
+///    against the kernel profile selected by the user.
 /// 3. For users on old drivers, halt&warn, execute removing ignore line from pacman conf, pacman
-///    -Rdd old drivers, install mainline kernel, install AUR drivers, run mkinicpio and
+///    -Rdd old drivers, install the selected kernel, install AUR drivers, run mkinitcpio and
 ///    grub-mkconfig if user is on grub, and force reboot to load the new drivers safely.
-pub fn setup_turing_gpu(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+pub fn setup_turing_gpu(
+    kernel_flavor: KernelFlavor,
+    sys: &impl CmdExecutor,
+) -> Result<(), std::io::Error> {
     let pacman_conf = Path::new("/etc/pacman.conf");
     let pac_conf_content = sys.read_file_to_string(pacman_conf)?;
     let drivers_installed = sys.run_cmd("pacman", &["-Q", "nvidia-580xx-dkms"]).is_ok();
@@ -227,10 +232,9 @@ pub fn setup_turing_gpu(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
             &["pacman", "-Rdd", "--noconfirm", "lib32-nvidia-utils"],
         ); // Remove 32-bit drivers if present
         let _ = sys.run_cmd_ignore_err("sudo", &["pacman", "-Rdd", "--noconfirm", "libxnvctrl"]);
-        sys.run_cmd(
-            "sudo",
-            &["pacman", "-S", "--noconfirm", "linux", "linux-headers"],
-        )?; // Ensure mainline kernel is installed
+        let mut kernel_args = vec!["pacman", "-S", "--needed", "--noconfirm"];
+        kernel_args.extend(kernel_flavor.kernel_packages());
+        sys.run_cmd("sudo", &kernel_args)?; // Ensure the selected kernel and its DKMS headers are installed
     }
     if is_legacy_nvidia || !drivers_installed {
         println!("   👉 Installing legacy NVIDIA drivers from AUR...");
@@ -726,7 +730,7 @@ mod tests {
             "[options]\nHoldPkg = pacman\n#[multilib]\n#Include = /etc/pacman.d/mirrorlist\n"
                 .to_string(),
         );
-        let result = setup_turing_gpu(&env);
+        let result = setup_turing_gpu(KernelFlavor::Mainline, &env);
         assert!(result.is_ok());
         let binding = env.mock_files.borrow();
         let updated = binding.get("/etc/pacman.conf").unwrap();
