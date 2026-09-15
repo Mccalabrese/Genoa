@@ -114,6 +114,12 @@ impl CmdExecutor for MockEnv {
     fn create_private_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         self.create_dir_all(path)
     }
+    fn ensure_private_dir(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        self.create_private_dir_all(path)
+    }
+    fn private_file_needs_repair(&self, _path: &std::path::Path) -> Result<bool, std::io::Error> {
+        Ok(false)
+    }
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         self.mock_files
             .borrow_mut()

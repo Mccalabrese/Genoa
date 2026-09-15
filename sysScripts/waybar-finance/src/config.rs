@@ -1,8 +1,11 @@
 use crate::app::Config;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, DirBuilder, File, Permissions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use tempfile::Builder as TempFileBuilder;
 
 // Struct to parse the central TOML
 #[derive(Deserialize)]
@@ -139,8 +142,71 @@ pub fn save_config(config: &Config) -> Result<()> {
     let config_path = get_config_path()?;
     let json = serde_json::to_string_pretty(config).context("Failed to serialize config")?;
     if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent).context("Failed to create config directory")?;
+        create_private_config_dir(parent)?;
     }
-    fs::write(config_path, json).context("Failed to write config file")?;
+    write_private_config(&config_path, &json)?;
     Ok(())
+}
+
+fn create_private_config_dir(path: &Path) -> Result<()> {
+    let mut builder = DirBuilder::new();
+    builder
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .context("Failed to create private config directory")
+}
+
+/// Writes a configuration containing the Finnhub API key without an insecure
+/// creation window, then atomically replaces the previous complete file.
+fn write_private_config(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("Configuration path does not have a parent directory")?;
+    let mut temp_file = TempFileBuilder::new()
+        .prefix(".config.json.")
+        .permissions(Permissions::from_mode(0o600))
+        .tempfile_in(parent)
+        .context("Failed to create private temporary config")?;
+    temp_file
+        .write_all(content.as_bytes())
+        .context("Failed to write private temporary config")?;
+    temp_file
+        .as_file()
+        .sync_all()
+        .context("Failed to flush private temporary config")?;
+    temp_file
+        .persist(path)
+        .map_err(|error| error.error)
+        .context("Failed to atomically replace config file")?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .context("Failed to flush config directory")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_config_replacement_preserves_strict_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("waybar-finance");
+        let config_path = config_dir.join("config.json");
+
+        create_private_config_dir(&config_dir).unwrap();
+        write_private_config(&config_path, "old key").unwrap();
+        write_private_config(&config_path, "new key").unwrap();
+
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), "new key");
+        assert_eq!(
+            fs::metadata(&config_dir).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o077,
+            0
+        );
+    }
 }

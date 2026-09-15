@@ -118,16 +118,12 @@ pub fn setup_secrets_and_geoclue(
     let config_dir = home.join(".config/rust-dotfiles");
     let config_path = config_dir.join("config.toml");
     // Logic to handle if 'rust-dotfiles' exists as a file instead of a directory
-    if sys.path_exists(&config_dir) {
-        if !sys.path_is_dir(&config_dir) {
-            println!("   ⚠️  Found a file blocking config directory. Backing it up...");
-            let backup = PathBuf::from(format!("{}.bak", config_dir.display()));
-            sys.rename_path(&config_dir, &backup)?;
-            sys.create_private_dir_all(&config_dir)?;
-        }
-    } else {
-        sys.create_private_dir_all(&config_dir)?;
+    if sys.path_exists(&config_dir) && !sys.path_is_dir(&config_dir) {
+        println!("   ⚠️  Found a file blocking config directory. Backing it up...");
+        let backup = PathBuf::from(format!("{}.bak", config_dir.display()));
+        sys.rename_path(&config_dir, &backup)?;
     }
+    sys.ensure_private_dir(&config_dir)?;
 
     if !sys.path_exists(&config_path) {
         println!(
@@ -142,14 +138,19 @@ pub fn setup_secrets_and_geoclue(
         sys.write_private_string_to_file(&config_path, &template)?;
         println!("  ✅ Config generated securely at {:?}", config_path);
     } else {
+        let needs_repair = sys.private_file_needs_repair(&config_path)?;
         let contents = sys.read_file_to_string(&config_path)?;
         if contents.contains("YOUR_FINNHUB_KEY") {
             let finnhub_api = Text::new("Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):").prompt().unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
             if let Some(updated) = update_config_placeholders(&contents, &finnhub_api) {
                 sys.write_private_string_to_file(&config_path, &updated)?;
             }
+        } else if needs_repair {
+            sys.write_private_string_to_file(&config_path, &contents)?;
         }
     }
+
+    repair_existing_private_config(sys, &home.join(".config/waybar-finance/config.json"))?;
 
     configure_geoclue_for_beacondb(sys)?;
 
@@ -160,6 +161,26 @@ pub fn setup_secrets_and_geoclue(
             wallpaper_path
         );
         sys.create_dir_all(&wallpaper_path)?;
+    }
+    Ok(())
+}
+
+/// Rewrites an existing Genoa secret config only when its permissions are too
+/// broad, preserving its exact content while replacing it with a 0600 file.
+fn repair_existing_private_config(
+    sys: &impl CmdExecutor,
+    config_path: &Path,
+) -> Result<(), std::io::Error> {
+    if !sys.path_exists(config_path) {
+        return Ok(());
+    }
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Secret config path has no parent directory"))?;
+    sys.ensure_private_dir(parent)?;
+    if sys.private_file_needs_repair(config_path)? {
+        let content = sys.read_file_to_string(config_path)?;
+        sys.write_private_string_to_file(config_path, &content)?;
     }
     Ok(())
 }
