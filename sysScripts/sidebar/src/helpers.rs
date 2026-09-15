@@ -8,8 +8,10 @@ use clepsydre_rebind::{Event, Timeframe};
 use gtk4::gio::prelude::ListModelExtManual;
 use gtk4::prelude::*;
 use std::collections::HashSet;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -516,6 +518,15 @@ fn resolve_program(program: &str) -> String {
 const CMD_TIMEOUT_MS: u64 = 5000;
 const CMD_RETRIES: usize = 2;
 const RETRY_BACKOFF_MS: u64 = 120;
+const GTKLOCK: &str = "/usr/bin/gtklock";
+const GTKLOCK_SUSPEND_COMMAND: &str = "/usr/bin/systemctl suspend";
+const LOCK_EXCLUSIVE: std::ffi::c_int = 2;
+const LOCK_NONBLOCKING: std::ffi::c_int = 4;
+
+unsafe extern "C" {
+    fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
+    fn geteuid() -> u32;
+}
 
 fn telemetry_path() -> PathBuf {
     if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -643,6 +654,123 @@ pub fn run_command(program: &str, args: &[&str]) {
     }
 }
 
+/// Starts gtklock while holding a lock that belongs to this login session.
+/// For suspend, gtklock itself invokes the fixed systemctl command only after
+/// the Wayland session lock is active; a failed or not-yet-ready lock can
+/// therefore never be followed by suspend.
+pub fn lock_screen(suspend_after_lock: bool) {
+    std::thread::spawn(move || {
+        if let Err(error) = lock_screen_inner(suspend_after_lock) {
+            log_command_failure(
+                "lock_screen_failed",
+                GTKLOCK,
+                if suspend_after_lock {
+                    &["--lock-command", GTKLOCK_SUSPEND_COMMAND]
+                } else {
+                    &[]
+                },
+                &error,
+            );
+        }
+    });
+}
+
+fn lock_screen_inner(suspend_after_lock: bool) -> Result<(), String> {
+    let lock_path = gtklock_runtime_lock_path()?;
+    let lock_file = open_runtime_lock(&lock_path)?;
+    try_lock_exclusive(&lock_file)
+        .map_err(|error| format!("another lock request is already running: {error}"))?;
+
+    let status = Command::new(GTKLOCK)
+        .args(gtklock_args(suspend_after_lock))
+        .status()
+        .map_err(|error| format!("could not start gtklock: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "gtklock exited before it could lock the session: {status}"
+        ));
+    }
+    Ok(())
+}
+
+fn open_runtime_lock(lock_path: &Path) -> Result<File, String> {
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .map_err(|error| format!("could not open {}: {error}", lock_path.display()))
+}
+
+fn gtklock_runtime_lock_path() -> Result<PathBuf, String> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "XDG_RUNTIME_DIR is unavailable; refusing to use /tmp for lock state".to_string()
+        })?;
+    gtklock_runtime_lock_path_in(&runtime)
+}
+
+fn gtklock_runtime_lock_path_in(runtime: &Path) -> Result<PathBuf, String> {
+    ensure_private_runtime_directory(runtime)?;
+
+    let genoa_runtime = runtime.join("genoa");
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(&genoa_runtime) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(format!(
+                "could not create {}: {error}",
+                genoa_runtime.display()
+            ));
+        }
+    }
+    ensure_private_runtime_directory(&genoa_runtime)?;
+    Ok(genoa_runtime.join("gtklock.lock"))
+}
+
+fn ensure_private_runtime_directory(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{} is not a real directory", path.display()));
+    }
+    if metadata.uid() != unsafe { geteuid() } {
+        return Err(format!(
+            "{} is not owned by the active user",
+            path.display()
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!("{} is accessible by another user", path.display()));
+    }
+    Ok(())
+}
+
+fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
+    // SAFETY: flock operates only on this valid, open file descriptor. The
+    // operation is non-blocking, so the sidebar UI can never hang waiting for
+    // another concurrent lock request.
+    let result = unsafe { flock(file.as_raw_fd(), LOCK_EXCLUSIVE | LOCK_NONBLOCKING) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn gtklock_args(suspend_after_lock: bool) -> Vec<&'static str> {
+    let mut args = Vec::new();
+    if suspend_after_lock {
+        args.extend(["--lock-command", GTKLOCK_SUSPEND_COMMAND]);
+    }
+    args
+}
+
 pub fn run_home_bin(bin_name: &str, args: &[&str]) {
     if let Some(path) = cargo_bin_path(bin_name) {
         if let Err(e) = Command::new(&path).args(args).spawn() {
@@ -739,5 +867,48 @@ mod tests {
             &calendar_event("2026-08-05", "2026-08-06", true),
             end_date
         ));
+    }
+
+    #[test]
+    fn suspend_is_a_fixed_post_lock_command() {
+        assert_eq!(gtklock_args(false), Vec::<&str>::new());
+        assert_eq!(
+            gtklock_args(true),
+            ["--lock-command", "/usr/bin/systemctl suspend"]
+        );
+    }
+
+    #[test]
+    fn runtime_lock_requires_a_private_user_directory() {
+        let unique = format!(
+            "genoa-sidebar-runtime-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let runtime = std::env::temp_dir().join(unique);
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let lock_path = gtklock_runtime_lock_path_in(&runtime).unwrap();
+        assert_eq!(lock_path, runtime.join("genoa/gtklock.lock"));
+        assert_eq!(
+            fs::metadata(runtime.join("genoa"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        let lock = open_runtime_lock(&lock_path).unwrap();
+        assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o077, 0);
+
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(gtklock_runtime_lock_path_in(&runtime).is_err());
+
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(runtime).unwrap();
     }
 }
