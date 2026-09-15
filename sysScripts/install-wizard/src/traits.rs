@@ -1,5 +1,6 @@
 pub trait CmdExecutor {
     fn run_cmd(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error>;
+    fn command_output(&self, cmd: &str, args: &[&str]) -> Result<String, std::io::Error>;
     fn run_cmd_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error>;
     fn run_cmd_silently_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error>;
     fn run_cmd_in_dir(

@@ -18,6 +18,16 @@ impl CmdExecutor for LiveEnv {
         }
         Ok(())
     }
+    fn command_output(&self, cmd: &str, args: &[&str]) -> Result<String, std::io::Error> {
+        let output = Command::new(cmd).args(args).output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "Command '{}' with args {:?} failed",
+                cmd, args
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
     fn run_cmd_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
         let _ = Command::new(cmd).args(args).status();
         Ok(())

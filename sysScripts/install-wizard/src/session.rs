@@ -238,7 +238,7 @@ fn enable_mdns_hostname_resolution(content: &str) -> Option<String> {
 
 /// Cleans up the `mkinitcpio.conf` file to fix the known Archinstall 2025 bug that appends 'o"' to
 /// the end of the file,
-fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+pub fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     // --- SANITIZE MKINITCPIO (Fix Archinstall 2025 Bug) ---
     // This protects NVIDIA users from the 'o"' corruption crash.
     println!("   🧹 Checking mkinitcpio.conf for corruption...");

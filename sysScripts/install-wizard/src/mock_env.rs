@@ -9,6 +9,7 @@ pub struct MockEnv {
     pub available_commands: HashSet<String>,
     pub installed_packages: HashSet<String>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
+    pub command_outputs: RefCell<std::collections::HashMap<(String, Vec<String>), String>>,
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
     pub mock_dirs: RefCell<HashSet<String>>,
     pub symlink_paths: RefCell<std::collections::HashMap<String, String>>,
@@ -21,6 +22,22 @@ impl CmdExecutor for MockEnv {
             args.iter().map(|s| s.to_string()).collect(),
         ));
         Ok(())
+    }
+    fn command_output(&self, cmd: &str, args: &[&str]) -> Result<String, std::io::Error> {
+        let key = (
+            cmd.to_string(),
+            args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+        );
+        self.command_outputs
+            .borrow()
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No mocked output for {cmd} {args:?}"),
+                )
+            })
     }
     fn run_cmd_ignore_err(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
         self.cmd_log.borrow_mut().push((
