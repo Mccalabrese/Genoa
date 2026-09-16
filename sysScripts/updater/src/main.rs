@@ -228,8 +228,12 @@ fn offer_firmware_update() -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;
-    if !firmware_updates_available(&updates) {
+    if updates.code() == Some(2) {
+        println!("   ✅ Firmware is already current.");
         return Ok(());
+    }
+    if !firmware_updates_available(&updates) {
+        bail!("Firmware update check failed with {updates}");
     }
     if prompt_yes_no("Firmware updates are available. Apply them now?") {
         let status = Command::new("/usr/bin/sudo")
@@ -238,6 +242,9 @@ fn offer_firmware_update() -> Result<()> {
         if !status.success() {
             bail!("Firmware update failed with {status}");
         }
+        println!("   ✅ Firmware updates installed.");
+    } else {
+        println!("   ℹ️  Firmware updates were left unapplied.");
     }
     Ok(())
 }
@@ -319,6 +326,7 @@ fn update_release(workspace: Option<&Path>, config: &ReleaseUpdatesConfig) -> Re
         return Ok(());
     };
     if release.is_active()? {
+        println!("\n✅ Genoa runtime is already current ({}).", release.tag);
         return Ok(());
     }
 
@@ -337,6 +345,7 @@ fn run_worker(config: &GlobalConfig) -> Result<()> {
     println!("{LOGO}");
     println!("🚀 Starting system package update...");
     run_update_command(&config.updater.update_command)?;
+    println!("   ✅ System packages are current.");
     offer_firmware_update()?;
     let workspace = resolve_workspace_path(config.repo.as_ref());
     update_release(workspace.as_deref(), &config.release_updates)
