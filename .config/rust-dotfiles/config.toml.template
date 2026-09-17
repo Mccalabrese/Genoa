@@ -51,8 +51,7 @@ rofi_theme_override = "element-icon { size: 20%; }"
 # Settings for our updater module
 # -------------------------------
 [update_check]
-# The command to run. We use a list for command and args.
-command_string = "nm-online -q -t 5 && (checkupdates; yay -Qua) || true"
+# update-check uses fixed, allowlisted checkupdates and yay commands.
 # The file to cache the last known count
 cache_file = "~/.cache/update-check.json"
 # Icon to show if check fails but cache is available
