@@ -1,6 +1,7 @@
 # $HOME/.config/rust-dotfiles/config.toml
 [global]
-pager = "bat --paging=always --style=plain"
+# Arguments are passed directly to the pager; no shell is involved.
+pager = ["bat", "--paging=always", "--style=plain"]
 terminal = "/usr/bin/ghostty"
 
 [repo]
