@@ -111,6 +111,18 @@ impl CmdExecutor for LiveEnv {
         let mut builder = DirBuilder::new();
         builder.recursive(true).mode(0o700).create(path)
     }
+    fn create_private_temp_dir(
+        &self,
+        parent: &Path,
+        prefix: &str,
+    ) -> Result<std::path::PathBuf, std::io::Error> {
+        self.ensure_private_dir(parent)?;
+        let mut builder = TempFileBuilder::new();
+        builder
+            .prefix(prefix)
+            .permissions(Permissions::from_mode(0o700));
+        Ok(builder.tempdir_in(parent)?.keep())
+    }
     fn ensure_private_dir(&self, path: &Path) -> Result<(), std::io::Error> {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) => {

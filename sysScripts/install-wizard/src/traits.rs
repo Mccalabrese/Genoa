@@ -23,6 +23,11 @@ pub trait CmdExecutor {
     ) -> Result<(), std::io::Error>;
     fn create_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
     fn create_private_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
+    fn create_private_temp_dir(
+        &self,
+        parent: &std::path::Path,
+        prefix: &str,
+    ) -> Result<std::path::PathBuf, std::io::Error>;
     fn ensure_private_dir(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
     fn private_file_needs_repair(&self, path: &std::path::Path) -> Result<bool, std::io::Error>;
     fn remove_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error>;
