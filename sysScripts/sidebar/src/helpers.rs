@@ -490,34 +490,35 @@ fn cargo_bin_path(bin_name: &str) -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".cargo/bin").join(bin_name))
 }
 
-fn resolve_program(program: &str) -> String {
+fn resolve_program(program: &str) -> Option<PathBuf> {
     if program.contains('/') {
-        return program.to_string();
-    }
-
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(program);
-            if candidate.is_file() {
-                return candidate.to_string_lossy().to_string();
-            }
-        }
+        let path = PathBuf::from(program);
+        return is_executable(&path).then_some(path);
     }
 
     for dir in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
         let candidate = Path::new(dir).join(program);
-        if candidate.is_file() {
-            return candidate.to_string_lossy().to_string();
+        if is_executable(&candidate) {
+            return Some(candidate);
         }
     }
 
-    program.to_string()
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 // Shared command policy for external tools invoked by the sidebar.
 const CMD_TIMEOUT_MS: u64 = 5000;
 const CMD_RETRIES: usize = 2;
 const RETRY_BACKOFF_MS: u64 = 120;
+const TELEMETRY_FILE_NAME: &str = "sidebar-telemetry.log";
+const TELEMETRY_ROTATED_FILE_NAME: &str = "sidebar-telemetry.log.1";
+const TELEMETRY_MAX_BYTES: u64 = 64 * 1024;
+const TELEMETRY_DETAIL_MAX_BYTES: usize = 512;
 const GTKLOCK: &str = "/usr/bin/gtklock";
 const GTKLOCK_SUSPEND_COMMAND: &str = "/usr/bin/systemctl suspend";
 const LOCK_EXCLUSIVE: std::ffi::c_int = 2;
@@ -528,30 +529,91 @@ unsafe extern "C" {
     fn geteuid() -> u32;
 }
 
-fn telemetry_path() -> PathBuf {
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime).join("sidebar-telemetry.log");
-    }
-    PathBuf::from("/tmp/sidebar-telemetry.log")
+fn telemetry_path() -> Result<PathBuf, String> {
+    Ok(genoa_runtime_directory()?.join(TELEMETRY_FILE_NAME))
 }
 
 pub fn log_command_failure(kind: &str, program: &str, args: &[&str], detail: &str) {
-    let ts = Local::now().to_rfc3339();
-    let arg_str = if args.is_empty() {
-        "".to_string()
-    } else {
-        args.join(" ")
+    let Ok(path) = telemetry_path() else {
+        // Never fall back to /tmp: a missing per-user runtime directory means
+        // there is no safe place to preserve diagnostic data.
+        return;
     };
+    let program = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown");
+    let line = telemetry_line(kind, program, args.len(), detail);
+    let Ok(mut file) = open_telemetry_file(&path, line.len() as u64) else {
+        return;
+    };
+    let _ = file.write_all(line.as_bytes());
+}
 
-    let line = format!("{} | {} | {} {} | {}\n", ts, kind, program, arg_str, detail);
+fn telemetry_line(kind: &str, program: &str, argument_count: usize, detail: &str) -> String {
+    format!(
+        "{} | {} | {} | args={} | {}\n",
+        Local::now().to_rfc3339(),
+        telemetry_text(kind),
+        telemetry_text(program),
+        argument_count,
+        telemetry_text(detail),
+    )
+}
 
-    if let Ok(mut file) = OpenOptions::new()
+fn open_telemetry_file(path: &Path, next_entry_bytes: u64) -> Result<File, std::io::Error> {
+    rotate_telemetry_if_needed(path, next_entry_bytes)?;
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(telemetry_path())
-    {
-        let _ = file.write_all(line.as_bytes());
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { geteuid() } {
+        return Err(std::io::Error::other(
+            "telemetry file is not a private regular file",
+        ));
     }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+fn rotate_telemetry_if_needed(path: &Path, next_entry_bytes: u64) -> Result<(), std::io::Error> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(std::io::Error::other(
+            "telemetry path is not a regular file",
+        ));
+    }
+    if metadata.len().saturating_add(next_entry_bytes) > TELEMETRY_MAX_BYTES {
+        fs::rename(path, path.with_file_name(TELEMETRY_ROTATED_FILE_NAME))?;
+    }
+    Ok(())
+}
+
+fn telemetry_text(value: &str) -> String {
+    let mut output = String::new();
+    for character in value.chars() {
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > TELEMETRY_DETAIL_MAX_BYTES - 3 {
+            output.push('…');
+            break;
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn run_output_with_retry_with_timeout(
@@ -560,7 +622,16 @@ fn run_output_with_retry_with_timeout(
     timeout_ms: u64,
 ) -> Option<std::process::Output> {
     let timeout = StdDuration::from_millis(timeout_ms);
-    let resolved_program = resolve_program(program);
+    let Some(resolved_program) = resolve_program(program) else {
+        log_command_failure(
+            "missing_system_binary",
+            program,
+            args,
+            "not in trusted system paths",
+        );
+        return None;
+    };
+    let resolved_program_label = resolved_program.to_string_lossy();
 
     for attempt in 1..=(CMD_RETRIES + 1) {
         let mut child = match Command::new(&resolved_program)
@@ -573,7 +644,7 @@ fn run_output_with_retry_with_timeout(
             Err(e) => {
                 log_command_failure(
                     "spawn_failed",
-                    &resolved_program,
+                    &resolved_program_label,
                     args,
                     &format!("attempt={} error={}", attempt, e),
                 );
@@ -593,7 +664,7 @@ fn run_output_with_retry_with_timeout(
                     let stderr = String::from_utf8_lossy(&output.stderr).replace('\n', " ");
                     log_command_failure(
                         "non_zero_exit",
-                        &resolved_program,
+                        &resolved_program_label,
                         args,
                         &format!(
                             "attempt={} status={:?} stderr={}",
@@ -607,7 +678,7 @@ fn run_output_with_retry_with_timeout(
                 Err(e) => {
                     log_command_failure(
                         "wait_output_failed",
-                        &resolved_program,
+                        &resolved_program_label,
                         args,
                         &format!("attempt={} error={}", attempt, e),
                     );
@@ -618,7 +689,7 @@ fn run_output_with_retry_with_timeout(
                 let _ = child.wait();
                 log_command_failure(
                     "timeout",
-                    &resolved_program,
+                    &resolved_program_label,
                     args,
                     &format!("attempt={} timeout_ms={}", attempt, timeout_ms),
                 );
@@ -628,7 +699,7 @@ fn run_output_with_retry_with_timeout(
                 let _ = child.wait();
                 log_command_failure(
                     "wait_timeout_failed",
-                    &resolved_program,
+                    &resolved_program_label,
                     args,
                     &format!("attempt={} error={}", attempt, e),
                 );
@@ -648,9 +719,22 @@ fn run_output_with_retry(program: &str, args: &[&str]) -> Option<std::process::O
 }
 
 pub fn run_command(program: &str, args: &[&str]) {
-    let resolved = resolve_program(program);
+    let Some(resolved) = resolve_program(program) else {
+        log_command_failure(
+            "missing_system_binary",
+            program,
+            args,
+            "not in trusted system paths",
+        );
+        return;
+    };
     if let Err(e) = Command::new(&resolved).args(args).spawn() {
-        log_command_failure("spawn_failed", &resolved, args, &e.to_string());
+        log_command_failure(
+            "spawn_failed",
+            &resolved.display().to_string(),
+            args,
+            &e.to_string(),
+        );
     }
 }
 
@@ -705,15 +789,24 @@ fn open_runtime_lock(lock_path: &Path) -> Result<File, String> {
 }
 
 fn gtklock_runtime_lock_path() -> Result<PathBuf, String> {
+    Ok(genoa_runtime_directory()?.join("gtklock.lock"))
+}
+
+fn genoa_runtime_directory() -> Result<PathBuf, String> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| {
             "XDG_RUNTIME_DIR is unavailable; refusing to use /tmp for lock state".to_string()
         })?;
-    gtklock_runtime_lock_path_in(&runtime)
+    genoa_runtime_directory_in(&runtime)
 }
 
+#[cfg(test)]
 fn gtklock_runtime_lock_path_in(runtime: &Path) -> Result<PathBuf, String> {
+    Ok(genoa_runtime_directory_in(runtime)?.join("gtklock.lock"))
+}
+
+fn genoa_runtime_directory_in(runtime: &Path) -> Result<PathBuf, String> {
     ensure_private_runtime_directory(runtime)?;
 
     let genoa_runtime = runtime.join("genoa");
@@ -730,7 +823,7 @@ fn gtklock_runtime_lock_path_in(runtime: &Path) -> Result<PathBuf, String> {
         }
     }
     ensure_private_runtime_directory(&genoa_runtime)?;
-    Ok(genoa_runtime.join("gtklock.lock"))
+    Ok(genoa_runtime)
 }
 
 fn ensure_private_runtime_directory(path: &Path) -> Result<(), String> {
@@ -792,7 +885,17 @@ pub fn run_in_ghostty(title: &str, bin_name: &str, args: &[&str]) {
         return;
     };
 
-    let mut cmd = Command::new("ghostty");
+    let Some(ghostty) = resolve_program("ghostty") else {
+        log_command_failure(
+            "missing_system_binary",
+            "ghostty",
+            args,
+            "not in trusted system paths",
+        );
+        return;
+    };
+
+    let mut cmd = Command::new(ghostty);
     cmd.arg(format!("--title={}", title)).arg("-e").arg(path);
     for arg in args {
         cmd.arg(arg);
@@ -909,6 +1012,74 @@ mod tests {
         assert!(gtklock_runtime_lock_path_in(&runtime).is_err());
 
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[test]
+    fn telemetry_omits_arguments_and_bounds_error_details() {
+        let secret = "api-token-that-must-not-be-recorded";
+        let line = telemetry_line("command_failed", "systemctl", 2, &"x".repeat(2048));
+
+        assert!(line.contains("args=2"));
+        assert!(!line.contains(secret));
+        assert!(line.len() < 700);
+        assert!(telemetry_text("first\nsecond\0third").contains("first second third"));
+    }
+
+    #[test]
+    fn telemetry_rotation_and_opening_remain_private() {
+        let unique = format!(
+            "genoa-sidebar-telemetry-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let runtime = std::env::temp_dir().join(unique);
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let telemetry_path = genoa_runtime_directory_in(&runtime)
+            .unwrap()
+            .join(TELEMETRY_FILE_NAME);
+        let telemetry_file = File::create(&telemetry_path).unwrap();
+        telemetry_file.set_len(TELEMETRY_MAX_BYTES).unwrap();
+
+        rotate_telemetry_if_needed(&telemetry_path, 1).unwrap();
+        assert!(!telemetry_path.exists());
+        assert!(
+            telemetry_path
+                .with_file_name(TELEMETRY_ROTATED_FILE_NAME)
+                .exists()
+        );
+
+        let new_file = open_telemetry_file(&telemetry_path, 1).unwrap();
+        assert_eq!(new_file.metadata().unwrap().permissions().mode() & 0o077, 0);
+
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[test]
+    fn telemetry_refuses_symlinks() {
+        let unique = format!(
+            "genoa-sidebar-telemetry-symlink-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let runtime = std::env::temp_dir().join(unique);
+        fs::create_dir(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let telemetry_path = genoa_runtime_directory_in(&runtime)
+            .unwrap()
+            .join(TELEMETRY_FILE_NAME);
+        std::os::unix::fs::symlink("/dev/null", &telemetry_path).unwrap();
+        assert!(open_telemetry_file(&telemetry_path, 1).is_err());
+
         fs::remove_dir_all(runtime).unwrap();
     }
 }

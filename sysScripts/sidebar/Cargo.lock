@@ -845,6 +845,7 @@ dependencies = [
  "glib",
  "gtk4",
  "gtk4-layer-shell",
+ "libc",
  "serde_json",
  "wait-timeout",
 ]
