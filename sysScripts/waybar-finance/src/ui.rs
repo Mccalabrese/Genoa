@@ -1,5 +1,5 @@
 use crate::app::{App, InputMode, MarketStatus, StockDetails};
-use crate::network::{FinnhubQuote, YahooSearchResult};
+use crate::network::{MarketQuote, YahooSearchResult};
 use anyhow::Result;
 use chrono::DateTime;
 use crossterm::{
@@ -18,7 +18,7 @@ use std::io::stdout;
 
 /// Internal events for the application event loop.
 pub enum AppEvent {
-    QuoteFetched(String, Result<FinnhubQuote>),
+    QuoteFetched(String, Result<MarketQuote>),
     HistoryFetched(String, Result<Vec<(f64, f64)>>),
     DetailsFetched(String, Result<StockDetails>),
     Input(crossterm::event::Event),
@@ -240,17 +240,6 @@ async fn handle_keys(
             KeyCode::Down => app.next_search(),
             _ => {}
         },
-        InputMode::KeyEntry => {
-            if code == KeyCode::Enter && !app.input.is_empty() {
-                app.api_key = Some(app.input.trim().to_string());
-                app.input_mode = InputMode::Normal;
-                let _ = tx.send(AppEvent::SaveConfig).await;
-            } else if let KeyCode::Char(c) = code {
-                app.input.push(c);
-            } else if code == KeyCode::Backspace {
-                app.input.pop();
-            }
-        }
     }
 }
 /// TUI layout helper: Create a centered rectangle with given percentage width and height
@@ -542,17 +531,6 @@ pub fn ui(frame: &mut ratatui::Frame, app: &mut App) {
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
         frame.render_stateful_widget(results_list, chunks[1], &mut app.search_state);
     }
-    if app.input_mode == InputMode::KeyEntry {
-        let area = centered_rect(60, 20, frame.area());
-        // 1. Clear the space
-        frame.render_widget(Clear, area);
-        //draw input box
-        let input_block = Paragraph::new(app.input.as_str())
-            .block(Block::default()
-                .borders(Borders::ALL)
-                .title("Enter Finnhub API Key. This is an app requirement. Visit finnhub.io/register to obtain a key. (Press Enter to Save)"));
-        frame.render_widget(input_block, area);
-    }
     // Split the Footer Area (Left for Status, Right for Hints)
     let footer_chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -570,7 +548,6 @@ pub fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let hints_text = match app.input_mode {
         InputMode::Normal => "q:Quit  a:Add  d:Del  s:toggle sidebar view  ↓/↑:Nav  Enter:Select",
         InputMode::Editing => "Enter:Confirm  Esc:Cancel",
-        InputMode::KeyEntry => "Enter:Save  Esc:Quit",
     };
 
     let hints = Paragraph::new(hints_text)

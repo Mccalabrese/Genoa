@@ -29,13 +29,11 @@ pub struct StockStruct {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ParsedConfig {
-    api_key: String,
     stocks: Option<StockConfig>,
 }
 
 #[derive(Deserialize)]
 struct FinanceConfig {
-    api_key: String,
     stocks: Option<StockConfig>,
 }
 
@@ -87,7 +85,6 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
                 }
             };
             return Ok(Config {
-                api_key: Some(parsed.api_key),
                 stocks: unified_stocks,
             });
         }
@@ -128,7 +125,6 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
             }
         };
         return Ok(Config {
-            api_key: Some(finance.api_key),
             stocks: unified_stocks,
         });
     }
@@ -157,8 +153,7 @@ fn create_private_config_dir(path: &Path) -> Result<()> {
         .context("Failed to create private config directory")
 }
 
-/// Writes a configuration containing the Finnhub API key without an insecure
-/// creation window, then atomically replaces the previous complete file.
+/// Atomically writes the local watchlist without an insecure creation window.
 fn write_private_config(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()

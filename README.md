@@ -47,7 +47,7 @@ The whole point is efficiency and performance. This setup idles at **4.8W** on m
 > **The Rust Installer is currently in BETA.**
 > While I use this daily, it performs major system changes. If you encounter errors, please open an issue with your hardware details.
 
-### 1. Preparation: Get Your API Keys
+### 1. Preparation: Install Arch Linux
 
 The first step is to install Arch Linux. You can get the iso in the terminal of a working computer by running:
 
@@ -60,10 +60,6 @@ pacman-key -v archlinux-x86_64.iso.sig
 After this, you will need to install the iso to a bootable USB drive and install Arch on your laptop. There are many guides online for this, but I recommend using [Rufus](https://rufus.ie/) on Windows or `dd` on Linux/Mac.
 
 Once you have a basic Arch install with an internet connection, you can run the installer. It will handle all the package installation and configuration for you.
-
-The installer will ask for this API key. It is much easier to generate it before you start.
-
-**Stocks (Finnhub):** [Sign Up Free](https://finnhub.io/register)
 
 ### 2. Run the Installer
 
@@ -185,10 +181,9 @@ All the helper scripts in this repo have been rewritten in Rust for maximum perf
   <img src="screenshots/rofi-radio.png" width="85%" alt="rofi radio app"/>
   </p>
 
-- **`waybar-finance`**: A lightweight TUI market watch list application with charts, and security details. Designed to be run in a terminal multiplexer like tmux or ghostty. This will request that you create and enter a Finnhub.io API key on first run. The app will display quoting of your watchlist items as a tooltip on hover over its icon in Waybar.
+- **`waybar-finance`**: A lightweight, keyless market watch list TUI with charts and company details, powered by Yahoo Finance. Genoa shows your selected quotes in Sidebar; launch the TUI in Ghostty to manage the watchlist.
 
 <p align="center">
-  <img src="screenshots/waybar-finance-tooltip.png" width="65%" alt="waybar finance tooltip"/>
   <img src="screenshots/waybar-finance-tui.png" width="65%" alt="finance TUI" />
   </p>
 

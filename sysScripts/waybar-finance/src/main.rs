@@ -1,7 +1,7 @@
 //! Application entry point.
 //!
 //! Handles command-line argument parsing, configuration loading, and
-//! dispatching the application to either "Waybar Mode" (one-shot JSON output)
+//! dispatching the application to either widget mode (one-shot JSON output)
 //! or "TUI Mode" (interactive terminal UI).
 
 mod app;
@@ -13,7 +13,7 @@ use anyhow::Result;
 use app::App;
 use clap::Parser;
 use config::{get_config_path, load_config};
-use network::run_waybar_mode;
+use network::run_widget_mode;
 use ratatui::style::Color;
 use reqwest::Client;
 use ui::run_tui;
@@ -23,7 +23,7 @@ use ui::run_tui;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Launch the interactive Terminal User Interface (TUI).
-    /// If omitted, outputs JSON for Waybar.
+    /// If omitted, outputs JSON for Genoa Sidebar and compatible status bars.
     #[arg(short, long)]
     tui: bool,
 }
@@ -45,16 +45,15 @@ async fn main() -> Result<()> {
     // needed for subsequent API calls to the v7/v10 endpoints.
     let _ = client.get("https://finance.yahoo.com").send().await;
     let args = Args::parse();
-    // Load user configuration (API keys, watchlist)
+    // Load the user watchlist once for either interface.
     let config_path = get_config_path()?;
     let config = load_config(&config_path)?;
-    let mut app = App::new(config, String::from("Ready"), Color::Gray, None);
-    // Dispatch based on mode
     if args.tui {
+        let mut app = App::new(config, String::from("Ready"), Color::Gray, None);
         println!("Initializing TUI mode...");
         run_tui(&client, &mut app).await?
     } else {
-        run_waybar_mode(&client).await?;
+        run_widget_mode(&config, &client).await?;
     }
     Ok(())
 }

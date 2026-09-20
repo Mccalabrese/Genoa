@@ -116,5 +116,4 @@ rofi_config = "~/.config/rofi/config-radio.rasi"
 message = "Radio Menu"
 
 [waybar_finance]
-api_key = "YOUR_FINNHUB_KEY_HERE"
 stocks = ["SPY", "QQQ", "NVDA"]

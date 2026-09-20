@@ -1,7 +1,6 @@
 use crate::helpers::{create_symlink, expected_binary_names};
 use crate::traits::CmdExecutor;
 use colored::*;
-use inquire::Text;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,6 +8,7 @@ use std::path::{Path, PathBuf};
 const GEOCLUE_CONF_PATH: &str = "/etc/geoclue/geoclue.conf";
 const BEACONDB_GEOLOCATE_URL: &str = "https://api.beacondb.net/v1/geolocate";
 const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
+const CONFIG_TEMPLATE: &str = include_str!("../../../.config/rust-dotfiles/config.toml.template");
 
 const RETIRED_TOOL_SOURCES: &[&str] = &[
     "sysScripts/sidebar/build.rs",
@@ -109,8 +109,7 @@ pub fn setup_waybar_configs(sys: &impl CmdExecutor, home: &Path) {
         }
     }
 }
-/// Interactive wizard to generate the local `config.toml`.
-/// Validates input to prevent injection attacks before writing to system files (like /etc/geoclue).
+/// Generates the local `config.toml` and configures location services.
 pub fn setup_secrets_and_geoclue(
     sys: &impl CmdExecutor,
     home: &Path,
@@ -126,31 +125,32 @@ pub fn setup_secrets_and_geoclue(
     sys.ensure_private_dir(&config_dir)?;
 
     if !sys.path_exists(&config_path) {
-        println!(
-            "   🧙 We need to generate your central config.toml and configure Location Services."
-        );
-        let finnhub_api = Text::new(
-            "Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):",
-        )
-        .prompt()
-        .unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
-        let template = render_config_template(&finnhub_api);
-        sys.write_private_string_to_file(&config_path, &template)?;
+        println!("   🧙 Generating your central config.toml and configuring Location Services.");
+        sys.write_private_string_to_file(&config_path, CONFIG_TEMPLATE)?;
         println!("  ✅ Config generated securely at {:?}", config_path);
     } else {
         let needs_repair = sys.private_file_needs_repair(&config_path)?;
         let contents = sys.read_file_to_string(&config_path)?;
-        if contents.contains("YOUR_FINNHUB_KEY") {
-            let finnhub_api = Text::new("Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):").prompt().unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
-            if let Some(updated) = update_config_placeholders(&contents, &finnhub_api) {
-                sys.write_private_string_to_file(&config_path, &updated)?;
+        match contents.parse::<toml_edit::DocumentMut>() {
+            Ok(mut doc) => {
+                if migrate_config_document(&mut doc) {
+                    sys.write_private_string_to_file(&config_path, &doc.to_string())?;
+                } else if needs_repair {
+                    sys.write_private_string_to_file(&config_path, &contents)?;
+                }
             }
-        } else if needs_repair {
-            sys.write_private_string_to_file(&config_path, &contents)?;
+            Err(error) => {
+                eprintln!(
+                    "   ⚠️  config.toml is not valid TOML; skipping config migration: {error}"
+                );
+                if needs_repair {
+                    sys.write_private_string_to_file(&config_path, &contents)?;
+                }
+            }
         }
     }
 
-    repair_existing_private_config(sys, &home.join(".config/waybar-finance/config.json"))?;
+    migrate_local_finance_config(sys, &home.join(".config/waybar-finance/config.json"))?;
 
     configure_geoclue_for_beacondb(sys)?;
 
@@ -165,9 +165,9 @@ pub fn setup_secrets_and_geoclue(
     Ok(())
 }
 
-/// Rewrites an existing Genoa secret config only when its permissions are too
-/// broad, preserving its exact content while replacing it with a 0600 file.
-fn repair_existing_private_config(
+/// Removes the retired Finnhub key from the app-local watchlist while retaining
+/// the user's stocks, then repairs private file permissions when needed.
+fn migrate_local_finance_config(
     sys: &impl CmdExecutor,
     config_path: &Path,
 ) -> Result<(), std::io::Error> {
@@ -176,49 +176,51 @@ fn repair_existing_private_config(
     }
     let parent = config_path
         .parent()
-        .ok_or_else(|| std::io::Error::other("Secret config path has no parent directory"))?;
+        .ok_or_else(|| std::io::Error::other("Finance config path has no parent directory"))?;
     sys.ensure_private_dir(parent)?;
-    if sys.private_file_needs_repair(config_path)? {
-        let content = sys.read_file_to_string(config_path)?;
+
+    let needs_repair = sys.private_file_needs_repair(config_path)?;
+    let content = sys.read_file_to_string(config_path)?;
+    let migrated = serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|mut config| {
+            config
+                .as_object_mut()
+                .and_then(|object| object.remove("api_key"))?;
+            serde_json::to_string_pretty(&config).ok()
+        });
+
+    if let Some(content) = migrated {
+        sys.write_private_string_to_file(config_path, &content)?;
+    } else if needs_repair {
         sys.write_private_string_to_file(config_path, &content)?;
     }
     Ok(())
 }
 
-fn render_config_template(finnhub_api: &str) -> String {
-    include_str!("../../../.config/rust-dotfiles/config.toml.template")
-        .replace("YOUR_FINNHUB_KEY_HERE", finnhub_api)
-}
-
-fn update_config_placeholders(contents: &str, finnhub_api: &str) -> Option<String> {
+/// Applies configuration migrations to an already parsed document.
+fn migrate_config_document(doc: &mut toml_edit::DocumentMut) -> bool {
     let mut modified = false;
-    let legacy_weather_block = "# -------------------------------\n# [waybar_weather]\n# Settings for our weather module\n# -------------------------------\n[waybar_weather]\nowm_api_key = \"YOUR_SECRET_OWM_KEY_HERE\"\n";
-    let mut contents = contents.to_string();
-    if contents.contains(legacy_weather_block) {
-        contents = contents.replace(legacy_weather_block, "");
+
+    let has_legacy_weather_key = doc
+        .get("waybar_weather")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|table| table.get("owm_api_key"))
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(|key| key.contains("YOUR_SECRET_OWM_KEY"));
+    if has_legacy_weather_key {
+        doc.remove("waybar_weather");
         modified = true;
     }
 
-    let mut lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
-    for line in &mut lines {
-        if line.contains("owm_api_key") || line.contains("YOUR_SECRET_OWM_KEY") {
-            *line = String::new();
-            modified = true;
-        } else if line.contains("YOUR_FINNHUB_KEY") {
-            *line = line.replace("YOUR_FINNHUB_KEY_HERE", finnhub_api);
-            modified = true;
-        }
-    }
-    if modified {
-        let updated = lines
-            .into_iter()
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(updated + "\n")
-    } else {
-        None
-    }
+    let removed_legacy_finnhub_key = doc
+        .get_mut("waybar_finance")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .and_then(|table| table.remove("api_key"))
+        .is_some();
+    modified |= removed_legacy_finnhub_key;
+
+    modified
 }
 
 fn configure_geoclue_for_beacondb(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
@@ -721,10 +723,43 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn test_update_config_placeholders_replaces_keys() {
-        let original = "finnhub = \"YOUR_FINNHUB_KEY_HERE\"\n";
-        let updated = update_config_placeholders(original, "fin-key").expect("no update");
-        assert!(updated.contains("fin-key"));
+    fn config_document_migration_removes_legacy_finnhub_key_but_preserves_stocks() {
+        let original = r#"[waybar_finance]
+api_key = "existing-key"
+stocks = ["SPY", "QQQ"]
+
+[other]
+setting = "preserved"
+"#;
+        let mut document = original.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(migrate_config_document(&mut document));
+
+        let updated = document.to_string();
+        assert!(!updated.contains("api_key"));
+        assert!(updated.contains("stocks = [\"SPY\", \"QQQ\"]"));
+        assert!(updated.contains("[other]"));
+        assert!(updated.contains("setting = \"preserved\""));
+    }
+
+    #[test]
+    fn local_finance_config_migration_removes_the_retired_api_key() {
+        let env = MockEnv::default();
+        let config_path = Path::new("/home/student/.config/waybar-finance/config.json");
+        env.mock_files.borrow_mut().insert(
+            config_path.display().to_string(),
+            r#"{
+  "api_key": "existing-key",
+  "stocks": ["SPY", "QQQ"]
+}"#
+            .to_string(),
+        );
+
+        migrate_local_finance_config(&env, config_path).unwrap();
+
+        let updated = env.read_file_to_string(config_path).unwrap();
+        assert!(!updated.contains("api_key"));
+        assert!(updated.contains("SPY"));
+        assert!(updated.contains("QQQ"));
     }
 
     #[test]
@@ -787,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_config_placeholders_removes_legacy_weather_section() {
+    fn legacy_weather_and_finnhub_key_migrate_together() {
         let original = r#"# -------------------------------
 # [waybar_weather]
 # Settings for our weather module
@@ -796,12 +831,28 @@ mod tests {
 owm_api_key = "YOUR_SECRET_OWM_KEY_HERE"
 
 [waybar_finance]
-api_key = "YOUR_FINNHUB_KEY_HERE"
+api_key = "already-configured"
 "#;
-        let updated = update_config_placeholders(original, "fin-key").expect("no update");
+        let mut document = original.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(migrate_config_document(&mut document));
+
+        let updated = document.to_string();
         assert!(!updated.contains("waybar_weather"));
         assert!(!updated.contains("YOUR_SECRET_OWM_KEY"));
-        assert!(updated.contains("fin-key"));
+        assert!(!updated.contains("api_key"));
+    }
+
+    #[test]
+    fn bundled_config_template_has_no_finnhub_placeholder() {
+        let document = CONFIG_TEMPLATE.parse::<toml_edit::DocumentMut>().unwrap();
+
+        assert!(
+            document
+                .get("waybar_finance")
+                .and_then(toml_edit::Item::as_table_like)
+                .and_then(|table| table.get("api_key"))
+                .is_none()
+        );
     }
 
     #[test]

@@ -1,19 +1,15 @@
+use crate::app::Config;
 use crate::app::{MarketStatus, StockDetails};
-use crate::config::{get_config_path, load_config};
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
-use yahoo_finance_api::YahooConnector;
 
-#[derive(Debug, Deserialize)]
-pub struct FinnhubQuote {
-    #[serde(rename = "c")]
+#[derive(Debug)]
+pub struct MarketQuote {
     pub price: f64,
-
-    #[serde(rename = "dp")]
     pub percent: f64,
 }
 
@@ -84,6 +80,47 @@ struct YahooQuote {
 
     symbol: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct YahooChartResponse {
+    chart: YahooChart,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChart {
+    result: Option<Vec<YahooChartResult>>,
+    error: Option<YahooChartError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChartError {
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChartResult {
+    meta: YahooChartMeta,
+    timestamp: Option<Vec<i64>>,
+    indicators: YahooChartIndicators,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct YahooChartMeta {
+    regular_market_price: Option<f64>,
+    chart_previous_close: Option<f64>,
+    previous_close: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChartIndicators {
+    quote: Vec<YahooChartQuote>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChartQuote {
+    close: Vec<Option<f64>>,
+}
 // Global cache for the yahoo crumb to avoid re-fetching each request.
 static YAHOO_CRUMB: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
@@ -151,11 +188,7 @@ pub async fn search_ticker(
 
 /// Fetches detailed metrics (P/E, Yield, etc.) from Yahoo's v7 endpoint.
 /// Handles the differences between Stocks (using Dividend Yield) and ETFs (using 12-Mo Yield).
-pub async fn fetch_details(
-    client: &reqwest::Client,
-    symbol: &str,
-    _key: &str,
-) -> Result<StockDetails> {
+pub async fn fetch_details(client: &reqwest::Client, symbol: &str) -> Result<StockDetails> {
     let crumb = get_yahoo_crumb(client).await?;
 
     let url = format!(
@@ -207,80 +240,63 @@ pub async fn fetch_details(
         year_return: perf,
     })
 }
-/// Fetches real-time stock quote from Finnhub API.
-pub async fn fetch_quote(
-    client: &reqwest::Client,
-    symbol: &str,
-    key: &str,
-) -> Result<FinnhubQuote> {
-    let url = format!(
-        "https://finnhub.io/api/v1/quote?symbol={}&token={}",
-        symbol, key
-    );
-    let resp = client.get(&url).send().await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Failed to fetch quote: HTTP {}",
-            resp.status()
-        ));
-    }
-    let quote: FinnhubQuote = resp.json().await?;
-    Ok(quote)
+/// Fetches a current quote from Yahoo Finance without an API key.
+pub async fn fetch_quote(client: &reqwest::Client, symbol: &str) -> Result<MarketQuote> {
+    let chart = fetch_yahoo_chart(
+        client,
+        symbol,
+        &[
+            ("interval", "1m"),
+            ("range", "1d"),
+            ("events", "div|split|capitalGains"),
+        ],
+    )
+    .await?;
+    let metadata = chart.meta;
+
+    let price = metadata
+        .regular_market_price
+        .ok_or_else(|| anyhow::anyhow!("Yahoo Finance returned no current price for {symbol}"))?;
+    let previous_close = metadata
+        .previous_close
+        .or(metadata.chart_previous_close)
+        .ok_or_else(|| anyhow::anyhow!("Yahoo Finance returned no previous close for {symbol}"))?;
+
+    market_quote_from_prices(price, previous_close)
 }
 /// Fetches historical stock data from Yahoo Finance API.
 /// The data points are returned as a vector of (timestamp, close price) tuples.
 /// Used by the charting component.
-pub async fn fetch_history(
-    _client: &reqwest::Client,
-    symbol: &str,
-    _key: &str,
-) -> Result<Vec<(f64, f64)>> {
-    let provider = YahooConnector::new()?;
+pub async fn fetch_history(client: &reqwest::Client, symbol: &str) -> Result<Vec<(f64, f64)>> {
     let end = OffsetDateTime::now_utc();
     let start = end - time::Duration::days(365);
-    let response = provider
-        .get_quote_history(symbol, start, end)
-        .await
-        .context("Yaho API Error")?;
-    let quotes = response.quotes().context("No quotes in response")?;
-    let points: Vec<(f64, f64)> = quotes
-        .iter()
-        .map(|q| (q.timestamp as f64, q.close))
-        .collect();
-    if points.is_empty() {
-        return Err(anyhow::anyhow!("History data is empty"));
-    }
-    Ok(points)
+    let start_timestamp = start.unix_timestamp().to_string();
+    let end_timestamp = end.unix_timestamp().to_string();
+    let chart = fetch_yahoo_chart(
+        client,
+        symbol,
+        &[
+            ("period1", start_timestamp.as_str()),
+            ("period2", end_timestamp.as_str()),
+            ("interval", "1d"),
+            ("events", "div|split|capitalGains"),
+        ],
+    )
+    .await?;
+    history_points_from_chart(chart)
 }
-/// Uses the Finnhub API to fetch real-time stock quotes for all symbols
-/// Outputs the data in Waybar-compatible JSON format.
-pub async fn run_waybar_mode(client: &reqwest::Client) -> Result<()> {
-    let config_path = get_config_path()?;
-    let config = load_config(&config_path)?;
-    let api_key = match &config.api_key {
-        Some(k) => k,
-        None => {
-            // OUTPUT A CLICKABLE JSON SO USER KNOWS TO SETUP
-            let output = WaybarOutput {
-                text: "⚠️ Finance Setup".to_string(),
-                tooltip: "Click to launch setup and enter API Key".to_string(),
-                class: "warning".to_string(),
-            };
-            println!("{}", serde_json::to_string(&output)?);
-            return Ok(());
-        }
-    };
-
+/// Fetches the Sidebar-visible quotes and outputs Waybar-compatible JSON.
+/// The compatibility format lets existing external status-bar integrations
+/// continue working while Genoa displays it in Sidebar.
+pub async fn run_widget_mode(config: &Config, client: &reqwest::Client) -> Result<()> {
     let futures: Vec<_> = config
         .stocks
         .iter()
         .filter(|s| s.sidebar)
         .map(|s| {
-            let client = client.clone();
-            let key = api_key.clone();
             let sym = s.symbol.clone();
             async move {
-                let q = fetch_quote(&client, &sym, &key).await;
+                let q = fetch_quote(client, &sym).await;
                 (sym, q)
             }
         })
@@ -320,6 +336,90 @@ pub async fn run_waybar_mode(client: &reqwest::Client) -> Result<()> {
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
 }
+
+async fn fetch_yahoo_chart(
+    client: &reqwest::Client,
+    symbol: &str,
+    query: &[(&str, &str)],
+) -> Result<YahooChartResult> {
+    let url = yahoo_chart_url(symbol, query)?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("Yahoo Finance could not load data for {symbol}"))?
+        .error_for_status()
+        .with_context(|| format!("Yahoo Finance rejected the request for {symbol}"))?;
+    let response: YahooChartResponse = response
+        .json()
+        .await
+        .with_context(|| format!("Yahoo Finance returned invalid data for {symbol}"))?;
+
+    response
+        .chart
+        .result
+        .and_then(|mut results| results.pop())
+        .ok_or_else(|| {
+            let detail = response
+                .chart
+                .error
+                .and_then(|error| error.description)
+                .unwrap_or_else(|| "no chart data returned".to_string());
+            anyhow::anyhow!("Yahoo Finance could not load {symbol}: {detail}")
+        })
+}
+
+fn yahoo_chart_url(symbol: &str, query: &[(&str, &str)]) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse("https://query1.finance.yahoo.com/v8/finance/chart/")
+        .expect("Yahoo Finance chart base URL is valid");
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("Yahoo Finance chart URL cannot accept a ticker path"))?
+        .pop_if_empty()
+        .push(symbol);
+    {
+        let mut query_pairs = url.query_pairs_mut();
+        query_pairs.append_pair("symbol", symbol);
+        for (key, value) in query {
+            query_pairs.append_pair(key, value);
+        }
+    }
+    Ok(url)
+}
+
+fn market_quote_from_prices(price: f64, previous_close: f64) -> Result<MarketQuote> {
+    if !price.is_finite() || !previous_close.is_finite() || previous_close == 0.0 {
+        anyhow::bail!("Yahoo Finance returned invalid price data");
+    }
+
+    Ok(MarketQuote {
+        price,
+        percent: ((price - previous_close) / previous_close) * 100.0,
+    })
+}
+
+fn history_points_from_chart(chart: YahooChartResult) -> Result<Vec<(f64, f64)>> {
+    let timestamps = chart
+        .timestamp
+        .context("Yahoo Finance returned no timestamps")?;
+    let closes = chart
+        .indicators
+        .quote
+        .first()
+        .context("Yahoo Finance returned no quote data")?
+        .close
+        .iter();
+    let points: Vec<(f64, f64)> = timestamps
+        .into_iter()
+        .zip(closes)
+        .filter_map(|(timestamp, close)| close.map(|close| (timestamp as f64, close)))
+        .collect();
+    if points.is_empty() {
+        return Err(anyhow::anyhow!("History data is empty"));
+    }
+    Ok(points)
+}
+
 /// Fetches market status including yields for 10Y, 5Y, and 3M Treasuries from Yahoo Finance.
 /// Used for displaying yield data and yield curve in app's top banner.
 pub async fn fetch_market_status(client: &reqwest::Client) -> Result<MarketStatus> {
@@ -362,4 +462,55 @@ pub async fn fetch_market_status(client: &reqwest::Client) -> Result<MarketStatu
         yield_5y: y5,
         yield_3m: y3m,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        YahooChartResponse, history_points_from_chart, market_quote_from_prices, yahoo_chart_url,
+    };
+
+    #[test]
+    fn current_quote_uses_the_previous_close_for_daily_change() {
+        let quote = market_quote_from_prices(110.0, 100.0).unwrap();
+
+        assert_eq!(quote.price, 110.0);
+        assert_eq!(quote.percent, 10.0);
+    }
+
+    #[test]
+    fn current_quote_rejects_an_invalid_previous_close() {
+        assert!(market_quote_from_prices(110.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn chart_history_ignores_missing_close_values() {
+        let response: YahooChartResponse = serde_json::from_str(
+            r#"{
+                "chart": {
+                    "result": [{
+                        "meta": {},
+                        "timestamp": [100, 200, 300],
+                        "indicators": {"quote": [{"close": [10.0, null, 12.5]}]}
+                    }],
+                    "error": null
+                }
+            }"#,
+        )
+        .unwrap();
+        let chart = response.chart.result.unwrap().into_iter().next().unwrap();
+
+        assert_eq!(
+            history_points_from_chart(chart).unwrap(),
+            vec![(100.0, 10.0), (300.0, 12.5)]
+        );
+    }
+
+    #[test]
+    fn chart_url_has_one_separator_before_the_ticker() {
+        let url = yahoo_chart_url("SPY", &[("range", "1d")]).unwrap();
+
+        assert_eq!(url.path(), "/v8/finance/chart/SPY");
+        assert_eq!(url.query(), Some("symbol=SPY&range=1d"));
+    }
 }

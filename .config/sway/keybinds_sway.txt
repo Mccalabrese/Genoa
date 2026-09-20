@@ -13,7 +13,7 @@
 * $mod + Alt + C - Gnome Calculator
 * $mod + Alt + E - Emoji Selector
 * $mod + Alt + R - Rofi Internet Radio
-* $mod + Alt + F - Waybar Finance TUI App
+* $mod + Alt + F - Finance TUI
 
 ## ⚙️ System & Session
 * $mod + Q       - Close Active Window

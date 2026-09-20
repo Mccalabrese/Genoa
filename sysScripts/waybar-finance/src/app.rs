@@ -4,22 +4,19 @@ use ratatui::widgets::ListState;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
-use crate::app::InputMode::Normal;
 use crate::config::StockStruct;
-use crate::network::{FinnhubQuote, YahooSearchResult};
+use crate::network::{MarketQuote, YahooSearchResult};
 
 /// Defines the input state of the TUI.
 /// We use a state machine approach to change keybindings based on context.
 #[derive(Debug, PartialEq)]
 pub enum InputMode {
-    Normal,   //Navigation and viewing
-    Editing,  // Typing in the search bar
-    KeyEntry, // Force-prompt for API key on first run
+    Normal,  // Navigation and viewing
+    Editing, // Typing in the search bar
 }
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
     pub stocks: Vec<StockStruct>,
-    pub api_key: Option<String>,
 }
 // Default configuration for new users
 impl Default for Config {
@@ -39,7 +36,6 @@ impl Default for Config {
                     sidebar: true,
                 },
             ],
-            api_key: None,
         }
     }
 }
@@ -72,10 +68,8 @@ pub struct App {
     pub stocks: Vec<StockStruct>,
     pub should_quit: bool,
     pub state: ListState, // tracks the selected item in the stock list
-    pub api_key: Option<String>,
-
     // Cached Data
-    pub current_quote: Option<FinnhubQuote>,
+    pub current_quote: Option<MarketQuote>,
     pub stock_history: Option<Vec<(f64, f64)>>,
     pub details: Option<StockDetails>,
     pub search_results: Vec<YahooSearchResult>,
@@ -100,26 +94,15 @@ impl App {
     ) -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
-        // Detect if this is a first run (missing API key) and force KeyEntry mode.
-        let (input_mode, msg, color) = if config.api_key.is_some() {
-            (Normal, message, message_color)
-        } else {
-            (
-                InputMode::KeyEntry,
-                "Welcome! Please enter your Finnhub API Key.".to_string(),
-                Color::Yellow,
-            )
-        };
         Self {
             stocks: config.stocks,
             should_quit: false,
             state,
-            api_key: config.api_key,
             current_quote: None,
             input: String::new(),
-            input_mode,
-            message: msg,
-            message_color: color,
+            input_mode: InputMode::Normal,
+            message,
+            message_color,
             stock_history,
             details: None,
             search_results: vec![],
@@ -154,7 +137,6 @@ impl App {
     pub fn to_config(&self) -> Config {
         Config {
             stocks: self.stocks.clone(),
-            api_key: self.api_key.clone(),
         }
     }
 
@@ -245,19 +227,18 @@ impl App {
     pub fn trigger_fetch(&self, symbol: String, tx: &Sender<AppEvent>, client: &reqwest::Client) {
         let client = client.clone();
         let tx = tx.clone();
-        let api_key = self.api_key.clone().unwrap_or_default();
         let symbol = symbol.clone();
 
         tokio::spawn(async move {
-            let q_res = crate::network::fetch_quote(&client, &symbol, &api_key).await;
+            let q_res = crate::network::fetch_quote(&client, &symbol).await;
             let _ = tx.send(AppEvent::QuoteFetched(symbol.clone(), q_res)).await;
 
-            let h_res = crate::network::fetch_history(&client, &symbol, &api_key).await;
+            let h_res = crate::network::fetch_history(&client, &symbol).await;
             let _ = tx
                 .send(AppEvent::HistoryFetched(symbol.clone(), h_res))
                 .await;
 
-            let d_res = crate::network::fetch_details(&client, &symbol, &api_key).await;
+            let d_res = crate::network::fetch_details(&client, &symbol).await;
             let _ = tx
                 .send(AppEvent::DetailsFetched(symbol.clone(), d_res))
                 .await;
