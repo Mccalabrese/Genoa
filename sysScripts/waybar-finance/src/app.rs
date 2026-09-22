@@ -4,7 +4,7 @@ use ratatui::widgets::ListState;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 
-use crate::config::StockStruct;
+use crate::config::{MAX_SIDEBAR_QUOTES, MAX_WATCHLIST_STOCKS, StockStruct, normalize_symbol};
 use crate::network::{MarketQuote, YahooSearchResult};
 
 /// Defines the input state of the TUI.
@@ -13,6 +13,14 @@ use crate::network::{MarketQuote, YahooSearchResult};
 pub enum InputMode {
     Normal,  // Navigation and viewing
     Editing, // Typing in the search bar
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SidebarToggleResult {
+    Enabled,
+    Disabled,
+    LimitReached,
+    NoSelection,
 }
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -94,6 +102,15 @@ impl App {
     ) -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
+        let sidebar_count = config.stocks.iter().filter(|stock| stock.sidebar).count();
+        let (message, message_color) = if sidebar_count > MAX_SIDEBAR_QUOTES {
+            (
+                format!("Sidebar shows the first {MAX_SIDEBAR_QUOTES} selected tickers"),
+                Color::Yellow,
+            )
+        } else {
+            (message, message_color)
+        };
         Self {
             stocks: config.stocks,
             should_quit: false,
@@ -177,12 +194,29 @@ impl App {
         self.search_state.select(Some(i));
     }
 
-    pub fn toggle_sidebar_view(&mut self) {
-        if let Some(selected) = self.state.selected()
-            && let Some(stock) = self.stocks.get_mut(selected)
-        {
-            stock.sidebar = !stock.sidebar;
+    pub fn toggle_sidebar_view(&mut self) -> SidebarToggleResult {
+        let Some(selected) = self.state.selected() else {
+            return SidebarToggleResult::NoSelection;
+        };
+        let Some(sidebar_enabled) = self.stocks.get(selected).map(|stock| stock.sidebar) else {
+            return SidebarToggleResult::NoSelection;
+        };
+
+        if sidebar_enabled {
+            self.stocks[selected].sidebar = false;
+            return SidebarToggleResult::Disabled;
         }
+
+        if self.sidebar_visible_count() >= MAX_SIDEBAR_QUOTES {
+            return SidebarToggleResult::LimitReached;
+        }
+
+        self.stocks[selected].sidebar = true;
+        SidebarToggleResult::Enabled
+    }
+
+    fn sidebar_visible_count(&self) -> usize {
+        self.stocks.iter().filter(|stock| stock.sidebar).count()
     }
 
     ///Handles adding a stock and triggers data fetch
@@ -190,19 +224,32 @@ impl App {
         let new_symbol = if let Some(idx) = self.search_state.selected() {
             self.search_results[idx].symbol.clone()
         } else {
-            self.input.trim().to_uppercase()
+            self.input.clone()
         };
 
-        if new_symbol.is_empty() {
+        let Some(new_symbol) = normalize_symbol(&new_symbol) else {
+            self.message = "Enter a valid ticker symbol".to_string();
+            self.message_color = Color::Yellow;
             return;
-        }
+        };
 
         if self.stocks.iter().any(|s| s.symbol == new_symbol) {
             self.message = format!("{} exists!", new_symbol);
             self.message_color = Color::Yellow;
+        } else if self.stocks.len() >= MAX_WATCHLIST_STOCKS {
+            self.message = format!("Watchlist limit reached ({MAX_WATCHLIST_STOCKS})");
+            self.message_color = Color::Yellow;
         } else {
-            self.message_color = Color::Green;
-            self.message = format!("Added {}", new_symbol);
+            let show_in_sidebar = self.sidebar_visible_count() < MAX_SIDEBAR_QUOTES;
+            if show_in_sidebar {
+                self.message_color = Color::Green;
+                self.message = format!("Added {new_symbol}");
+            } else {
+                self.message_color = Color::Yellow;
+                self.message = format!(
+                    "Added {new_symbol}; Sidebar quote limit reached ({MAX_SIDEBAR_QUOTES})"
+                );
+            }
 
             self.state.select(Some(self.stocks.len() - 1));
 
@@ -210,7 +257,7 @@ impl App {
             self.trigger_fetch(new_symbol.clone(), tx, client);
             self.stocks.push(StockStruct {
                 symbol: new_symbol,
-                sidebar: true,
+                sidebar: show_in_sidebar,
             });
             let tx_clone = tx.clone();
             tokio::spawn(async move {
@@ -243,5 +290,55 @@ impl App {
                 .send(AppEvent::DetailsFetched(symbol.clone(), d_res))
                 .await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stock(symbol: impl Into<String>, sidebar: bool) -> StockStruct {
+        StockStruct {
+            symbol: symbol.into(),
+            sidebar,
+        }
+    }
+
+    #[test]
+    fn sidebar_toggle_rejects_an_additional_visible_ticker() {
+        let mut stocks: Vec<_> = (0..MAX_SIDEBAR_QUOTES)
+            .map(|index| stock(format!("T{index}"), true))
+            .collect();
+        stocks.push(stock("HIDDEN", false));
+        let mut app = App::new(Config { stocks }, "Ready".to_string(), Color::Green, None);
+        app.state.select(Some(MAX_SIDEBAR_QUOTES));
+
+        assert_eq!(app.toggle_sidebar_view(), SidebarToggleResult::LimitReached);
+        assert!(!app.stocks[MAX_SIDEBAR_QUOTES].sidebar);
+    }
+
+    #[test]
+    fn sidebar_toggle_always_allows_disabling_an_existing_ticker() {
+        let stocks: Vec<_> = (0..=MAX_SIDEBAR_QUOTES)
+            .map(|index| stock(format!("T{index}"), true))
+            .collect();
+        let mut app = App::new(Config { stocks }, "Ready".to_string(), Color::Green, None);
+        app.state.select(Some(MAX_SIDEBAR_QUOTES));
+
+        assert_eq!(app.toggle_sidebar_view(), SidebarToggleResult::Disabled);
+        assert!(!app.stocks[MAX_SIDEBAR_QUOTES].sidebar);
+    }
+
+    #[test]
+    fn app_warns_when_an_existing_config_exceeds_the_sidebar_limit() {
+        let stocks: Vec<_> = (0..=MAX_SIDEBAR_QUOTES)
+            .map(|index| stock(format!("T{index}"), true))
+            .collect();
+        let app = App::new(Config { stocks }, "Ready".to_string(), Color::Green, None);
+
+        assert_eq!(
+            app.message,
+            format!("Sidebar shows the first {MAX_SIDEBAR_QUOTES} selected tickers")
+        );
     }
 }

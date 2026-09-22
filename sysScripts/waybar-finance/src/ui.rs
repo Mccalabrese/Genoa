@@ -1,4 +1,5 @@
-use crate::app::{App, InputMode, MarketStatus, StockDetails};
+use crate::app::{App, InputMode, MarketStatus, SidebarToggleResult, StockDetails};
+use crate::config::MAX_SIDEBAR_QUOTES;
 use crate::network::{MarketQuote, YahooSearchResult};
 use anyhow::Result;
 use chrono::DateTime;
@@ -208,10 +209,16 @@ async fn handle_keys(
                 app.delete();
                 let _ = tx.send(AppEvent::SaveConfig).await;
             }
-            KeyCode::Char('s') => {
-                app.toggle_sidebar_view();
-                let _ = tx.send(AppEvent::SaveConfig).await;
-            }
+            KeyCode::Char('s') => match app.toggle_sidebar_view() {
+                SidebarToggleResult::Enabled | SidebarToggleResult::Disabled => {
+                    let _ = tx.send(AppEvent::SaveConfig).await;
+                }
+                SidebarToggleResult::LimitReached => {
+                    app.message = format!("Sidebar quote limit reached ({MAX_SIDEBAR_QUOTES})");
+                    app.message_color = Color::Yellow;
+                }
+                SidebarToggleResult::NoSelection => {}
+            },
             KeyCode::Enter => {
                 if let Some(sel) = app.state.selected() {
                     let sym = app.stocks[sel].symbol.clone();

@@ -16,7 +16,12 @@ use config::{get_config_path, load_config};
 use network::run_widget_mode;
 use ratatui::style::Color;
 use reqwest::Client;
+use std::time::Duration;
 use ui::run_tui;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 8;
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
@@ -39,6 +44,9 @@ async fn main() -> Result<()> {
                      Chrome/106 Safari/537.36",
         )
         .cookie_store(true)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .build()?;
     // "Warm up" the client by hitting the homepage.
     // This is required to acquire the initial session cookies and "crumb"

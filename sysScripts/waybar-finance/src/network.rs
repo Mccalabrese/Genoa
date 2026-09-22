@@ -1,11 +1,18 @@
 use crate::app::Config;
 use crate::app::{MarketStatus, StockDetails};
+use crate::config::{MAX_SIDEBAR_QUOTES, normalize_symbol};
 use anyhow::{Context, Result};
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::borrow::Cow;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+
+const MAX_SEARCH_QUERY_LENGTH: usize = 64;
+const MAX_SEARCH_RESULTS: usize = 12;
+const MAX_CONCURRENT_QUOTES: usize = 4;
+const CRUMB_FAILURE_COOLDOWN: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct MarketQuote {
@@ -121,42 +128,109 @@ struct YahooChartIndicators {
 struct YahooChartQuote {
     close: Vec<Option<f64>>,
 }
-// Global cache for the yahoo crumb to avoid re-fetching each request.
-static YAHOO_CRUMB: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[derive(Debug, Clone)]
+struct CachedCrumb {
+    value: String,
+    generation: u64,
+}
 
-async fn get_yahoo_crumb(client: &reqwest::Client) -> Result<String> {
-    // Check cache first
-    let mutex = YAHOO_CRUMB.get_or_init(|| Mutex::new(None));
-    let mut lock = mutex.lock().await;
+#[derive(Debug)]
+struct CrumbRefreshFailure {
+    observed_generation: Option<u64>,
+    occurred_at: Instant,
+}
 
-    if let Some(c) = &*lock {
-        return Ok(c.clone());
+#[derive(Debug)]
+struct CrumbCache {
+    crumb: Option<CachedCrumb>,
+    last_failure: Option<CrumbRefreshFailure>,
+}
+
+// The mutex elects one refresher. It is intentionally held during the rare,
+// timeout-bounded crumb request so other callers await its result instead of
+// stampeding Yahoo with duplicate refreshes.
+static YAHOO_CRUMB: Mutex<CrumbCache> = Mutex::const_new(CrumbCache {
+    crumb: None,
+    last_failure: None,
+});
+
+async fn get_yahoo_crumb(client: &reqwest::Client) -> Result<CachedCrumb> {
+    if let Some(crumb) = YAHOO_CRUMB.lock().await.crumb.clone() {
+        return Ok(crumb);
     }
 
-    // Handshake - Get Cookies
+    refresh_yahoo_crumb(client, None).await
+}
+
+/// Elects one asynchronous refresher. Tokio suspends waiting callers rather
+/// than blocking an OS thread while the timeout-bounded request is in flight.
+async fn refresh_yahoo_crumb(
+    client: &reqwest::Client,
+    observed_generation: Option<u64>,
+) -> Result<CachedCrumb> {
+    let mut cache = YAHOO_CRUMB.lock().await;
+    if let Some(cached) = cache.crumb.as_ref()
+        && Some(cached.generation) != observed_generation
+    {
+        return Ok(cached.clone());
+    }
+
+    if refresh_failure_is_active(
+        cache.last_failure.as_ref(),
+        observed_generation,
+        Instant::now(),
+    ) {
+        anyhow::bail!("Yahoo Finance crumb refresh recently failed; retry shortly");
+    }
+
+    match fetch_yahoo_crumb(client).await {
+        Ok(value) => {
+            let crumb = CachedCrumb {
+                value,
+                generation: cache
+                    .crumb
+                    .as_ref()
+                    .map_or(1, |cached| cached.generation.saturating_add(1)),
+            };
+            cache.crumb = Some(crumb.clone());
+            cache.last_failure = None;
+            Ok(crumb)
+        }
+        Err(error) => {
+            cache.last_failure = Some(CrumbRefreshFailure {
+                observed_generation,
+                occurred_at: Instant::now(),
+            });
+            Err(error)
+        }
+    }
+}
+
+fn refresh_failure_is_active(
+    failure: Option<&CrumbRefreshFailure>,
+    observed_generation: Option<u64>,
+    now: Instant,
+) -> bool {
+    failure.is_some_and(|failure| {
+        failure.observed_generation == observed_generation
+            && now.duration_since(failure.occurred_at) < CRUMB_FAILURE_COOLDOWN
+    })
+}
+
+async fn fetch_yahoo_crumb(client: &reqwest::Client) -> Result<String> {
     let _ = client
         .get("https://fc.yahoo.com")
         .header("Accept", "*/*")
         .send()
         .await;
 
-    // Handshake - Ask for the Crumb
     let resp = client
         .get("https://query1.finance.yahoo.com/v1/test/getcrumb")
         .header("Accept", "*/*")
         .send()
-        .await?;
-    // ... error handling ...
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Failed to get crumb: {}", resp.status()));
-    }
-
-    let crumb = resp.text().await?;
-
-    // Handshake - Cache it
-    *lock = Some(crumb.clone());
-
-    Ok(crumb)
+        .await?
+        .error_for_status()?;
+    Ok(resp.text().await?)
 }
 
 /// Fetches search results from Yahoo Finance's search endpoint.
@@ -165,42 +239,36 @@ pub async fn search_ticker(
     client: &reqwest::Client,
     query: &str,
 ) -> Result<Vec<YahooSearchResult>> {
-    let url = format!(
-        "https://query2.finance.yahoo.com/v1/finance/search?q={}&lang=en-US",
-        query
-    );
+    let query = query.trim();
+    if query.is_empty() || query.len() > MAX_SEARCH_QUERY_LENGTH {
+        return Ok(Vec::new());
+    }
+    let url = yahoo_search_url(query);
 
-    // send the GET request
     let resp = client
-        .get(&url)
+        .get(url)
         .header("Accept", "*/*")
         .header("Accept-Language", "en-US,en;q=0.9")
         .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Search failed: {}", resp.status()));
-    }
+        .await?
+        .error_for_status()?;
 
     let data: YahooSearchResponse = resp.json().await?;
-    Ok(data.quotes)
+    Ok(data
+        .quotes
+        .into_iter()
+        .filter(|result| normalize_symbol(&result.symbol).is_some())
+        .take(MAX_SEARCH_RESULTS)
+        .collect())
 }
 
 /// Fetches detailed metrics (P/E, Yield, etc.) from Yahoo's v7 endpoint.
 /// Handles the differences between Stocks (using Dividend Yield) and ETFs (using 12-Mo Yield).
 pub async fn fetch_details(client: &reqwest::Client, symbol: &str) -> Result<StockDetails> {
-    let crumb = get_yahoo_crumb(client).await?;
-
-    let url = format!(
-        "https://query1.finance.yahoo.com/v7/finance/quote?symbols={}&crumb={}",
-        symbol, crumb
-    );
-
-    let resp = client.get(&url).send().await?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Yahoo Error: {}", resp.status()));
-    }
+    let symbol = normalize_symbol(symbol).context("Ticker is invalid or too long")?;
+    let resp = fetch_yahoo_quote(client, &symbol)
+        .await?
+        .error_for_status()?;
 
     let data: YahooQuoteResponse = resp.json().await?;
 
@@ -242,9 +310,10 @@ pub async fn fetch_details(client: &reqwest::Client, symbol: &str) -> Result<Sto
 }
 /// Fetches a current quote from Yahoo Finance without an API key.
 pub async fn fetch_quote(client: &reqwest::Client, symbol: &str) -> Result<MarketQuote> {
+    let symbol = normalize_symbol(symbol).context("Ticker is invalid or too long")?;
     let chart = fetch_yahoo_chart(
         client,
-        symbol,
+        &symbol,
         &[
             ("interval", "1m"),
             ("range", "1d"),
@@ -268,13 +337,14 @@ pub async fn fetch_quote(client: &reqwest::Client, symbol: &str) -> Result<Marke
 /// The data points are returned as a vector of (timestamp, close price) tuples.
 /// Used by the charting component.
 pub async fn fetch_history(client: &reqwest::Client, symbol: &str) -> Result<Vec<(f64, f64)>> {
+    let symbol = normalize_symbol(symbol).context("Ticker is invalid or too long")?;
     let end = OffsetDateTime::now_utc();
     let start = end - time::Duration::days(365);
     let start_timestamp = start.unix_timestamp().to_string();
     let end_timestamp = end.unix_timestamp().to_string();
     let chart = fetch_yahoo_chart(
         client,
-        symbol,
+        &symbol,
         &[
             ("period1", start_timestamp.as_str()),
             ("period2", end_timestamp.as_str()),
@@ -289,20 +359,24 @@ pub async fn fetch_history(client: &reqwest::Client, symbol: &str) -> Result<Vec
 /// The compatibility format lets existing external status-bar integrations
 /// continue working while Genoa displays it in Sidebar.
 pub async fn run_widget_mode(config: &Config, client: &reqwest::Client) -> Result<()> {
-    let futures: Vec<_> = config
-        .stocks
-        .iter()
-        .filter(|s| s.sidebar)
-        .map(|s| {
-            let sym = s.symbol.clone();
-            async move {
-                let q = fetch_quote(client, &sym).await;
-                (sym, q)
-            }
-        })
-        .collect();
-
-    let results = join_all(futures).await;
+    let results = stream::iter(
+        config
+            .stocks
+            .iter()
+            .filter(|stock| stock.sidebar)
+            .filter_map(|stock| normalize_symbol(&stock.symbol))
+            .take(MAX_SIDEBAR_QUOTES)
+            .map(|symbol| {
+                let client = client.clone();
+                async move {
+                    let quote = fetch_quote(&client, &symbol).await;
+                    (symbol, quote)
+                }
+            }),
+    )
+    .buffered(MAX_CONCURRENT_QUOTES)
+    .collect::<Vec<_>>()
+    .await;
     let mut text_parts = Vec::new();
     let mut tooltip_parts = Vec::new();
     for (symbol, result) in results {
@@ -313,18 +387,22 @@ pub async fn run_widget_mode(config: &Config, client: &reqwest::Client) -> Resul
                 } else {
                     ("#f38ba8", "")
                 };
+                let escaped_symbol = escape_pango(&symbol);
                 let part = format!(
                     "<span color='{}'>{} {:.2} {}</span>",
-                    color, symbol, quote.price, icon
+                    color, escaped_symbol, quote.price, icon
                 );
                 text_parts.push(part);
                 tooltip_parts.push(format!(
                     "<span color='{}'>{}: ${:.2} ({:.2}%)</span>",
-                    color, symbol, quote.price, quote.percent
+                    color, escaped_symbol, quote.price, quote.percent
                 ));
             }
             Err(_) => {
-                text_parts.push(format!("<span color='#6c7086'>{} ???</span>", symbol));
+                text_parts.push(format!(
+                    "<span color='#6c7086'>{} ???</span>",
+                    escape_pango(&symbol)
+                ));
             }
         }
     }
@@ -335,6 +413,72 @@ pub async fn run_widget_mode(config: &Config, client: &reqwest::Client) -> Resul
     };
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
+}
+
+fn yahoo_search_url(query: &str) -> reqwest::Url {
+    let mut url = reqwest::Url::parse("https://query2.finance.yahoo.com/v1/finance/search")
+        .expect("Yahoo Finance search base URL is valid");
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("lang", "en-US");
+    url
+}
+
+fn yahoo_quote_url(symbols: &str, crumb: &str) -> reqwest::Url {
+    let mut url = reqwest::Url::parse("https://query1.finance.yahoo.com/v7/finance/quote")
+        .expect("Yahoo Finance quote base URL is valid");
+    url.query_pairs_mut()
+        .append_pair("symbols", symbols)
+        .append_pair("crumb", crumb);
+    url
+}
+
+fn escape_pango(value: &str) -> Cow<'_, str> {
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'\'' | b'"'))
+    {
+        return Cow::Borrowed(value);
+    }
+
+    let mut escaped = String::with_capacity(value.len().saturating_mul(6));
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\'' => escaped.push_str("&apos;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(character),
+        }
+    }
+    Cow::Owned(escaped)
+}
+
+async fn fetch_yahoo_quote(client: &reqwest::Client, symbols: &str) -> Result<reqwest::Response> {
+    let crumb = get_yahoo_crumb(client).await?;
+    let response = client
+        .get(yahoo_quote_url(symbols, &crumb.value))
+        .send()
+        .await?;
+
+    if !is_crumb_rejection(response.status()) {
+        return Ok(response);
+    }
+
+    drop(response);
+    let refreshed = refresh_yahoo_crumb(client, Some(crumb.generation)).await?;
+    Ok(client
+        .get(yahoo_quote_url(symbols, &refreshed.value))
+        .send()
+        .await?)
+}
+
+fn is_crumb_rejection(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    )
 }
 
 async fn fetch_yahoo_chart(
@@ -423,20 +567,9 @@ fn history_points_from_chart(chart: YahooChartResult) -> Result<Vec<(f64, f64)>>
 /// Fetches market status including yields for 10Y, 5Y, and 3M Treasuries from Yahoo Finance.
 /// Used for displaying yield data and yield curve in app's top banner.
 pub async fn fetch_market_status(client: &reqwest::Client) -> Result<MarketStatus> {
-    // 1. Get Crumb
-    let crumb = get_yahoo_crumb(client).await?;
-
-    // 2. Batch Request
-    let url = format!(
-        "https://query1.finance.yahoo.com/v7/finance/quote?symbols=^TNX,^FVX,^IRX&crumb={}",
-        crumb
-    );
-
-    let resp = client.get(&url).send().await?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Yields Error: {}", resp.status()));
-    }
+    let resp = fetch_yahoo_quote(client, "^TNX,^FVX,^IRX")
+        .await?
+        .error_for_status()?;
 
     let data: YahooQuoteResponse = resp.json().await?;
     let results = data.quote_response.result;
@@ -467,8 +600,12 @@ pub async fn fetch_market_status(client: &reqwest::Client) -> Result<MarketStatu
 #[cfg(test)]
 mod tests {
     use super::{
-        YahooChartResponse, history_points_from_chart, market_quote_from_prices, yahoo_chart_url,
+        CRUMB_FAILURE_COOLDOWN, CrumbRefreshFailure, YahooChartResponse, escape_pango,
+        history_points_from_chart, is_crumb_rejection, market_quote_from_prices,
+        refresh_failure_is_active, yahoo_chart_url, yahoo_quote_url, yahoo_search_url,
     };
+    use std::borrow::Cow;
+    use std::time::Instant;
 
     #[test]
     fn current_quote_uses_the_previous_close_for_daily_change() {
@@ -512,5 +649,48 @@ mod tests {
 
         assert_eq!(url.path(), "/v8/finance/chart/SPY");
         assert_eq!(url.query(), Some("symbol=SPY&range=1d"));
+    }
+
+    #[test]
+    fn query_builders_percent_encode_untrusted_values() {
+        let search_url = yahoo_search_url("SPY&lang=attacker");
+        let quote_url = yahoo_quote_url("SPY&symbols=attacker", "crumb&override=true");
+
+        assert!(search_url.as_str().contains("SPY%26lang%3Dattacker"));
+        assert!(quote_url.as_str().contains("SPY%26symbols%3Dattacker"));
+        assert!(quote_url.as_str().contains("crumb%26override%3Dtrue"));
+    }
+
+    #[test]
+    fn pango_escaping_neutralizes_markup_characters() {
+        assert_eq!(
+            escape_pango("<ticker&'\">"),
+            "&lt;ticker&amp;&apos;&quot;&gt;"
+        );
+        assert!(matches!(escape_pango("SPY"), Cow::Borrowed("SPY")));
+    }
+
+    #[test]
+    fn only_auth_responses_trigger_a_crumb_refresh() {
+        assert!(is_crumb_rejection(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(is_crumb_rejection(reqwest::StatusCode::FORBIDDEN));
+        assert!(!is_crumb_rejection(reqwest::StatusCode::TOO_MANY_REQUESTS));
+    }
+
+    #[test]
+    fn crumb_refresh_failures_are_brief_and_generation_scoped() {
+        let now = Instant::now();
+        let failure = CrumbRefreshFailure {
+            observed_generation: Some(7),
+            occurred_at: now,
+        };
+
+        assert!(refresh_failure_is_active(Some(&failure), Some(7), now));
+        assert!(!refresh_failure_is_active(Some(&failure), Some(8), now));
+        assert!(!refresh_failure_is_active(
+            Some(&failure),
+            Some(7),
+            now + CRUMB_FAILURE_COOLDOWN,
+        ));
     }
 }
