@@ -94,6 +94,19 @@ fn is_supported_image(path: &Path) -> bool {
     )
 }
 
+/// Encodes a digest without depending on a digest crate's formatting traits.
+/// sha2 0.11 returns a generic fixed-size array, which intentionally does not
+/// promise `LowerHex` support.
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
 fn thumbnail_cache_name(path: &Path, metadata: &fs::Metadata) -> Option<String> {
     let canonical_path = fs::canonicalize(path).ok()?;
     let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -104,7 +117,8 @@ fn thumbnail_cache_name(path: &Path, metadata: &fs::Metadata) -> Option<String> 
     hasher.update(metadata.len().to_le_bytes());
     hasher.update(modified.as_secs().to_le_bytes());
     hasher.update(modified.subsec_nanos().to_le_bytes());
-    Some(format!("{:x}.png", hasher.finalize()))
+    let digest = hasher.finalize();
+    Some(format!("{}.png", lower_hex(digest.as_ref())))
 }
 
 fn source_image(path: PathBuf, thumb_dir: &Path) -> Option<SourceImage> {
@@ -317,6 +331,11 @@ mod tests {
         assert!(is_supported_image(Path::new("wallpaper.webp")));
         assert!(!is_supported_image(Path::new("video.webm")));
         assert!(!is_supported_image(Path::new("archive.zip")));
+    }
+
+    #[test]
+    fn lower_hex_encodes_each_digest_byte() {
+        assert_eq!(lower_hex(&[0x00, 0xab, 0xff]), "00abff");
     }
 
     #[test]
