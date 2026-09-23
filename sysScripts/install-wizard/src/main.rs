@@ -416,6 +416,7 @@ fn main() {
     // 1. Sync Standard & AUR Packages
     if run_options.sync_packages {
         println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
+        let mut packages_synced = true;
         let mut common_pkgs = match load_effective_packages(&repo_root, &home) {
             Ok(pkgs) => pkgs,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -445,7 +446,12 @@ fn main() {
             println!("\n{}", "📦 Syncing AUR Packages...".blue().bold());
             if let Err(e) = install_aur_packages(&live_sys, &home, AUR_PACKAGES) {
                 eprintln!("   ❌ Failed to install AUR packages: {}", e);
+                packages_synced = false;
             };
+        }
+
+        if packages_synced {
+            println!("   ✅ Package synchronization complete.");
         }
     }
 
@@ -454,12 +460,14 @@ fn main() {
         eprintln!("   ❌ Failed to configure dnscrypt-proxy: {}", e);
         std::process::exit(1);
     }
+    println!("   ✅ DNS proxy ready.");
 
     println!("\n{}", "🖨️  Configuring printing services...".blue().bold());
     if let Err(e) = configure_printing_services(&live_sys) {
         eprintln!("   ❌ Failed to configure printing services: {}", e);
         std::process::exit(1);
     }
+    println!("   ✅ Printing services ready.");
 
     println!("\n{}", "🔇 Configuring quiet boot...".blue().bold());
     if let Err(e) = configure_quiet_boot(&live_sys) {
@@ -472,6 +480,7 @@ fn main() {
         eprintln!("   ❌ Failed to re-sign the LTS boot image: {}", e);
         std::process::exit(1);
     }
+    println!("   ✅ Boot configuration ready.");
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
     println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
@@ -504,14 +513,20 @@ fn main() {
         }
     };
     if custom_apps_built {
+        let mut helper_installed = true;
         if let Err(e) = install_cloudflare_toggle_helper(&live_sys, &repo_root) {
             eprintln!("   ⚠️  Failed to install the Cloudflare DNS helper: {e}");
+            helper_installed = false;
         }
         offer_signed_release_migration(&home, &repo_root, &run_options);
+        if helper_installed {
+            println!("   ✅ Custom Rust apps ready.");
+        }
     }
 
-    if let Err(e) = configure_tlp(&live_sys, &repo_root) {
-        eprintln!("   ❌ Failed to configure TLP power management: {}", e);
+    match configure_tlp(&live_sys, &repo_root) {
+        Ok(()) => println!("   ✅ TLP power management ready."),
+        Err(e) => eprintln!("   ❌ Failed to configure TLP power management: {}", e),
     }
 
     let update_only_mode = has_existing_install && !refresh_mode;
@@ -532,8 +547,9 @@ fn main() {
                     eprintln!("   ❌ Failed to refresh NVIDIA session integration: {}", e);
                     std::process::exit(1);
                 }
+                println!("   ✅ NVIDIA integration ready.");
             }
-            Ok(false) => {}
+            Ok(false) => println!("   ✅ Hardware integration check complete."),
             Err(e) => {
                 eprintln!("   ❌ Failed to configure NVIDIA hardware: {}", e);
                 std::process::exit(1);

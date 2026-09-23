@@ -1,6 +1,7 @@
 use crate::traits::CmdExecutor;
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 #[allow(dead_code)]
 #[derive(Default)]
@@ -13,6 +14,7 @@ pub struct MockEnv {
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
     pub mock_dirs: RefCell<HashSet<String>>,
     pub symlink_paths: RefCell<std::collections::HashMap<String, String>>,
+    pub temp_dir_counter: RefCell<usize>,
 }
 
 impl CmdExecutor for MockEnv {
@@ -113,6 +115,20 @@ impl CmdExecutor for MockEnv {
     }
     fn create_private_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         self.create_dir_all(path)
+    }
+    fn create_private_temp_dir(
+        &self,
+        parent: &std::path::Path,
+        prefix: &str,
+    ) -> Result<PathBuf, std::io::Error> {
+        self.ensure_private_dir(parent)?;
+        let mut counter = self.temp_dir_counter.borrow_mut();
+        let path = parent.join(format!("{prefix}mock-{}", *counter));
+        *counter += 1;
+        self.mock_dirs
+            .borrow_mut()
+            .insert(path.to_string_lossy().to_string());
+        Ok(path)
     }
     fn ensure_private_dir(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         self.create_private_dir_all(path)

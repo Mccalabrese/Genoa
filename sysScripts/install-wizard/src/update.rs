@@ -1,5 +1,6 @@
 use crate::traits::CmdExecutor;
 use colored::*;
+use inquire::Confirm;
 use std::path::Path;
 
 const CLEPSYDRE_PACKAGE_NAME: &str = "clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
@@ -7,6 +8,11 @@ const CLEPSYDRE_PACKAGE_ID: &str = "clepsydre-git";
 const CLEPSYDRE_PACKAGE_URL: &str = "https://github.com/Mccalabrese/Genoa/releases/download/v0.1.0/clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
 const CLEPSYDRE_PACKAGE_SHA256: &str =
     "fb17aa2066ec7d3a2e9ebb7b066b4547c9a22ab76e687ad45e9cc64541369852";
+const YAY_AUR_URL: &str = "https://aur.archlinux.org/yay.git";
+const YAY_PINNED_REF: &str = "refs/genoa/pinned-yay";
+// This full commit is part of the signed Genoa release. Update it only after
+// reviewing a new Yay revision, then ship the new installer in a signed tag.
+const YAY_AUR_COMMIT: &str = "cb43f84828ab4f9700f7c6f9c6d7a923d4cfaff0";
 
 /// installs packages via pacman with --needed and --noconfirm
 pub fn install_pacman_packages(
@@ -92,8 +98,10 @@ pub fn install_clepsydre_package(
     install_result
 }
 
-/// Bootstraps 'yay' from the AUR git repo if not present.
-/// This allows the script to run on a truly clean Arch install.
+/// Bootstraps a reviewed, pinned Yay revision when it is not yet installed.
+///
+/// The user must opt in because building an AUR package executes its PKGBUILD
+/// as the current user and may subsequently request sudo for installation.
 pub fn install_aur_packages(
     sys: &impl CmdExecutor,
     home: &Path,
@@ -102,28 +110,9 @@ pub fn install_aur_packages(
     if aur_packages.is_empty() {
         return Ok(());
     }
-    if !sys.command_exists("yay") {
-        println!("   ⬇️  Bootstrapping 'yay'...");
-        let clone_path = home.join("yay-clone");
-
-        if sys.path_exists(&clone_path) {
-            let _ = sys.remove_dir_all(&clone_path);
-        }
-
-        let clone_dest = clone_path
-            .to_str()
-            .ok_or_else(|| std::io::Error::other("Invalid clone path"))?;
-        sys.run_cmd(
-            "git",
-            &["clone", "https://aur.archlinux.org/yay.git", clone_dest],
-        )?;
-
-        if let Err(e) = sys.run_cmd_in_dir(&clone_path, "makepkg", &["-si", "--noconfirm"]) {
-            let _ = sys.remove_dir_all(&clone_path);
-            eprintln!("{}", "❌ Failed to install yay from AUR.".red());
-            return Err(e);
-        }
-        sys.remove_dir_all(&clone_path)?;
+    if !sys.command_exists("yay") && !bootstrap_pinned_yay(sys, home)? {
+        println!("   ⏭️  AUR package synchronization skipped.");
+        return Ok(());
     }
 
     let mut args = vec!["-S", "--needed", "--noconfirm"];
@@ -131,6 +120,81 @@ pub fn install_aur_packages(
     if sys.run_cmd("yay", &args).is_err() {
         eprintln!("{}", "⚠️  AUR Warning.".yellow());
     }
+    Ok(())
+}
+
+fn bootstrap_pinned_yay(sys: &impl CmdExecutor, home: &Path) -> Result<bool, std::io::Error> {
+    println!("   🔐 Yay is not installed and must be built from the AUR.");
+    println!("      Source: {YAY_AUR_URL}");
+    println!("      Pinned revision: {YAY_AUR_COMMIT}");
+    println!("      Building an AUR package runs its PKGBUILD as your user.");
+
+    let approved = Confirm::new("Build this reviewed Yay revision and continue?")
+        .with_default(false)
+        .prompt()
+        .unwrap_or(false);
+    if !approved {
+        return Ok(false);
+    }
+
+    println!("   ⬇️  Bootstrapping pinned Yay revision...");
+    checkout_and_install_pinned_yay(sys, home)?;
+    println!("   ✅ Installed pinned Yay revision.");
+    Ok(true)
+}
+
+fn checkout_and_install_pinned_yay(
+    sys: &impl CmdExecutor,
+    home: &Path,
+) -> Result<(), std::io::Error> {
+    let cache_dir = home.join(".cache/genoa");
+    let clone_path = sys.create_private_temp_dir(&cache_dir, "yay-bootstrap-")?;
+    let clone_dest = clone_path
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("Invalid Yay checkout path"))?;
+    let pinned_refspec = format!("{YAY_AUR_COMMIT}:{YAY_PINNED_REF}");
+
+    let result = (|| {
+        sys.run_cmd("git", &["init", "--quiet", clone_dest])?;
+        sys.run_cmd_in_dir(
+            &clone_path,
+            "git",
+            &[
+                "fetch",
+                "--depth=1",
+                "--no-tags",
+                YAY_AUR_URL,
+                &pinned_refspec,
+            ],
+        )?;
+        sys.run_cmd_in_dir(
+            &clone_path,
+            "git",
+            &["checkout", "--detach", YAY_PINNED_REF],
+        )?;
+
+        let actual_revision =
+            sys.command_output("git", &["-C", clone_dest, "rev-parse", "--verify", "HEAD"])?;
+        if actual_revision.trim() != YAY_AUR_COMMIT {
+            return Err(std::io::Error::other(format!(
+                "Yay checkout verification failed: expected {YAY_AUR_COMMIT}, got {}",
+                actual_revision.trim()
+            )));
+        }
+
+        sys.run_cmd_in_dir(
+            &clone_path,
+            "makepkg",
+            &["--syncdeps", "--install", "--noconfirm"],
+        )
+    })();
+
+    let cleanup_result = sys.remove_dir_all(&clone_path);
+    if let Err(error) = result {
+        eprintln!("{}", "❌ Failed to install pinned Yay from AUR.".red());
+        return Err(error);
+    }
+    cleanup_result?;
     Ok(())
 }
 
@@ -317,5 +381,75 @@ mod tests {
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
         }));
+    }
+
+    #[test]
+    fn test_pinned_yay_fetch_is_shallow_and_verifies_revision_before_building() {
+        let env = MockEnv::default();
+        let clone_path = "/home/testuser/.cache/genoa/yay-bootstrap-mock-0";
+        env.command_outputs.borrow_mut().insert(
+            (
+                "git".to_string(),
+                vec![
+                    "-C".to_string(),
+                    clone_path.to_string(),
+                    "rev-parse".to_string(),
+                    "--verify".to_string(),
+                    "HEAD".to_string(),
+                ],
+            ),
+            format!("{YAY_AUR_COMMIT}\n"),
+        );
+
+        let result = checkout_and_install_pinned_yay(&env, Path::new("/home/testuser"));
+
+        assert!(result.is_ok());
+        let log = env.cmd_log.borrow();
+        assert_eq!(
+            log[0],
+            (
+                "git".to_string(),
+                vec![
+                    "init".to_string(),
+                    "--quiet".to_string(),
+                    clone_path.to_string(),
+                ],
+            )
+        );
+        assert_eq!(
+            log[1],
+            (
+                "git".to_string(),
+                vec![
+                    "fetch".to_string(),
+                    "--depth=1".to_string(),
+                    "--no-tags".to_string(),
+                    YAY_AUR_URL.to_string(),
+                    format!("{YAY_AUR_COMMIT}:{YAY_PINNED_REF}"),
+                ],
+            )
+        );
+        assert_eq!(
+            log[2],
+            (
+                "git".to_string(),
+                vec![
+                    "checkout".to_string(),
+                    "--detach".to_string(),
+                    YAY_PINNED_REF.to_string(),
+                ],
+            )
+        );
+        assert_eq!(
+            log[3],
+            (
+                "makepkg".to_string(),
+                vec![
+                    "--syncdeps".to_string(),
+                    "--install".to_string(),
+                    "--noconfirm".to_string(),
+                ],
+            )
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Application entry point.
 //!
 //! Handles command-line argument parsing, configuration loading, and
-//! dispatching the application to either "Waybar Mode" (one-shot JSON output)
+//! dispatching the application to either widget mode (one-shot JSON output)
 //! or "TUI Mode" (interactive terminal UI).
 
 mod app;
@@ -13,17 +13,22 @@ use anyhow::Result;
 use app::App;
 use clap::Parser;
 use config::{get_config_path, load_config};
-use network::run_waybar_mode;
+use network::run_widget_mode;
 use ratatui::style::Color;
 use reqwest::Client;
+use std::time::Duration;
 use ui::run_tui;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 8;
 
 /// Command line arguments.
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Launch the interactive Terminal User Interface (TUI).
-    /// If omitted, outputs JSON for Waybar.
+    /// If omitted, outputs JSON for Genoa Sidebar and compatible status bars.
     #[arg(short, long)]
     tui: bool,
 }
@@ -39,22 +44,24 @@ async fn main() -> Result<()> {
                      Chrome/106 Safari/537.36",
         )
         .cookie_store(true)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .build()?;
     // "Warm up" the client by hitting the homepage.
     // This is required to acquire the initial session cookies and "crumb"
     // needed for subsequent API calls to the v7/v10 endpoints.
     let _ = client.get("https://finance.yahoo.com").send().await;
     let args = Args::parse();
-    // Load user configuration (API keys, watchlist)
+    // Load the user watchlist once for either interface.
     let config_path = get_config_path()?;
     let config = load_config(&config_path)?;
-    let mut app = App::new(config, String::from("Ready"), Color::Gray, None);
-    // Dispatch based on mode
     if args.tui {
+        let mut app = App::new(config, String::from("Ready"), Color::Gray, None);
         println!("Initializing TUI mode...");
         run_tui(&client, &mut app).await?
     } else {
-        run_waybar_mode(&client).await?;
+        run_widget_mode(&config, &client).await?;
     }
     Ok(())
 }

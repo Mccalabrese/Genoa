@@ -14,6 +14,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const CHECKUPDATES: &str = "/usr/bin/checkupdates";
+const YAY: &str = "/usr/bin/yay";
+
 fn expand_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
@@ -27,10 +30,9 @@ fn expand_path(path: &str) -> PathBuf {
 
 #[derive(Deserialize, Debug)]
 struct UpdateCheckConfig {
-    command_string: String, // The shell command to count updates (e.g., "checkupdates | wc -l")
-    cache_file: String,     // Path to store the last successful count
-    stale_icon: String,     // Icon to append if data is old
-    error_icon: String,     // Icon for total failure
+    cache_file: String, // Path to store the last successful count
+    stale_icon: String, // Icon to append if data is old
+    error_icon: String, // Icon for total failure
 }
 
 #[derive(Deserialize, Debug)]
@@ -78,34 +80,57 @@ fn save_cache(count: usize, cache_path: &Path) -> Result<()> {
 
 // --- Core Logic ---
 
-/// Executes the update check command defined in config.toml.
-/// Returns the number of updates found.
-fn run_check(command_string: &str) -> Result<usize> {
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(command_string)
+/// Counts the package records emitted by a fixed update command.
+fn run_update_source(program: &str, args: &[&str]) -> Result<usize> {
+    let output = Command::new(program)
+        .args(args)
         .output()
-        .context(format!("Failed to spawn command: '{}'", command_string))?;
+        .with_context(|| format!("Failed to spawn {program}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let count = stdout.trim().lines().count();
+    let count = count_update_lines(&output.stdout);
     // Exit Code 0: Success.
     if output.status.success() {
         return Ok(count);
     }
 
-    // Exit Code 1: 'checkupdates' returns 1 if NO updates are found (not an error).
-    // We handle this edge case specifically.
-    if output.status.code() == Some(1) && count == 0 {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_expected_no_updates(program, output.status.code(), &stderr) {
         return Ok(0);
     }
+
     // Any other exit code is a legitimate failure (e.g., DB lock, no network).
-    let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow::bail!(
-        "Check command failed (exit code: {}):\n{}",
+        "{program} failed (exit code: {}):\n{}",
         output.status.code().unwrap_or(-1),
         stderr.trim()
     );
+}
+
+/// Recognizes only documented, clean no-update outcomes for the fixed commands.
+///
+/// `checkupdates` reserves exit 2 for no updates. `yay -Qua` follows Pacman's
+/// exit-1 convention, but 1 is also a generic error, so it is accepted only
+/// when Yay produced no diagnostic output.
+fn is_expected_no_updates(program: &str, exit_code: Option<i32>, stderr: &str) -> bool {
+    (program == CHECKUPDATES && exit_code == Some(2))
+        || (program == YAY && exit_code == Some(1) && stderr.trim().is_empty())
+}
+
+fn count_update_lines(stdout: &[u8]) -> usize {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+/// Checks official-repository and AUR upgrades using fixed, allowlisted commands.
+///
+/// `checkupdates` covers Pacman repositories and `yay -Qua` covers foreign/AUR packages.
+/// Neither command is sourced from user-editable configuration or passed through a shell.
+fn run_check() -> Result<usize> {
+    let official_updates = run_update_source(CHECKUPDATES, &[])?;
+    let aur_updates = run_update_source(YAY, &["-Qua"])?;
+    Ok(official_updates + aur_updates)
 }
 
 // --- Output Formatters (Waybar JSON Protocol) ---
@@ -180,7 +205,7 @@ fn main() -> Result<()> {
 
     let cache_path = expand_path(&config.cache_file);
     // Strategy: Try Live Check -> Fallback to Cache -> Error
-    match run_check(&config.command_string) {
+    match run_check() {
         Ok(count) => {
             // Happy Path: Update cache and display fresh data
             if let Err(e) = save_cache(count, &cache_path) {
@@ -206,4 +231,25 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CHECKUPDATES, YAY, count_update_lines, is_expected_no_updates};
+
+    #[test]
+    fn update_output_counts_only_nonempty_package_lines() {
+        let output = "package-one 1.0 -> 1.1\n\npackage-two 2.0 -> 2.1\n";
+        assert_eq!(count_update_lines(output.as_bytes()), 2);
+    }
+
+    #[test]
+    fn only_clean_program_specific_no_update_statuses_are_accepted() {
+        assert!(is_expected_no_updates(CHECKUPDATES, Some(2), ""));
+        assert!(!is_expected_no_updates(CHECKUPDATES, Some(1), ""));
+
+        assert!(is_expected_no_updates(YAY, Some(1), ""));
+        assert!(!is_expected_no_updates(YAY, Some(1), "network unavailable"));
+        assert!(!is_expected_no_updates(YAY, Some(2), ""));
+    }
 }

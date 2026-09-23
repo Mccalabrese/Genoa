@@ -430,10 +430,7 @@ systemctl --user restart xdg-desktop-portal
 
 ```
 
-## 10. Secrets + Generated config.toml
-
-The installer asks for:
-- Finnhub API key
+## 10. Generated config.toml
 
 Create secure config dir/file:
 

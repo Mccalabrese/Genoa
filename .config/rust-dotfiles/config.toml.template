@@ -1,6 +1,7 @@
 # $HOME/.config/rust-dotfiles/config.toml
 [global]
-pager = "bat --paging=always --style=plain"
+# Arguments are passed directly to the pager; no shell is involved.
+pager = ["bat", "--paging=always", "--style=plain"]
 terminal = "/usr/bin/ghostty"
 
 [repo]
@@ -51,8 +52,7 @@ rofi_theme_override = "element-icon { size: 20%; }"
 # Settings for our updater module
 # -------------------------------
 [update_check]
-# The command to run. We use a list for command and args.
-command_string = "nm-online -q -t 5 && (checkupdates; yay -Qua) || true"
+# update-check uses fixed, allowlisted checkupdates and yay commands.
 # The file to cache the last known count
 cache_file = "~/.cache/update-check.json"
 # Icon to show if check fails but cache is available
@@ -116,5 +116,4 @@ rofi_config = "~/.config/rofi/config-radio.rasi"
 message = "Radio Menu"
 
 [waybar_finance]
-api_key = "YOUR_FINNHUB_KEY_HERE"
 stocks = ["SPY", "QQQ", "NVDA"]

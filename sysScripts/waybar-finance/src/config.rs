@@ -7,6 +7,10 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tempfile::Builder as TempFileBuilder;
 
+pub const MAX_WATCHLIST_STOCKS: usize = 50;
+pub const MAX_SIDEBAR_QUOTES: usize = 20;
+pub const MAX_SYMBOL_LENGTH: usize = 32;
+
 // Struct to parse the central TOML
 #[derive(Deserialize)]
 struct GlobalConfig {
@@ -29,18 +33,39 @@ pub struct StockStruct {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct ParsedConfig {
-    api_key: String,
     stocks: Option<StockConfig>,
 }
 
 #[derive(Deserialize)]
 struct FinanceConfig {
-    api_key: String,
     stocks: Option<StockConfig>,
 }
 
 fn set_sidebar_default() -> bool {
     true
+}
+
+/// Returns a normalized Yahoo-compatible ticker, rejecting values that cannot
+/// safely be treated as a single symbol in every finance endpoint.
+pub fn normalize_symbol(symbol: &str) -> Option<String> {
+    let symbol = symbol.trim().to_uppercase();
+    (!symbol.is_empty()
+        && symbol.len() <= MAX_SYMBOL_LENGTH
+        && symbol
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'^' | b'=')))
+    .then_some(symbol)
+}
+
+fn normalize_stocks(stocks: Vec<StockStruct>) -> Vec<StockStruct> {
+    stocks
+        .into_iter()
+        .filter_map(|mut stock| {
+            stock.symbol = normalize_symbol(&stock.symbol)?;
+            Some(stock)
+        })
+        .take(MAX_WATCHLIST_STOCKS)
+        .collect()
 }
 /// Resolves the XDG-compliant configuration path.
 /// Usually ~/.config/waybar-finance/config.json on Linux.
@@ -87,8 +112,7 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
                 }
             };
             return Ok(Config {
-                api_key: Some(parsed.api_key),
-                stocks: unified_stocks,
+                stocks: normalize_stocks(unified_stocks),
             });
         }
     }
@@ -128,8 +152,7 @@ pub fn load_config(path: &PathBuf) -> Result<Config> {
             }
         };
         return Ok(Config {
-            api_key: Some(finance.api_key),
-            stocks: unified_stocks,
+            stocks: normalize_stocks(unified_stocks),
         });
     }
 
@@ -157,8 +180,7 @@ fn create_private_config_dir(path: &Path) -> Result<()> {
         .context("Failed to create private config directory")
 }
 
-/// Writes a configuration containing the Finnhub API key without an insecure
-/// creation window, then atomically replaces the previous complete file.
+/// Atomically writes the local watchlist without an insecure creation window.
 fn write_private_config(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -208,5 +230,20 @@ mod tests {
             fs::metadata(&config_path).unwrap().permissions().mode() & 0o077,
             0
         );
+    }
+
+    #[test]
+    fn symbol_normalization_rejects_url_syntax_and_enforces_a_list_limit() {
+        assert_eq!(normalize_symbol(" brk-b "), Some("BRK-B".to_string()));
+        assert_eq!(normalize_symbol("SPY?range=5y"), None);
+        assert_eq!(normalize_symbol(&"A".repeat(MAX_SYMBOL_LENGTH + 1)), None);
+
+        let stocks = (0..MAX_WATCHLIST_STOCKS + 1)
+            .map(|index| StockStruct {
+                symbol: format!("T{index}"),
+                sidebar: true,
+            })
+            .collect();
+        assert_eq!(normalize_stocks(stocks).len(), MAX_WATCHLIST_STOCKS);
     }
 }

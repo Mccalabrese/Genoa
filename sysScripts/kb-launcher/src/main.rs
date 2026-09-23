@@ -46,7 +46,32 @@ struct CompositorArgs {
 #[derive(Deserialize, Debug)]
 struct Global {
     terminal: String, // e.g., "ghostty"
-    pager: String,    // e.g., "bat" or "less"
+    pager: PagerCommand,
+}
+
+/// A typed pager command. New configurations use an argument array; the legacy
+/// string form is retained so existing installations continue to work safely.
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum PagerCommand {
+    Args(Vec<String>),
+    Legacy(String),
+}
+
+impl PagerCommand {
+    fn into_args(self) -> Result<Vec<String>> {
+        let args = match self {
+            Self::Args(args) => args,
+            // Deliberately do not interpret shell quoting, expansions, or operators.
+            // The old default contains simple whitespace-separated arguments, and
+            // anything shell-like in a customized value remains a literal argument.
+            Self::Legacy(command) => command.split_whitespace().map(str::to_owned).collect(),
+        };
+        if args.first().is_none_or(String::is_empty) {
+            anyhow::bail!("global.pager must contain an executable name");
+        }
+        Ok(args)
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -172,27 +197,56 @@ fn main() -> Result<()> {
         "niri" => &kb_config.compositor_args.niri,
         _ => &kb_config.compositor_args.default,
     };
-    // Command Construction
-    // Build a shell command that:
-    // a. Runs the pager (bat/less) on the file.
-    // b. Prints a "Press key to close" prompt.
-    // c. Waits for user input (read -n 1) so the terminal doesn't close immediately.
-    let inner_cmd = format!(
-        "{} '{}'; printf %s 'Press any key to close...'; read -n 1 -s -r",
-        global_conf.pager,
-        sheet_path.display()
-    );
-    //Execution
+    let pager_args = global_conf.pager.into_args()?;
+    let (pager, pager_args) = pager_args
+        .split_first()
+        .context("global.pager must contain an executable name")?;
+
+    // Invoke the pager directly. `--` keeps a sheet path such as `--help` from
+    // being parsed as an option, and no user-controlled value is shell syntax.
     Command::new(&global_conf.terminal)
         .args(compositor_args)
         .arg("-e")
-        .arg("sh")
-        .arg("-c")
-        .arg(&inner_cmd)
+        .arg(pager)
+        .args(pager_args)
+        .arg("--")
+        .arg(&sheet_path)
         .spawn()
         .context(format!(
             "Failed to spawn terminal: {}",
             global_conf.terminal
         ))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PagerCommand;
+
+    #[test]
+    fn typed_pager_arguments_are_preserved() {
+        let pager = PagerCommand::Args(vec![
+            "bat".to_string(),
+            "--paging=always".to_string(),
+            "--style=plain".to_string(),
+        ]);
+        assert_eq!(
+            pager.into_args().unwrap(),
+            ["bat", "--paging=always", "--style=plain"]
+        );
+    }
+
+    #[test]
+    fn legacy_pager_shell_operators_remain_literal_arguments() {
+        let pager = PagerCommand::Legacy("bat; touch /tmp/not-executed".to_string());
+        assert_eq!(
+            pager.into_args().unwrap(),
+            ["bat;", "touch", "/tmp/not-executed"]
+        );
+    }
+
+    #[test]
+    fn empty_pager_is_rejected() {
+        assert!(PagerCommand::Args(Vec::new()).into_args().is_err());
+    }
 }

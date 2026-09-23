@@ -318,10 +318,10 @@ exec sway
 }
 
 /// Applies specific fixes for NVIDIA on Wayland.
-/// 1. Sets the kernel parameter (`nvidia-drm.modeset=1`) when kernel-install
-///    manages `/etc/kernel/cmdline`.
-/// 2. Creates modprobe rules to fix suspend/resume.
-/// 3. Rebuilds initramfs via `mkinitcpio`.
+/// 1. Sets the required kernel parameters when kernel-install manages
+///    `/etc/kernel/cmdline`.
+/// 2. Enables NVIDIA's packaged suspend/hibernate/resume integration.
+/// 3. Creates modprobe rules and rebuilds initramfs when necessary.
 ///
 /// Security Note: Uses a secure temp file pattern for writing to /etc/.
 /// NOW SMART: Differentiates between Turing (Legacy) and Modern (Ampere/Ada) cards.
@@ -367,7 +367,8 @@ pub fn apply_nvidia_configs(
     // We only enforce this for non-turing, though it doesn't hurt turing.
     if !is_turing {
         requires_rebuild |= ensure_nvidia_modules_in_initcpio(sys)?;
-        requires_rebuild |= ensure_nvidia_drm_modeset_in_kernel_cmdline(sys)?;
+        requires_rebuild |= ensure_nvidia_kernel_cmdline_parameters(sys)?;
+        enable_nvidia_sleep_services(sys)?;
     }
     create_sway_hybrid_script(sys)?;
     println!("    🏗️  Rebuilding Initramfs...");
@@ -377,16 +378,19 @@ pub fn apply_nvidia_configs(
     Ok(())
 }
 
-/// Adds the NVIDIA DRM modeset flag to kernel-install's managed command line.
+/// Adds NVIDIA's required modern-driver parameters to kernel-install's managed
+/// command line. An explicit user setting for either parameter is preserved.
 ///
 /// Some installations use GRUB instead and do not have `/etc/kernel/cmdline`;
 /// leave those boot configurations untouched. The modprobe setting above still
 /// supplies modeset for them.
-pub fn ensure_nvidia_drm_modeset_in_kernel_cmdline(
+pub fn ensure_nvidia_kernel_cmdline_parameters(
     sys: &impl CmdExecutor,
 ) -> Result<bool, std::io::Error> {
     const CMDLINE_PATH: &str = "/etc/kernel/cmdline";
     const MODESET_FLAG: &str = "nvidia-drm.modeset=1";
+    const PRESERVE_ALLOCATIONS_FLAG: &str = "nvidia.NVreg_PreserveVideoMemoryAllocations=1";
+    const PRESERVE_ALLOCATIONS_PREFIX: &str = "nvidia.NVreg_PreserveVideoMemoryAllocations=";
 
     let path = Path::new(CMDLINE_PATH);
     if !sys.path_exists(path) {
@@ -394,20 +398,60 @@ pub fn ensure_nvidia_drm_modeset_in_kernel_cmdline(
         return Ok(false);
     }
 
-    println!("    🔧 Checking kernel command line for NVIDIA DRM modeset...");
+    println!("    🔧 Checking kernel command line for NVIDIA power management...");
     let content = sys.read_file_to_string(path)?;
-    if content
+    let has_modeset_setting = content.split_whitespace().any(|argument| {
+        argument == MODESET_FLAG
+            || argument == "nvidia_drm.modeset=1"
+            || argument.starts_with("nvidia-drm.modeset=")
+            || argument.starts_with("nvidia_drm.modeset=")
+    });
+    let has_preserve_allocations_setting = content
         .split_whitespace()
-        .any(|argument| argument == MODESET_FLAG || argument == "nvidia_drm.modeset=1")
-    {
+        .any(|argument| argument.starts_with(PRESERVE_ALLOCATIONS_PREFIX));
+
+    if has_modeset_setting && has_preserve_allocations_setting {
         return Ok(false);
     }
 
-    let updated = match content.trim() {
-        "" => format!("{MODESET_FLAG}\n"),
-        cmdline => format!("{cmdline} {MODESET_FLAG}\n"),
-    };
+    let mut arguments: Vec<&str> = content.split_whitespace().collect();
+    if !has_modeset_setting {
+        arguments.push(MODESET_FLAG);
+    }
+    if !has_preserve_allocations_setting {
+        arguments.push(PRESERVE_ALLOCATIONS_FLAG);
+    }
+    let updated = format!("{}\n", arguments.join(" "));
     sys.install_string_to_root_file(path, &updated, "644")
+}
+
+/// Enables NVIDIA's system-sleep hooks when the installed NVIDIA userspace
+/// package provides them and they are not already enabled. This does not start
+/// the hooks during an ordinary install or refresh.
+fn enable_nvidia_sleep_services(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+    const UNIT_DIRECTORY: &str = "/usr/lib/systemd/system";
+    const UNITS: &[&str] = &[
+        "nvidia-suspend.service",
+        "nvidia-hibernate.service",
+        "nvidia-resume.service",
+    ];
+
+    let available_units: Vec<&str> = UNITS
+        .iter()
+        .copied()
+        .filter(|unit| sys.path_exists(&Path::new(UNIT_DIRECTORY).join(unit)))
+        .filter(|unit| {
+            sys.command_output("systemctl", &["is-enabled", "--quiet", unit])
+                .is_err()
+        })
+        .collect();
+    if available_units.is_empty() {
+        return Ok(());
+    }
+
+    let mut arguments = vec!["systemctl", "enable"];
+    arguments.extend(available_units);
+    sys.run_cmd("sudo", &arguments)
 }
 
 /// Helper: Safely adds nvidia modules to mkinitcpio.conf if missing.
@@ -695,29 +739,88 @@ mod tests {
     }
 
     #[test]
-    fn test_kernel_cmdline_adds_nvidia_drm_modeset_once() {
+    fn test_kernel_cmdline_adds_modern_nvidia_power_parameters_once() {
         let env = MockEnv::default();
         env.mock_files.borrow_mut().insert(
             "/etc/kernel/cmdline".to_string(),
             "root=UUID=example rw quiet\n".to_string(),
         );
 
-        assert!(ensure_nvidia_drm_modeset_in_kernel_cmdline(&env).unwrap());
+        assert!(ensure_nvidia_kernel_cmdline_parameters(&env).unwrap());
         let updated = env
             .mock_files
             .borrow()
             .get("/etc/kernel/cmdline")
             .unwrap()
             .clone();
-        assert_eq!(updated, "root=UUID=example rw quiet nvidia-drm.modeset=1\n");
-        assert!(!ensure_nvidia_drm_modeset_in_kernel_cmdline(&env).unwrap());
+        assert_eq!(
+            updated,
+            "root=UUID=example rw quiet nvidia-drm.modeset=1 nvidia.NVreg_PreserveVideoMemoryAllocations=1\n"
+        );
+        assert!(!ensure_nvidia_kernel_cmdline_parameters(&env).unwrap());
     }
 
     #[test]
     fn test_kernel_cmdline_is_unchanged_when_not_managed() {
         let env = MockEnv::default();
-        assert!(!ensure_nvidia_drm_modeset_in_kernel_cmdline(&env).unwrap());
+        assert!(!ensure_nvidia_kernel_cmdline_parameters(&env).unwrap());
         assert!(env.cmd_log.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_kernel_cmdline_preserves_explicit_nvidia_user_settings() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/kernel/cmdline".to_string(),
+            "quiet nvidia_drm.modeset=0 nvidia.NVreg_PreserveVideoMemoryAllocations=0\n"
+                .to_string(),
+        );
+
+        assert!(!ensure_nvidia_kernel_cmdline_parameters(&env).unwrap());
+        assert_eq!(
+            env.mock_files.borrow().get("/etc/kernel/cmdline"),
+            Some(
+                &"quiet nvidia_drm.modeset=0 nvidia.NVreg_PreserveVideoMemoryAllocations=0\n"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_enable_nvidia_sleep_services_only_enables_needed_packaged_units() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/usr/lib/systemd/system/nvidia-suspend.service".to_string(),
+            String::new(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/usr/lib/systemd/system/nvidia-resume.service".to_string(),
+            String::new(),
+        );
+        env.command_outputs.borrow_mut().insert(
+            (
+                "systemctl".to_string(),
+                vec![
+                    "is-enabled".to_string(),
+                    "--quiet".to_string(),
+                    "nvidia-suspend.service".to_string(),
+                ],
+            ),
+            String::new(),
+        );
+
+        enable_nvidia_sleep_services(&env).unwrap();
+        assert_eq!(
+            env.cmd_log.borrow().as_slice(),
+            &[(
+                "sudo".to_string(),
+                vec![
+                    "systemctl".to_string(),
+                    "enable".to_string(),
+                    "nvidia-resume.service".to_string(),
+                ],
+            )]
+        );
     }
 
     #[test]
