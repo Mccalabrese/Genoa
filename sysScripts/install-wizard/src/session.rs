@@ -1,4 +1,5 @@
 use crate::CmdExecutor;
+use crate::update::install_pacman_packages;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item};
 
@@ -37,10 +38,7 @@ pub fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::
 /// these services too.
 pub fn configure_printing_services(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("   🖨️  Enabling printing and network printer discovery...");
-    sys.run_cmd(
-        "sudo",
-        &["pacman", "-S", "--needed", "--noconfirm", "nss-mdns"],
-    )?;
+    install_pacman_packages(sys, &["nss-mdns"])?;
 
     let nsswitch_path = Path::new("/etc/nsswitch.conf");
     let nsswitch_content = sys.read_file_to_string(nsswitch_path)?;
@@ -274,10 +272,7 @@ pub fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     println!("   🔧 Configuring dnscrypt-proxy (DNS Proxy)...");
 
     // 1. Ensure package is installed (failsafe)
-    sys.run_cmd(
-        "sudo",
-        &["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"],
-    )?;
+    install_pacman_packages(sys, &["dnscrypt-proxy"])?;
     // 2. Configure TOML to use Cloudflare.
     //
     // `server_names` and `listen_addresses` are top-level settings. Editing lines
