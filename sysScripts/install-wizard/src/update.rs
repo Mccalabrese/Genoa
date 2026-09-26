@@ -14,24 +14,38 @@ const YAY_PINNED_REF: &str = "refs/genoa/pinned-yay";
 // reviewing a new Yay revision, then ship the new installer in a signed tag.
 const YAY_AUR_COMMIT: &str = "cb43f84828ab4f9700f7c6f9c6d7a923d4cfaff0";
 
-/// installs packages via pacman with --needed and --noconfirm
+/// Ensures that every requested repository package is installed.
+///
+/// The updater performs the system-wide package upgrade before invoking the
+/// installer, so this phase only needs to install missing release dependencies.
+/// Filtering installed targets prevents pacman from emitting one warning per
+/// already-current package during ordinary refreshes.
 pub fn install_pacman_packages(
     sys: &impl CmdExecutor,
     packages: &[&str],
 ) -> Result<(), std::io::Error> {
-    if packages.is_empty() {
+    let missing_packages: Vec<&str> = packages
+        .iter()
+        .copied()
+        .filter(|package| !sys.is_package_installed(package))
+        .collect();
+    if missing_packages.is_empty() {
         return Ok(());
     }
     let mut args = vec!["pacman", "-S", "--needed", "--noconfirm"];
-    args.extend(packages);
+    args.extend(&missing_packages);
     if let Err(e) = sys.run_cmd("sudo", &args) {
         eprintln!(
             "{}",
-            format!("❌ Failed to install packages: {}", packages.join(", ")).red()
+            format!(
+                "❌ Failed to install packages: {}",
+                missing_packages.join(", ")
+            )
+            .red()
         );
         return Err(e);
     }
-    println!("   ✅ Installed packages: {}", packages.join(", "));
+    println!("   ✅ Installed packages: {}", missing_packages.join(", "));
     Ok(())
 }
 
@@ -107,7 +121,12 @@ pub fn install_aur_packages(
     home: &Path,
     aur_packages: &[&str],
 ) -> Result<(), std::io::Error> {
-    if aur_packages.is_empty() {
+    let missing_packages: Vec<&str> = aur_packages
+        .iter()
+        .copied()
+        .filter(|package| !sys.is_package_installed(package))
+        .collect();
+    if missing_packages.is_empty() {
         return Ok(());
     }
     if !sys.command_exists("yay") && !bootstrap_pinned_yay(sys, home)? {
@@ -116,7 +135,7 @@ pub fn install_aur_packages(
     }
 
     let mut args = vec!["-S", "--needed", "--noconfirm"];
-    args.extend(aur_packages);
+    args.extend(missing_packages);
     if sys.run_cmd("yay", &args).is_err() {
         eprintln!("{}", "⚠️  AUR Warning.".yellow());
     }
@@ -302,6 +321,16 @@ mod tests {
     }
 
     #[test]
+    fn test_install_pacman_packages_skips_installed_targets() {
+        let mut env = MockEnv::default();
+        env.installed_packages.insert("foo".to_string());
+        env.installed_packages.insert("bar".to_string());
+
+        install_pacman_packages(&env, &["foo", "bar"]).unwrap();
+        assert!(env.cmd_log.borrow().is_empty());
+    }
+
+    #[test]
     fn test_install_clepsydre_package_downloads_verifies_and_installs() {
         let env = MockEnv::default();
         let home = Path::new("/home/testuser");
@@ -381,6 +410,16 @@ mod tests {
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
         }));
+    }
+
+    #[test]
+    fn test_install_aur_packages_skips_the_yay_call_when_all_are_installed() {
+        let mut env = MockEnv::default();
+        env.available_commands.insert("yay".to_string());
+        env.installed_packages.insert("pkg-a".to_string());
+
+        install_aur_packages(&env, Path::new("/home/testuser"), &["pkg-a"]).unwrap();
+        assert!(env.cmd_log.borrow().is_empty());
     }
 
     #[test]

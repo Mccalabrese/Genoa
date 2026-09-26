@@ -45,7 +45,8 @@ use crate::kernel::{
 use crate::live_env::LiveEnv;
 use crate::session::{
     configure_dns, configure_printing_services, configure_quiet_boot, configure_system,
-    configure_tlp, enforce_session_order, sanitize_mkinitcpio,
+    configure_tlp, enforce_session_order, migrate_mkinitcpio_to_systemd_initramfs,
+    sanitize_mkinitcpio,
 };
 use crate::traits::CmdExecutor;
 use crate::update::{
@@ -229,6 +230,14 @@ fn main() {
             eprintln!("{}", "❌ Sudo required.".red());
             std::process::exit(1);
         }
+        if let Err(e) = sanitize_mkinitcpio(&live_sys) {
+            eprintln!("   ❌ Failed to sanitize mkinitcpio configuration: {}", e);
+            std::process::exit(1);
+        }
+        if let Err(e) = migrate_mkinitcpio_to_systemd_initramfs(&live_sys) {
+            eprintln!("   ❌ Failed to migrate the initramfs configuration: {}", e);
+            std::process::exit(1);
+        }
     } else {
         // ==========================================
         //  FULL INSTALL MODE (Fresh Install Only)
@@ -248,19 +257,20 @@ fn main() {
             std::process::exit(1);
         }
 
-        if !has_existing_install {
-            if read_kernel_flavor(&live_sys).is_none() {
-                println!("\n{}", "🐧 Choosing kernel policy...".blue().bold());
-                kernel_flavor = prompt_for_kernel_flavor();
-                if let Err(e) = persist_kernel_flavor(&live_sys, kernel_flavor) {
-                    eprintln!("   ❌ Failed to save kernel policy: {}", e);
-                    std::process::exit(1);
-                }
-            }
+        if let Err(e) = sanitize_mkinitcpio(&live_sys) {
+            eprintln!("   ❌ Failed to sanitize mkinitcpio configuration: {}", e);
+            std::process::exit(1);
+        }
+        if let Err(e) = migrate_mkinitcpio_to_systemd_initramfs(&live_sys) {
+            eprintln!("   ❌ Failed to migrate the initramfs configuration: {}", e);
+            std::process::exit(1);
+        }
 
-            // This must run before either graphics path can rebuild an image.
-            if let Err(e) = sanitize_mkinitcpio(&live_sys) {
-                eprintln!("   ❌ Failed to sanitize mkinitcpio configuration: {}", e);
+        if !has_existing_install && read_kernel_flavor(&live_sys).is_none() {
+            println!("\n{}", "🐧 Choosing kernel policy...".blue().bold());
+            kernel_flavor = prompt_for_kernel_flavor();
+            if let Err(e) = persist_kernel_flavor(&live_sys, kernel_flavor) {
+                eprintln!("   ❌ Failed to save kernel policy: {}", e);
                 std::process::exit(1);
             }
         }
@@ -614,7 +624,10 @@ fn main() {
         } else {
             // --- FRESH INSTALL ONLY ---
             println!("\n{}", "🔗 Linking Config Files...".blue().bold());
-            link_dotfiles_and_copy_resources(&live_sys, &home, &repo_root);
+            if let Err(e) = link_dotfiles_and_copy_resources(&live_sys, &home, &repo_root) {
+                eprintln!("   ❌ Failed to link configuration files safely: {}", e);
+                std::process::exit(1);
+            }
 
             if let Err(e) = configure_system(&live_sys, &home) {
                 eprintln!("   ❌ Failed to configure system services: {}", e);

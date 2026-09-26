@@ -9,6 +9,7 @@ pub struct MockEnv {
     pub env_vars: std::collections::HashMap<String, String>,
     pub available_commands: HashSet<String>,
     pub installed_packages: HashSet<String>,
+    pub failing_commands: RefCell<HashSet<(String, Vec<String>)>>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
     pub command_outputs: RefCell<std::collections::HashMap<(String, Vec<String>), String>>,
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
@@ -19,10 +20,16 @@ pub struct MockEnv {
 
 impl CmdExecutor for MockEnv {
     fn run_cmd(&self, cmd: &str, args: &[&str]) -> Result<(), std::io::Error> {
-        self.cmd_log.borrow_mut().push((
+        let command = (
             cmd.to_string(),
-            args.iter().map(|s| s.to_string()).collect(),
-        ));
+            args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        );
+        self.cmd_log.borrow_mut().push(command.clone());
+        if self.failing_commands.borrow().contains(&command) {
+            return Err(std::io::Error::other(format!(
+                "Mocked command failed: {cmd} {args:?}"
+            )));
+        }
         Ok(())
     }
     fn command_output(&self, cmd: &str, args: &[&str]) -> Result<String, std::io::Error> {

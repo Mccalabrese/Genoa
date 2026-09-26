@@ -45,6 +45,12 @@ fn parse_volume_pct(out: &[u8]) -> Option<f64> {
         .map(|v| v * 100.0)
 }
 
+fn airplane_mode_is_active(out: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(out)
+        .ok()
+        .is_some_and(|status| status.get("class").and_then(Value::as_str) == Some("on"))
+}
+
 pub fn build_ui(app: &Application) {
     // The compositor places the layer on the active monitor, so use a stable width.
     let final_width = 400;
@@ -662,14 +668,28 @@ pub fn build_ui(app: &Application) {
         }
     });
 
-    // Airplane Mode (Optimistic UI)
-    let btn_air_clone = btn_air.clone();
+    // Airplane Mode: wait for rfkill-manager to verify the new state before
+    // updating the UI. A failed radio toggle must leave the button unchanged.
+    let (air_toggle_tx, air_toggle_rx) = unbounded::<Option<Vec<u8>>>();
     btn_air.connect_clicked(move |_| {
-        helpers::run_home_bin("rfkill-manager", &["--toggle"]);
-        if btn_air_clone.has_css_class("active") {
-            btn_air_clone.remove_css_class("active");
-        } else {
-            btn_air_clone.add_css_class("active");
+        let air_toggle_tx = air_toggle_tx.clone();
+        std::thread::spawn(move || {
+            let result = helpers::get_output_home_bin("rfkill-manager", &["--toggle"]);
+            let _ = air_toggle_tx.send_blocking(result);
+        });
+    });
+
+    let btn_air_result = btn_air.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(result) = air_toggle_rx.recv().await {
+            let Some(output) = result else {
+                continue;
+            };
+            if airplane_mode_is_active(&output) {
+                btn_air_result.add_css_class("active");
+            } else {
+                btn_air_result.remove_css_class("active");
+            }
         }
     });
 
@@ -736,7 +756,7 @@ pub fn build_ui(app: &Application) {
     let (status_tx, status_rx) = unbounded();
     std::thread::spawn(move || {
         let dns_o = helpers::get_output_home_bin("cf-status", &[]);
-        let air_o = helpers::get_output("rfkill", &["list", "wlan"]);
+        let air_o = helpers::get_output_home_bin("rfkill-manager", &["--status"]);
         let mute_o = helpers::get_output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"]);
         let bright_o = helpers::get_output("brightnessctl", &["i", "-m"]);
         let _ = status_tx.send_blocking((dns_o, air_o, mute_o, bright_o));
@@ -752,10 +772,12 @@ pub fn build_ui(app: &Application) {
                 btn_dns_load.add_css_class("active");
             }
             // Apply Airplane State
-            if let Some(out) = air_o
-                && String::from_utf8_lossy(&out).contains("Soft blocked: yes")
-            {
-                btn_air_load.add_css_class("active");
+            if let Some(out) = air_o {
+                if airplane_mode_is_active(&out) {
+                    btn_air_load.add_css_class("active");
+                } else {
+                    btn_air_load.remove_css_class("active");
+                }
             }
             // Apply Mute/Volume State
             if let Some(out) = mute_o {
