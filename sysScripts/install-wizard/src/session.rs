@@ -1,7 +1,47 @@
 use crate::CmdExecutor;
 use crate::update::install_pacman_packages;
+use colored::Colorize;
 use std::path::Path;
 use toml_edit::{DocumentMut, Item};
+
+const MKINITCPIO_CONFIG_PATH: &str = "/etc/mkinitcpio.conf";
+const MKINITCPIO_DROP_IN_DIRECTORY: &str = "/etc/mkinitcpio.conf.d";
+const MKINITCPIO_PRESET_DIRECTORY: &str = "/etc/mkinitcpio.d";
+const MKINITCPIO_MIGRATION_BACKUP_PATH: &str =
+    "/etc/genoa/migrations/mkinitcpio.conf.pre-systemd-initramfs-v1";
+const LEGACY_HOOKS: &[&str] = &[
+    "base",
+    "udev",
+    "autodetect",
+    "microcode",
+    "modconf",
+    "kms",
+    "keyboard",
+    "keymap",
+    "consolefont",
+    "block",
+    "filesystems",
+    "fsck",
+];
+const SYSTEMD_HOOKS: &[&str] = &[
+    "systemd",
+    "autodetect",
+    "microcode",
+    "modconf",
+    "kms",
+    "keyboard",
+    "sd-vconsole",
+    "block",
+    "filesystems",
+    "fsck",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+enum SystemdHookMigration {
+    AlreadyConfigured,
+    Upgrade(String),
+    NeedsManualReview,
+}
 
 /// Configures essential system services and settings, including mkinitcpio sanitation, enabling
 /// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, and
@@ -261,6 +301,271 @@ pub fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error>
         }
     }
     Ok(())
+}
+
+/// Moves the uncomplicated Genoa/Arch hook layout to systemd's initramfs.
+///
+/// This is intentionally narrow. A successful `mkinitcpio` build cannot prove
+/// that an arbitrary encrypted or custom-storage layout will boot, so anything
+/// other than the known stock layout is left untouched and requires an explicit
+/// acknowledgement before the installer continues.
+pub fn migrate_mkinitcpio_to_systemd_initramfs(
+    sys: &impl CmdExecutor,
+) -> Result<(), std::io::Error> {
+    // Dracut and booster users sometimes retain this file after switching
+    // generators. It is not Genoa's place to revive an orphaned mkinitcpio
+    // configuration during an otherwise unrelated update.
+    if !sys.command_exists("mkinitcpio") {
+        return Ok(());
+    }
+
+    if !mkinitcpio_uses_unambiguous_main_config(sys)? {
+        acknowledge_manual_initramfs_review()?;
+        return Ok(());
+    }
+
+    let config_path = Path::new(MKINITCPIO_CONFIG_PATH);
+    let contents = match sys.read_file_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            acknowledge_manual_initramfs_review()?;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+
+    match inspect_systemd_hook_migration(&contents) {
+        SystemdHookMigration::AlreadyConfigured => Ok(()),
+        SystemdHookMigration::NeedsManualReview => acknowledge_manual_initramfs_review(),
+        SystemdHookMigration::Upgrade(updated) => {
+            // Confirm the installed mkinitcpio actually provides both systemd
+            // hooks before changing the source configuration.
+            for hook in ["systemd", "sd-vconsole"] {
+                sys.command_output("mkinitcpio", &["-H", hook])
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "mkinitcpio does not support the required '{hook}' hook: {error}"
+                        ))
+                    })?;
+            }
+
+            println!("   🔄 Moving the standard initramfs layout to systemd...");
+            sys.create_root_dir_all(Path::new("/etc/genoa/migrations"))?;
+            sys.install_string_to_root_file(
+                Path::new(MKINITCPIO_MIGRATION_BACKUP_PATH),
+                &contents,
+                "600",
+            )?;
+            sys.install_string_to_root_file(config_path, &updated, "644")?;
+
+            if let Err(build_error) = sys.run_cmd("sudo", &["mkinitcpio", "-P"]) {
+                let restore_result = sys.install_string_to_root_file(config_path, &contents, "644");
+                return Err(match restore_result {
+                    Ok(_) => match sys.run_cmd("sudo", &["mkinitcpio", "-P"]) {
+                        Ok(()) => std::io::Error::other(format!(
+                            "the systemd initramfs build failed; the original configuration and initramfs were restored: {build_error}"
+                        )),
+                        Err(recovery_error) => std::io::Error::other(format!(
+                            "the systemd initramfs build failed ({build_error}); /etc/mkinitcpio.conf was restored, but rebuilding the original initramfs also failed: {recovery_error}"
+                        )),
+                    },
+                    Err(restore_error) => std::io::Error::other(format!(
+                        "the systemd initramfs build failed ({build_error}) and restoring /etc/mkinitcpio.conf also failed: {restore_error}"
+                    )),
+                });
+            }
+
+            println!("   ✅ Systemd initramfs ready.");
+            Ok(())
+        }
+    }
+}
+
+/// Only migrate when every generated image is known to read the main config.
+/// A drop-in or a preset-level custom ALL_config can make a successful build
+/// use different hooks than the file this migration would edit.
+fn mkinitcpio_uses_unambiguous_main_config(sys: &impl CmdExecutor) -> Result<bool, std::io::Error> {
+    let drop_in_directory = Path::new(MKINITCPIO_DROP_IN_DIRECTORY);
+    if sys.path_exists(drop_in_directory)
+        && (!sys.path_is_dir(drop_in_directory)
+            || !sys.list_dir_file_names(drop_in_directory)?.is_empty())
+    {
+        return Ok(false);
+    }
+
+    let preset_directory = Path::new(MKINITCPIO_PRESET_DIRECTORY);
+    if !sys.path_exists(preset_directory) {
+        return Ok(true);
+    }
+    if !sys.path_is_dir(preset_directory) {
+        return Ok(false);
+    }
+
+    for preset_name in sys.list_dir_file_names(preset_directory)? {
+        if !preset_name.ends_with(".preset") {
+            continue;
+        }
+        let preset = sys.read_file_to_string(&preset_directory.join(preset_name))?;
+        if preset_has_custom_config(&preset) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn preset_has_custom_config(preset: &str) -> bool {
+    preset.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            return false;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        key.ends_with("_config")
+            && !matches!(
+                value,
+                "/etc/mkinitcpio.conf" | "\"/etc/mkinitcpio.conf\"" | "'/etc/mkinitcpio.conf'"
+            )
+    })
+}
+
+fn acknowledge_manual_initramfs_review() -> Result<(), std::io::Error> {
+    println!(
+        "\n{}",
+        "⚠️  INITRAMFS CHANGE NEEDS YOUR EYES".yellow().bold()
+    );
+    println!(
+        "{}",
+        "This machine has a non-standard or encrypted early-boot setup. The systemd initramfs switch is the right direction, but it is not something I am willing to guess at from an updater.".yellow()
+    );
+    println!(
+        "{}",
+        "On a plain install, the change is base and udev (plus resume, if present) to systemd, then keymap and consolefont to sd-vconsole. Yours may need more than that.".yellow()
+    );
+    println!(
+        "{}",
+        "A bad guess here can build cleanly and still leave you with a machine that will not boot. Nothing has been changed; Genoa is leaving your hooks alone for now.".yellow()
+    );
+    println!(
+        "{}",
+        "Please review the mkinitcpio change for this machine's storage or encryption layout before making that switch.".yellow()
+    );
+
+    loop {
+        let answer =
+            inquire::Text::new("Type yes once you have read this and want to continue the update")
+                .prompt()
+                .map_err(|error| {
+                    std::io::Error::other(format!("initramfs acknowledgement cancelled: {error}"))
+                })?;
+        if answer.trim() == "yes" {
+            return Ok(());
+        }
+        println!("{}", "Please type exactly yes to continue.".yellow());
+    }
+}
+
+fn inspect_systemd_hook_migration(contents: &str) -> SystemdHookMigration {
+    let Some((start, end, replacement)) = systemd_hook_replacement(contents) else {
+        return SystemdHookMigration::NeedsManualReview;
+    };
+    if contents[start..end] == replacement {
+        SystemdHookMigration::AlreadyConfigured
+    } else {
+        let mut updated = String::with_capacity(contents.len() + replacement.len());
+        updated.push_str(&contents[..start]);
+        updated.push_str(&replacement);
+        updated.push_str(&contents[end..]);
+        SystemdHookMigration::Upgrade(updated)
+    }
+}
+
+/// Returns the byte range of the sole active HOOKS line and its safe replacement.
+/// Shell expressions, multiple assignments, non-ASCII line endings, and unfamiliar
+/// layouts deliberately return None rather than trying to interpret shell syntax.
+fn systemd_hook_replacement(contents: &str) -> Option<(usize, usize, String)> {
+    if contents.contains('\r') {
+        return None;
+    }
+
+    let mut found = None;
+    let mut line_start = 0;
+    for line in contents.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let trimmed = line_without_newline.trim_start();
+        let line_end = line_start + line_without_newline.len();
+
+        if !trimmed.starts_with('#') && trimmed.starts_with("HOOKS") {
+            let parsed = parse_simple_hooks_line(line_without_newline, line_start, line_end)?;
+            if found.replace(parsed).is_some() {
+                return None;
+            }
+        }
+        line_start += line.len();
+    }
+
+    let (start, end, indentation, suffix, hooks) = found?;
+    if hooks == SYSTEMD_HOOKS {
+        return Some((start, end, contents[start..end].to_string()));
+    }
+
+    let legacy_without_resume = hooks
+        .iter()
+        .filter(|hook| hook.as_str() != "resume")
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let has_at_most_one_resume = hooks
+        .iter()
+        .filter(|hook| hook.as_str() == "resume")
+        .count()
+        <= 1;
+    if legacy_without_resume != LEGACY_HOOKS || !has_at_most_one_resume {
+        return None;
+    }
+
+    Some((
+        start,
+        end,
+        format!("{indentation}HOOKS=({}){suffix}", SYSTEMD_HOOKS.join(" ")),
+    ))
+}
+
+fn parse_simple_hooks_line(
+    line: &str,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize, String, String, Vec<String>)> {
+    let trimmed = line.trim_start();
+    let indentation = line[..line.len() - trimmed.len()].to_string();
+    let assignment = trimmed.strip_prefix("HOOKS")?.strip_prefix('=')?;
+    let body = assignment.strip_prefix('(')?;
+    let close = body.find(')')?;
+    let hooks = &body[..close];
+    let suffix = &body[close + 1..];
+
+    if !suffix.trim().is_empty() && !suffix.trim_start().starts_with('#') {
+        return None;
+    }
+    if hooks.is_empty()
+        || hooks.split_whitespace().any(|hook| {
+            !hook
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+    {
+        return None;
+    }
+
+    Some((
+        start,
+        end,
+        indentation,
+        suffix.to_string(),
+        hooks.split_whitespace().map(str::to_string).collect(),
+    ))
 }
 
 /// Configures dnscrypt-proxy to use Cloudflare's DNS servers for enhanced privacy and security.
@@ -824,6 +1129,209 @@ server_names = ['cloudflare']
             log.is_empty(),
             "Expected no commands to be run for clean config"
         );
+    }
+
+    const STANDARD_LEGACY_HOOKS: &str = "HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)\n";
+    const STANDARD_SYSTEMD_HOOKS: &str = "HOOKS=(systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)\n";
+
+    #[test]
+    fn systemd_initramfs_migration_rewrites_only_the_standard_legacy_hooks() {
+        let input = format!("# Keep this comment\n{STANDARD_LEGACY_HOOKS}MODULES=(amdgpu)\n");
+        let SystemdHookMigration::Upgrade(updated) = inspect_systemd_hook_migration(&input) else {
+            panic!("the standard legacy hook layout should be eligible for migration");
+        };
+        assert_eq!(
+            updated,
+            format!("# Keep this comment\n{STANDARD_SYSTEMD_HOOKS}MODULES=(amdgpu)\n")
+        );
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_removes_legacy_resume_hook() {
+        let input = "HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block resume filesystems fsck)\n";
+        let SystemdHookMigration::Upgrade(updated) = inspect_systemd_hook_migration(input) else {
+            panic!("the standard legacy layout with resume should be eligible for migration");
+        };
+        assert_eq!(updated, STANDARD_SYSTEMD_HOOKS);
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_leaves_the_target_layout_alone() {
+        assert_eq!(
+            inspect_systemd_hook_migration(STANDARD_SYSTEMD_HOOKS),
+            SystemdHookMigration::AlreadyConfigured
+        );
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_refuses_encrypted_or_custom_layouts() {
+        let encrypted = "HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block encrypt filesystems fsck)\n";
+        let custom = "HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block plymouth filesystems fsck)\n";
+        assert_eq!(
+            inspect_systemd_hook_migration(encrypted),
+            SystemdHookMigration::NeedsManualReview
+        );
+        assert_eq!(
+            inspect_systemd_hook_migration(custom),
+            SystemdHookMigration::NeedsManualReview
+        );
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_refuses_drop_ins_and_custom_preset_configs() {
+        let drop_in_env = MockEnv::default();
+        drop_in_env
+            .mock_dirs
+            .borrow_mut()
+            .insert(MKINITCPIO_DROP_IN_DIRECTORY.to_string());
+        drop_in_env.mock_files.borrow_mut().insert(
+            format!("{MKINITCPIO_DROP_IN_DIRECTORY}/custom.conf"),
+            "HOOKS=(custom)\n".to_string(),
+        );
+        assert!(!mkinitcpio_uses_unambiguous_main_config(&drop_in_env).unwrap());
+
+        let preset_env = MockEnv::default();
+        preset_env
+            .mock_dirs
+            .borrow_mut()
+            .insert(MKINITCPIO_PRESET_DIRECTORY.to_string());
+        preset_env.mock_files.borrow_mut().insert(
+            format!("{MKINITCPIO_PRESET_DIRECTORY}/custom.preset"),
+            "ALL_config=\"/etc/custom-mkinitcpio.conf\"\n".to_string(),
+        );
+        assert!(!mkinitcpio_uses_unambiguous_main_config(&preset_env).unwrap());
+
+        let default_preset_env = MockEnv::default();
+        default_preset_env
+            .mock_dirs
+            .borrow_mut()
+            .insert(MKINITCPIO_PRESET_DIRECTORY.to_string());
+        default_preset_env.mock_files.borrow_mut().insert(
+            format!("{MKINITCPIO_PRESET_DIRECTORY}/linux.preset"),
+            "default_config=\"/etc/custom-mkinitcpio.conf\"\n".to_string(),
+        );
+        assert!(!mkinitcpio_uses_unambiguous_main_config(&default_preset_env).unwrap());
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_accepts_the_default_preset_config() {
+        let env = MockEnv::default();
+        env.mock_dirs
+            .borrow_mut()
+            .insert(MKINITCPIO_PRESET_DIRECTORY.to_string());
+        env.mock_files.borrow_mut().insert(
+            format!("{MKINITCPIO_PRESET_DIRECTORY}/linux.preset"),
+            "ALL_config=\"/etc/mkinitcpio.conf\"\n".to_string(),
+        );
+        assert!(mkinitcpio_uses_unambiguous_main_config(&env).unwrap());
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_builds_after_saving_a_root_backup() {
+        let mut env = MockEnv::default();
+        env.available_commands.insert("mkinitcpio".to_string());
+        env.mock_files.borrow_mut().insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            STANDARD_LEGACY_HOOKS.to_string(),
+        );
+        for hook in ["systemd", "sd-vconsole"] {
+            env.command_outputs.borrow_mut().insert(
+                (
+                    "mkinitcpio".to_string(),
+                    vec!["-H".to_string(), hook.to_string()],
+                ),
+                "hook available".to_string(),
+            );
+        }
+
+        migrate_mkinitcpio_to_systemd_initramfs(&env).unwrap();
+
+        let files = env.mock_files.borrow();
+        assert_eq!(
+            files.get("/etc/mkinitcpio.conf"),
+            Some(&STANDARD_SYSTEMD_HOOKS.to_string())
+        );
+        assert_eq!(
+            files.get(MKINITCPIO_MIGRATION_BACKUP_PATH),
+            Some(&STANDARD_LEGACY_HOOKS.to_string())
+        );
+        drop(files);
+
+        let commands = env.cmd_log.borrow();
+        let build_index = commands
+            .iter()
+            .position(|(program, args)| program == "sudo" && args == &["mkinitcpio", "-P"])
+            .expect("the migrated configuration must be built");
+        assert!(
+            commands[..build_index].iter().any(|(program, args)| {
+                program == "sudo"
+                    && args
+                        .last()
+                        .is_some_and(|path| path == MKINITCPIO_MIGRATION_BACKUP_PATH)
+            }),
+            "the original configuration must be backed up before rebuilding"
+        );
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_restores_the_prior_config_and_retries_its_build() {
+        let mut env = MockEnv::default();
+        env.available_commands.insert("mkinitcpio".to_string());
+        env.mock_files.borrow_mut().insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            STANDARD_LEGACY_HOOKS.to_string(),
+        );
+        for hook in ["systemd", "sd-vconsole"] {
+            env.command_outputs.borrow_mut().insert(
+                (
+                    "mkinitcpio".to_string(),
+                    vec!["-H".to_string(), hook.to_string()],
+                ),
+                "hook available".to_string(),
+            );
+        }
+        env.failing_commands.borrow_mut().insert((
+            "sudo".to_string(),
+            vec!["mkinitcpio".to_string(), "-P".to_string()],
+        ));
+
+        assert!(migrate_mkinitcpio_to_systemd_initramfs(&env).is_err());
+        assert_eq!(
+            env.mock_files.borrow().get("/etc/mkinitcpio.conf"),
+            Some(&STANDARD_LEGACY_HOOKS.to_string())
+        );
+        let rebuild_attempts = env
+            .cmd_log
+            .borrow()
+            .iter()
+            .filter(|(program, args)| program == "sudo" && args == &["mkinitcpio", "-P"])
+            .count();
+        assert_eq!(
+            rebuild_attempts, 2,
+            "the original image must be rebuilt once"
+        );
+    }
+
+    #[test]
+    fn systemd_initramfs_migration_ignores_an_orphaned_mkinitcpio_config() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            STANDARD_LEGACY_HOOKS.to_string(),
+        );
+
+        migrate_mkinitcpio_to_systemd_initramfs(&env).unwrap();
+
+        assert_eq!(
+            env.mock_files.borrow().get("/etc/mkinitcpio.conf"),
+            Some(&STANDARD_LEGACY_HOOKS.to_string())
+        );
+        assert!(
+            !env.mock_files
+                .borrow()
+                .contains_key(MKINITCPIO_MIGRATION_BACKUP_PATH)
+        );
+        assert!(env.cmd_log.borrow().is_empty());
     }
     #[test]
     fn test_config_shell() {
