@@ -500,7 +500,11 @@ pub fn build_custom_apps(
 }
 
 ///Walks through dotfiles in repo and symlinks them to home directory.
-pub fn link_dotfiles_and_copy_resources(sys: &impl CmdExecutor, home: &Path, repo_root: &Path) {
+pub fn link_dotfiles_and_copy_resources(
+    sys: &impl CmdExecutor,
+    home: &Path,
+    repo_root: &Path,
+) -> Result<(), std::io::Error> {
     let links = vec![
         (".tmux.conf", ".tmux.conf"),
         (".profile", ".profile"),
@@ -522,7 +526,7 @@ pub fn link_dotfiles_and_copy_resources(sys: &impl CmdExecutor, home: &Path, rep
     for (src, dest) in links {
         let src_path = repo_root.join(src);
         let dest_path = home.join(dest);
-        create_symlink(&src_path, &dest_path);
+        create_symlink(&src_path, &dest_path)?;
     }
     // --- SPECIAL HANDLING FOR NEOVIM ---
     // We only install this if the user has NO config, to avoid angering Vim power users.
@@ -536,7 +540,7 @@ pub fn link_dotfiles_and_copy_resources(sys: &impl CmdExecutor, home: &Path, rep
     } else {
         println!("   ✨ Installing LazyVim Config...");
         let nvim_src = repo_root.join(".config/nvim");
-        create_symlink(&nvim_src, &nvim_dest);
+        create_symlink(&nvim_src, &nvim_dest)?;
     }
 
     // Copy Wallpapers
@@ -566,6 +570,7 @@ pub fn link_dotfiles_and_copy_resources(sys: &impl CmdExecutor, home: &Path, rep
     // This regenerates ~/.config/user-dirs.dirs and ~/.config/gtk-3.0/bookmarks
     // ensuring they point to the *current* user's home, not Michael's.
     let _ = sys.run_cmd_ignore_err("xdg-user-dirs-update", &[]);
+    Ok(())
 }
 
 /// Surgical rewrite: only updates the sidebar_toggle on-click path in ModulesCustom.

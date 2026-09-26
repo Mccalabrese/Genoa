@@ -624,7 +624,10 @@ fn main() {
         } else {
             // --- FRESH INSTALL ONLY ---
             println!("\n{}", "🔗 Linking Config Files...".blue().bold());
-            link_dotfiles_and_copy_resources(&live_sys, &home, &repo_root);
+            if let Err(e) = link_dotfiles_and_copy_resources(&live_sys, &home, &repo_root) {
+                eprintln!("   ❌ Failed to link configuration files safely: {}", e);
+                std::process::exit(1);
+            }
 
             if let Err(e) = configure_system(&live_sys, &home) {
                 eprintln!("   ❌ Failed to configure system services: {}", e);

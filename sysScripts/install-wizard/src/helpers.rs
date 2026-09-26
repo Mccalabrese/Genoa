@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::Builder as TempDirBuilder;
 
 const NEW_REPO_DIR: &str = "Genoa";
 const LEGACY_REPO_DIR: &str = "rust-wayland-power";
@@ -344,21 +345,119 @@ pub fn maybe_repair_symlink(
     }
 }
 
-///Helper to create symlinks, backing up existing files if needed.
-pub fn create_symlink(src: &Path, dest: &Path) {
-    if dest.exists() && !dest.is_symlink() {
-        let backup = format!("{}.backup", dest.to_string_lossy());
-        let _ = fs::rename(dest, &backup);
-    }
+/// Creates a symlink without discarding an existing destination.
+///
+/// Any existing file, directory, or foreign symlink is moved into a unique,
+/// private sibling backup directory first. If creating the new link fails, the
+/// original destination is restored before the error reaches the caller.
+pub fn create_symlink(src: &Path, dest: &Path) -> Result<(), std::io::Error> {
+    fs::metadata(src).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not read symlink source {}: {error}", src.display()),
+        )
+    })?;
     if let Some(parent) = dest.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("symlink destination has no parent: {}", dest.display()),
+        ));
     }
-    if dest.is_symlink() {
-        let _ = fs::remove_file(dest);
+
+    if existing_symlink_points_to(dest, src) {
+        return Ok(());
     }
+
+    let backup = match fs::symlink_metadata(dest) {
+        Ok(_) => Some(backup_existing_destination(dest)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "could not inspect existing destination {}: {error}",
+                    dest.display()
+                ),
+            ));
+        }
+    };
+
     #[cfg(unix)]
-    std::os::unix::fs::symlink(src, dest)
-        .unwrap_or_else(|_| eprintln!("Failed to link {:?}", dest));
+    if let Err(link_error) = std::os::unix::fs::symlink(src, dest) {
+        if let Some(backup) = backup {
+            return match fs::rename(&backup, dest) {
+                Ok(()) => Err(std::io::Error::other(format!(
+                    "failed to link {} to {}; the original destination was restored from {}: {link_error}",
+                    dest.display(),
+                    src.display(),
+                    backup.display()
+                ))),
+                Err(restore_error) => Err(std::io::Error::other(format!(
+                    "failed to link {} to {}: {link_error}; original destination remains at {}, but restoring it failed: {restore_error}",
+                    dest.display(),
+                    src.display(),
+                    backup.display()
+                ))),
+            };
+        }
+        return Err(std::io::Error::other(format!(
+            "failed to link {} to {}: {link_error}",
+            dest.display(),
+            src.display()
+        )));
+    }
+
+    if let Some(backup) = backup {
+        println!("   📦 Backed up {} to {}", dest.display(), backup.display());
+    }
+    Ok(())
+}
+
+fn existing_symlink_points_to(dest: &Path, src: &Path) -> bool {
+    let Ok(target) = fs::read_link(dest) else {
+        return false;
+    };
+    if target == src {
+        return true;
+    }
+    !target.is_absolute()
+        && dest
+            .parent()
+            .is_some_and(|parent| parent.join(target) == src)
+}
+
+fn backup_existing_destination(dest: &Path) -> Result<PathBuf, std::io::Error> {
+    let parent = dest.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("symlink destination has no parent: {}", dest.display()),
+        )
+    })?;
+    let file_name = dest.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("symlink destination has no file name: {}", dest.display()),
+        )
+    })?;
+
+    // tempfile creates this directory atomically. Its random name means a
+    // prior backup can never be overwritten by a later installer pass.
+    let backup_dir = TempDirBuilder::new()
+        .prefix(".genoa-backup-")
+        .tempdir_in(parent)?
+        .keep();
+    let backup = backup_dir.join(file_name);
+    if let Err(error) = fs::rename(dest, &backup) {
+        let _ = fs::remove_dir(&backup_dir);
+        return Err(std::io::Error::other(format!(
+            "failed to back up {} to {}: {error}",
+            dest.display(),
+            backup.display()
+        )));
+    }
+    Ok(backup)
 }
 
 /// Helper to parse `cargo metadata` and extract the expected binary names for a given app.
@@ -426,6 +525,72 @@ pub fn expected_binary_names(app_path: &Path, app_name: &str) -> HashSet<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn create_symlink_keeps_existing_destination_in_a_unique_backup() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("config/destination");
+        fs::write(&source, "managed config").unwrap();
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, "user config").unwrap();
+
+        // Proves a historical fixed-name backup is neither reused nor replaced.
+        let old_backup = PathBuf::from(format!("{}.backup", destination.display()));
+        fs::write(&old_backup, "older backup").unwrap();
+
+        create_symlink(&source, &destination).unwrap();
+
+        assert_eq!(fs::read_link(&destination).unwrap(), source);
+        assert_eq!(fs::read_to_string(&old_backup).unwrap(), "older backup");
+        let backup_dirs = fs::read_dir(destination.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".genoa-backup-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(backup_dirs.len(), 1);
+        assert_eq!(
+            fs::read_to_string(backup_dirs[0].path().join("destination")).unwrap(),
+            "user config"
+        );
+    }
+
+    #[test]
+    fn create_symlink_is_a_noop_when_the_expected_link_already_exists() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::write(&source, "managed config").unwrap();
+        std::os::unix::fs::symlink(&source, &destination).unwrap();
+
+        create_symlink(&source, &destination).unwrap();
+
+        assert_eq!(fs::read_link(&destination).unwrap(), source);
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".genoa-backup-")
+        }));
+    }
+
+    #[test]
+    fn create_symlink_does_not_move_a_destination_when_its_source_is_missing() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("missing-source");
+        let destination = temp.path().join("destination");
+        fs::write(&destination, "user config").unwrap();
+
+        assert!(create_symlink(&source, &destination).is_err());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "user config");
+    }
 
     #[test]
     fn test_upsert_repo_root_in_config_inserts_section() {
