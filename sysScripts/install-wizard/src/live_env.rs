@@ -242,8 +242,15 @@ impl CmdExecutor for LiveEnv {
         )
     }
     fn create_root_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        self.run_cmd("sudo", &["mkdir", "-p", path.to_str().unwrap()])?;
-        self.run_cmd("sudo", &["chown", "root:root", path.to_str().unwrap()])?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Root directory path is not valid UTF-8"))?;
+        self.run_cmd("sudo", &["mkdir", "-p", path])?;
+        self.run_cmd("sudo", &["chown", "root:root", path])?;
+        // mkdir honors the invoking user's umask and does not correct the mode
+        // of an existing directory. Root-owned helper directories must remain
+        // traversable by the unprivileged process that asks Polkit to run them.
+        self.run_cmd("sudo", &["chmod", "755", path])?;
         Ok(())
     }
     fn list_dir_file_names(&self, path: &std::path::Path) -> Result<Vec<String>, std::io::Error> {
