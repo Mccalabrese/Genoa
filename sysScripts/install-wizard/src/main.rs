@@ -522,12 +522,18 @@ fn main() {
             false
         }
     };
-    if custom_apps_built {
-        let mut helper_installed = true;
-        if let Err(e) = install_cloudflare_toggle_helper(&live_sys, &repo_root) {
+
+    // Re-deploy this root-owned helper on every updater pass when its most
+    // recently built binary is available. This repairs ownership and traversal
+    // mode drift even if an unrelated custom Rust app failed to build.
+    let helper_installed = match install_cloudflare_toggle_helper(&live_sys, &repo_root) {
+        Ok(()) => true,
+        Err(e) => {
             eprintln!("   ⚠️  Failed to install the Cloudflare DNS helper: {e}");
-            helper_installed = false;
+            false
         }
+    };
+    if custom_apps_built {
         offer_signed_release_migration(&home, &repo_root, &run_options);
         if helper_installed {
             println!("   ✅ Custom Rust apps ready.");
