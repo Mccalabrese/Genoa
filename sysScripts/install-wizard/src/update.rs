@@ -3,11 +3,12 @@ use colored::*;
 use inquire::Confirm;
 use std::path::Path;
 
-const CLEPSYDRE_PACKAGE_NAME: &str = "clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
+const CLEPSYDRE_PACKAGE_NAME: &str = "clepsydre-git-r.head-2-x86_64.pkg.tar.zst";
 const CLEPSYDRE_PACKAGE_ID: &str = "clepsydre-git";
-const CLEPSYDRE_PACKAGE_URL: &str = "https://github.com/Mccalabrese/Genoa/releases/download/v0.1.0/clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
+const CLEPSYDRE_PACKAGE_VERSION: &str = "r.head-2";
+const CLEPSYDRE_PACKAGE_URL: &str = "https://github.com/Mccalabrese/Genoa/releases/download/v0.2.0/clepsydre-git-r.head-2-x86_64.pkg.tar.zst";
 const CLEPSYDRE_PACKAGE_SHA256: &str =
-    "fb17aa2066ec7d3a2e9ebb7b066b4547c9a22ab76e687ad45e9cc64541369852";
+    "3676fbf63c049f0989486ac586c803907682d2cd5f7141c93ce5a81e2d4fec4f";
 const YAY_AUR_URL: &str = "https://aur.archlinux.org/yay.git";
 const YAY_PINNED_REF: &str = "refs/genoa/pinned-yay";
 // This full commit is part of the signed Genoa release. Update it only after
@@ -57,7 +58,11 @@ pub fn install_clepsydre_package(
     sys: &impl CmdExecutor,
     home: &Path,
 ) -> Result<(), std::io::Error> {
-    if sys.is_package_installed(CLEPSYDRE_PACKAGE_ID) {
+    let required_package = format!("{CLEPSYDRE_PACKAGE_ID}>={CLEPSYDRE_PACKAGE_VERSION}");
+    if sys
+        .command_output("pacman", &["-T", &required_package])
+        .is_ok()
+    {
         return Ok(());
     }
 
@@ -65,7 +70,7 @@ pub fn install_clepsydre_package(
     sys.create_dir_all(&cache_dir)?;
 
     let package_path = cache_dir.join(CLEPSYDRE_PACKAGE_NAME);
-    let checksum_path = cache_dir.join("clepsydre-git-r.head-1-x86_64.pkg.tar.zst.sha256");
+    let checksum_path = cache_dir.join("clepsydre-git-r.head-2-x86_64.pkg.tar.zst.sha256");
     let package_path_str = package_path
         .to_str()
         .ok_or_else(|| std::io::Error::other("Invalid clepsydre package path"))?;
@@ -358,10 +363,18 @@ mod tests {
     }
 
     #[test]
-    fn test_install_clepsydre_package_skips_download_when_already_installed() {
-        let mut env = MockEnv::default();
-        env.installed_packages
-            .insert(CLEPSYDRE_PACKAGE_ID.to_string());
+    fn test_install_clepsydre_package_skips_download_when_required_version_is_installed() {
+        let env = MockEnv::default();
+        env.command_outputs.borrow_mut().insert(
+            (
+                "pacman".to_string(),
+                vec![
+                    "-T".to_string(),
+                    format!("{CLEPSYDRE_PACKAGE_ID}>={CLEPSYDRE_PACKAGE_VERSION}"),
+                ],
+            ),
+            String::new(),
+        );
 
         let result = install_clepsydre_package(&env, Path::new("/home/testuser"));
 
