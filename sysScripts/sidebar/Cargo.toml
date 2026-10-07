@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 async-channel = "2.5.0"
 chrono = "0.4.42"
-clepsydre-eds = "0.1.0"
-clepsydre-rebind = "0.1.0"
+clepsydre-eds = { git = "https://gitlab.gnome.org/TitouanReal/clepsydre.git", rev = "219974f6dbfbc63b9f85572aa76848ed6233cc6a", package = "clepsydre-eds" }
+clepsydre-rebind = { git = "https://gitlab.gnome.org/TitouanReal/clepsydre.git", rev = "219974f6dbfbc63b9f85572aa76848ed6233cc6a", package = "clepsydre-rebind" }
 glib = "0.22.3"
 gtk4 = { version = "0.11.1", features = ["v4_10"] }
 gtk4-layer-shell = "0.8.0"

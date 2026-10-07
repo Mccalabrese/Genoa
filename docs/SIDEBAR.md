@@ -111,13 +111,13 @@ The calendar currently depends on a locally packaged WIP build of clepsydre. The
 If you are building the sidebar manually, install the same package first:
 
 ```bash
-clepsydre_pkg="$HOME/.cache/genoa/clepsydre-git-r.head-1-x86_64.pkg.tar.zst"
+clepsydre_pkg="$HOME/.cache/genoa/clepsydre-git-r.head-2-x86_64.pkg.tar.zst"
 mkdir -p "$(dirname "$clepsydre_pkg")"
 curl --fail --location --retry 3 --retry-delay 2 \
   --proto '=https' --tlsv1.2 \
   --output "$clepsydre_pkg" \
-  "https://github.com/Mccalabrese/Genoa/releases/download/v0.1.0/clepsydre-git-r.head-1-x86_64.pkg.tar.zst"
-echo "fb17aa2066ec7d3a2e9ebb7b066b4547c9a22ab76e687ad45e9cc64541369852  $clepsydre_pkg" \
+  "https://github.com/Mccalabrese/Genoa/releases/download/v0.2.0/clepsydre-git-r.head-2-x86_64.pkg.tar.zst"
+echo "3676fbf63c049f0989486ac586c803907682d2cd5f7141c93ce5a81e2d4fec4f  $clepsydre_pkg" \
   | sha256sum --check
 sudo pacman -U --needed --noconfirm "$clepsydre_pkg"
 ```

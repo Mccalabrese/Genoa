@@ -105,9 +105,8 @@ dependencies = [
 
 [[package]]
 name = "clepsydre-eds"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99d54ec86c8128b7b3bb011b7483f0b9516aaad6cd48c095832d4a54fe743d99"
+version = "0.2.0"
+source = "git+https://gitlab.gnome.org/TitouanReal/clepsydre.git?rev=219974f6dbfbc63b9f85572aa76848ed6233cc6a#219974f6dbfbc63b9f85572aa76848ed6233cc6a"
 dependencies = [
  "bitflags",
  "clepsydre-eds-sys",
@@ -118,9 +117,8 @@ dependencies = [
 
 [[package]]
 name = "clepsydre-eds-sys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5077fbb9c1ede53f151ec64e3489ccbfc20de1e32f2f1a668644e4d1abd3f3c6"
+version = "0.2.0"
+source = "git+https://gitlab.gnome.org/TitouanReal/clepsydre.git?rev=219974f6dbfbc63b9f85572aa76848ed6233cc6a#219974f6dbfbc63b9f85572aa76848ed6233cc6a"
 dependencies = [
  "clepsydre-sys",
  "glib-sys",
@@ -130,9 +128,8 @@ dependencies = [
 
 [[package]]
 name = "clepsydre-rebind"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "106e96c6d081637a919295b29f03481d92208f6a97bf1dcf393cb40195e2b05d"
+version = "0.2.0"
+source = "git+https://gitlab.gnome.org/TitouanReal/clepsydre.git?rev=219974f6dbfbc63b9f85572aa76848ed6233cc6a#219974f6dbfbc63b9f85572aa76848ed6233cc6a"
 dependencies = [
  "bitflags",
  "clepsydre-sys",
@@ -145,9 +142,8 @@ dependencies = [
 
 [[package]]
 name = "clepsydre-sys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3a3a0536b4aa09e05f98fc0460d8c6e1b217d8e30cdc07f12ad31c0767ddf6d"
+version = "0.2.0"
+source = "git+https://gitlab.gnome.org/TitouanReal/clepsydre.git?rev=219974f6dbfbc63b9f85572aa76848ed6233cc6a#219974f6dbfbc63b9f85572aa76848ed6233cc6a"
 dependencies = [
  "gdk4-sys",
  "gio-sys",
