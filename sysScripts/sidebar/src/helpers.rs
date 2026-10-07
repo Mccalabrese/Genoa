@@ -4,7 +4,7 @@ use async_channel::{Receiver, Sender, unbounded};
 use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use clepsydre_eds::Manager as EdsManager;
 use clepsydre_rebind::prelude::*;
-use clepsydre_rebind::{Event, Timeframe};
+use clepsydre_rebind::Event;
 use gtk4::gio::prelude::ListModelExtManual;
 use gtk4::prelude::*;
 use std::collections::HashSet;
@@ -114,29 +114,8 @@ fn run_calendar_query(
         return Vec::new();
     };
 
-    let Ok(timeframe) = Timeframe::new(false, &start_dt, &end_dt) else {
-        log_command_failure(
-            "clepsydre_timeframe_failed",
-            "clepsydre",
-            &[],
-            "bad timeframe bounds",
-        );
-
-        return Vec::new();
-    };
-    let subscription = match manager.new_subscription(&timeframe) {
-        Ok(Some(sub)) => sub,
-        Ok(None) => {
-            log_command_failure(
-                "clepsydre_subscription_none",
-                "clepsydre",
-                &[],
-                "subscription returned None",
-            );
-
-            return Vec::new();
-        }
-
+    let subscription = match manager.new_subscription(&start_dt, &end_dt) {
+        Ok(sub) => sub,
         Err(e) => {
             log_command_failure(
                 "clepsydre_subscription_failed",
