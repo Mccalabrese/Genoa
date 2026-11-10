@@ -72,9 +72,15 @@ impl KeyboardInput {
             )
         })
         .ok_or_else(|| "libxkbcommon rejected the keyboard layout".to_string())?;
-        // SAFETY: `keymap` is non-null and owned until after `state` is freed.
-        let state = NonNull::new(unsafe { (self.library.xkb_state_new)(keymap.as_ptr()) })
-            .ok_or_else(|| "could not create keyboard state".to_string())?;
+        // SAFETY: `keymap` is non-null and owned by this function until it is
+        // transferred into `KeyboardState` below.
+        let Some(state) = NonNull::new(unsafe { (self.library.xkb_state_new)(keymap.as_ptr()) })
+        else {
+            // SAFETY: `keymap` has not been transferred to `KeyboardState`,
+            // and this is its sole matching unref call on this error path.
+            unsafe { (self.library.xkb_keymap_unref)(keymap.as_ptr()) };
+            return Err("could not create keyboard state".to_string());
+        };
 
         self.state = Some(KeyboardState {
             keymap,
@@ -82,6 +88,10 @@ impl KeyboardInput {
             _source: source,
         });
         Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.state = None;
     }
 
     pub fn key_text(&self, wayland_key: u32) -> Option<Zeroizing<String>> {
