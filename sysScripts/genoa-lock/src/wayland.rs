@@ -183,9 +183,6 @@ impl LockState {
         if self.shm.is_none() {
             return Err("the compositor does not provide wl_shm".to_string());
         }
-        if self.outputs.is_empty() {
-            return Err("the compositor did not report an output".to_string());
-        }
         if self.seats.is_empty() {
             return Err("the compositor did not report a wl_seat".to_string());
         }
