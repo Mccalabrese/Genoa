@@ -1,0 +1,35 @@
+[package]
+name = "genoa-lock"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "A minimal Wayland session locker for Genoa"
+
+[dependencies]
+pam-client2 = { version = "0.5.5", default-features = false }
+tempfile = "3.27.0"
+uzers = "0.12.2"
+wayland-client = "0.31.14"
+wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
+xkbcommon-dl = "0.4.2"
+zeroize = "1.8.2"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+overflow-checks = true
+strip = "symbols"
