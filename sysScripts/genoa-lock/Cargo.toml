@@ -8,6 +8,7 @@ description = "A minimal Wayland session locker for Genoa"
 
 [dependencies]
 pam-client2 = { version = "0.5.5", default-features = false }
+rustix = { version = "1.1.6", features = ["event"] }
 tempfile = "3.27.0"
 uzers = "0.12.2"
 wayland-client = "0.31.14"
