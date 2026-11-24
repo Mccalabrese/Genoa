@@ -69,6 +69,7 @@ name = "genoa-lock"
 version = "0.1.0"
 dependencies = [
  "pam-client2",
+ "rustix",
  "tempfile",
  "uzers",
  "wayland-client",

@@ -1,6 +1,16 @@
-use std::{fs::File, io::Write, os::fd::AsFd, process::Command};
+use std::{
+    fs::File,
+    io::{ErrorKind, Write},
+    os::fd::{AsFd, OwnedFd},
+    process::Command,
+    sync::{Arc, mpsc::Receiver},
+};
 
 use crate::{auth, input::KeyboardInput, password::Password};
+use rustix::{
+    event::{EventfdFlags, PollFd, PollFlags, eventfd, poll},
+    io::{self, retry_on_intr},
+};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
@@ -43,17 +53,64 @@ pub fn run(options: LockOptions) -> Result<(), String> {
 
     while state.should_run() {
         event_queue
-            .blocking_dispatch(&mut state)
+            .dispatch_pending(&mut state)
             .map_err(|error| format!("Wayland connection failed: {error}"))?;
         if let Some(error) = state.failure.take() {
             return Err(error);
         }
-        if state.lifecycle == LockLifecycle::UnlockAwaitingSync {
-            // The protocol requires a sync after `unlock_and_destroy`: exiting
-            // before this callback would make successful unlock delivery
-            // dependent on connection teardown timing.
-            connection.display().sync(&queue_handle, ());
-            state.lifecycle = LockLifecycle::UnlockSyncPending;
+        state.start_unlock_sync(&connection, &queue_handle);
+        if !state.should_run() {
+            continue;
+        }
+
+        let needs_flush = match event_queue.flush() {
+            Ok(()) => false,
+            Err(wayland_client::backend::WaylandError::Io(error))
+                if error.kind() == ErrorKind::WouldBlock =>
+            {
+                true
+            }
+            Err(error) => return Err(format!("Wayland connection failed: {error}")),
+        };
+        let Some(read_guard) = event_queue.prepare_read() else {
+            continue;
+        };
+        let (wayland_ready, authentication_ready) = {
+            let mut wayland_events = PollFlags::IN;
+            if needs_flush {
+                wayland_events |= PollFlags::OUT;
+            }
+            let mut fds = [
+                PollFd::from_borrowed_fd(read_guard.connection_fd(), wayland_events),
+                PollFd::new(state.authentication_event.as_ref(), PollFlags::IN),
+            ];
+            retry_on_intr(|| poll(&mut fds, None))
+                .map_err(|error| format!("could not wait for lock events: {error}"))?;
+            let wayland_ready = fds[0]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP);
+            (wayland_ready, fds[1].revents().contains(PollFlags::IN))
+        };
+
+        if wayland_ready {
+            match read_guard.read() {
+                Ok(_) => {
+                    event_queue
+                        .dispatch_pending(&mut state)
+                        .map_err(|error| format!("Wayland connection failed: {error}"))?;
+                    if let Some(error) = state.failure.take() {
+                        return Err(error);
+                    }
+                }
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => return Err(format!("Wayland connection failed: {error}")),
+            }
+        } else {
+            drop(read_guard);
+        }
+        if authentication_ready {
+            state.finish_authentication();
         }
     }
 
@@ -77,6 +134,12 @@ struct LockState {
     seats: Vec<Seat>,
     surfaces: Vec<LockSurface>,
     password: Password,
+    authentication_event: Arc<OwnedFd>,
+    authentication: Option<AuthenticationAttempt>,
+}
+
+struct AuthenticationAttempt {
+    receiver: Receiver<bool>,
 }
 
 struct Output {
@@ -86,7 +149,7 @@ struct Output {
 
 struct Seat {
     global_name: u32,
-    seat: wl_seat::WlSeat,
+    proxy: wl_seat::WlSeat,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     input: KeyboardInput,
 }
@@ -155,6 +218,8 @@ impl LockState {
         // Each seat owns a separate input context, so this temporary probe is
         // deliberately dropped immediately.
         drop(KeyboardInput::new()?);
+        let authentication_event = eventfd(0, EventfdFlags::CLOEXEC)
+            .map_err(|error| format!("could not create the authentication notifier: {error}"))?;
         Ok(Self {
             options,
             lifecycle: LockLifecycle::Requested,
@@ -168,6 +233,8 @@ impl LockState {
             seats: Vec::new(),
             surfaces: Vec::new(),
             password: Password::default(),
+            authentication_event: Arc::new(authentication_event),
+            authentication: None,
         })
     }
 
@@ -337,15 +404,54 @@ impl LockState {
     }
 
     fn submit_password(&mut self) {
+        if self.authentication.is_some() {
+            return;
+        }
         let password = self.password.take();
         if password.is_empty() {
             return;
         }
 
-        // Authentication must fail closed. Do not expose PAM details on the
-        // lock screen or terminal because they can disclose policy.
-        if auth::authenticate_current_user(&password) == Ok(true) {
+        match auth::start_authentication(password, self.authentication_event.clone()) {
+            Ok(receiver) => self.authentication = Some(AuthenticationAttempt { receiver }),
+            Err(error) => Self::report_runtime_error(error),
+        }
+    }
+
+    fn finish_authentication(&mut self) {
+        let mut counter = [0_u8; 8];
+        let read = retry_on_intr(|| io::read(self.authentication_event.as_ref(), &mut counter));
+        if !matches!(read, Ok(8)) {
+            Self::report_runtime_error("could not receive the authentication result");
+            return;
+        }
+        let Some(attempt) = self.authentication.as_ref() else {
+            Self::report_runtime_error(
+                "received an authentication result without an active attempt",
+            );
+            return;
+        };
+        let authenticated = match attempt.receiver.try_recv() {
+            Ok(authenticated) => authenticated,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Self::report_runtime_error("the authentication worker ended unexpectedly");
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                Self::report_runtime_error("the authentication worker signalled without a result");
+                return;
+            }
+        };
+        self.authentication = None;
+        if authenticated {
             self.unlock();
+        }
+    }
+
+    fn start_unlock_sync(&mut self, connection: &Connection, queue_handle: &QueueHandle<Self>) {
+        if self.lifecycle == LockLifecycle::UnlockAwaitingSync {
+            connection.display().sync(queue_handle, ());
+            self.lifecycle = LockLifecycle::UnlockSyncPending;
         }
     }
 
@@ -454,13 +560,13 @@ fn checked_buffer_len(width: u32, height: u32) -> Result<usize, String> {
     Ok(byte_len)
 }
 
-fn release_keyboard(keyboard: wl_keyboard::WlKeyboard) {
+fn release_keyboard(keyboard: &wl_keyboard::WlKeyboard) {
     if keyboard.version() >= 3 {
         keyboard.release();
     }
 }
 
-fn release_seat(seat: wl_seat::WlSeat) {
+fn release_seat(seat: &wl_seat::WlSeat) {
     if seat.version() >= 5 {
         seat.release();
     }
@@ -497,7 +603,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                         );
                         state.seats.push(Seat {
                             global_name: name,
-                            seat,
+                            proxy: seat,
                             keyboard: None,
                             input,
                         });
@@ -548,9 +654,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                 if let Some(index) = state.seats.iter().position(|seat| seat.global_name == name) {
                     let mut removed = state.seats.swap_remove(index);
                     if let Some(keyboard) = removed.keyboard.take() {
-                        release_keyboard(keyboard);
+                        release_keyboard(&keyboard);
                     }
-                    release_seat(removed.seat);
+                    release_seat(&removed.proxy);
                 }
                 state.outputs.retain(|output| output.global_name != name);
                 if let Some(index) = state
@@ -683,7 +789,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for LockState {
         if let wl_seat::Event::Capabilities {
             capabilities: WEnum::Value(capabilities),
         } = event
-            && let Some(known_seat) = state.seats.iter_mut().find(|known| known.seat == *seat)
+            && let Some(known_seat) = state.seats.iter_mut().find(|known| known.proxy == *seat)
         {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 if known_seat.keyboard.is_none() {
@@ -691,7 +797,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for LockState {
                         Some(seat.get_keyboard(queue_handle, known_seat.global_name));
                 }
             } else if let Some(keyboard) = known_seat.keyboard.take() {
-                release_keyboard(keyboard);
+                release_keyboard(&keyboard);
                 known_seat.input.reset();
             }
         }
@@ -767,11 +873,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
             }
         };
 
-        match action {
-            Some(KeyAction::Backspace) => state.password.backspace(),
-            Some(KeyAction::Submit) => state.submit_password(),
-            Some(KeyAction::Text(text)) => state.password.push_text(&text),
-            Some(KeyAction::Ignore) | None => {}
+        if state.authentication.is_none() {
+            match action {
+                Some(KeyAction::Backspace) => state.password.backspace(),
+                Some(KeyAction::Submit) => state.submit_password(),
+                Some(KeyAction::Text(text)) => state.password.push_text(&text),
+                Some(KeyAction::Ignore) | None => {}
+            }
         }
     }
 }
