@@ -1,6 +1,19 @@
-use std::{fs::File, io::Write, os::fd::AsFd, process::Command};
+use std::{
+    fs::File,
+    io::{ErrorKind, Seek, SeekFrom, Write},
+    os::fd::{AsFd, OwnedFd},
+    process::Command,
+    sync::{Arc, mpsc::Receiver},
+    time::{Duration, Instant},
+};
 
-use crate::{auth, input::KeyboardInput, password::Password};
+use crate::{
+    auth, input::KeyboardInput, instance::InstanceGuard, password::Password, visual::Appearance,
+};
+use rustix::{
+    event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll},
+    io::{self, retry_on_intr},
+};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
@@ -16,9 +29,10 @@ use zeroize::Zeroizing;
 const MAX_OUTPUTS: usize = 16;
 const MAX_SEATS: usize = 16;
 const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GRAPHICS_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KEYMAP_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RETIRED_BUFFERS_PER_OUTPUT: usize = 4;
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
+const VISUAL_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
 
 #[derive(Clone, Copy, Default)]
 pub struct LockOptions {
@@ -26,6 +40,10 @@ pub struct LockOptions {
 }
 
 pub fn run(options: LockOptions) -> Result<(), String> {
+    // This must outlive the Wayland connection. A second launcher should fail
+    // before it can create another session-lock client or receive keyboard
+    // focus intended for the active locker.
+    let _instance_guard = InstanceGuard::acquire()?;
     let connection = Connection::connect_to_env()
         .map_err(|error| format!("could not connect to the Wayland session: {error}"))?;
     let mut event_queue = connection.new_event_queue();
@@ -43,17 +61,66 @@ pub fn run(options: LockOptions) -> Result<(), String> {
 
     while state.should_run() {
         event_queue
-            .blocking_dispatch(&mut state)
+            .dispatch_pending(&mut state)
             .map_err(|error| format!("Wayland connection failed: {error}"))?;
         if let Some(error) = state.failure.take() {
             return Err(error);
         }
-        if state.lifecycle == LockLifecycle::UnlockAwaitingSync {
-            // The protocol requires a sync after `unlock_and_destroy`: exiting
-            // before this callback would make successful unlock delivery
-            // dependent on connection teardown timing.
-            connection.display().sync(&queue_handle, ());
-            state.lifecycle = LockLifecycle::UnlockSyncPending;
+        state.redraw_if_due(&queue_handle);
+        state.start_unlock_sync(&connection, &queue_handle);
+        if !state.should_run() {
+            continue;
+        }
+
+        let needs_flush = match event_queue.flush() {
+            Ok(()) => false,
+            Err(wayland_client::backend::WaylandError::Io(error))
+                if error.kind() == ErrorKind::WouldBlock =>
+            {
+                true
+            }
+            Err(error) => return Err(format!("Wayland connection failed: {error}")),
+        };
+        let Some(read_guard) = event_queue.prepare_read() else {
+            continue;
+        };
+        let (wayland_ready, authentication_ready) = {
+            let mut wayland_events = PollFlags::IN;
+            if needs_flush {
+                wayland_events |= PollFlags::OUT;
+            }
+            let mut fds = [
+                PollFd::from_borrowed_fd(read_guard.connection_fd(), wayland_events),
+                PollFd::new(state.authentication_event.as_ref(), PollFlags::IN),
+            ];
+            let timeout = state.visual_poll_timeout();
+            retry_on_intr(|| poll(&mut fds, timeout.as_ref()))
+                .map_err(|error| format!("could not wait for lock events: {error}"))?;
+            let wayland_ready = fds[0]
+                .revents()
+                .intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP);
+            (wayland_ready, fds[1].revents().contains(PollFlags::IN))
+        };
+
+        if wayland_ready {
+            match read_guard.read() {
+                Ok(_) => {
+                    event_queue
+                        .dispatch_pending(&mut state)
+                        .map_err(|error| format!("Wayland connection failed: {error}"))?;
+                    if let Some(error) = state.failure.take() {
+                        return Err(error);
+                    }
+                }
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => return Err(format!("Wayland connection failed: {error}")),
+            }
+        } else {
+            drop(read_guard);
+        }
+        if authentication_ready {
+            state.finish_authentication();
         }
     }
 
@@ -76,7 +143,15 @@ struct LockState {
     outputs: Vec<Output>,
     seats: Vec<Seat>,
     surfaces: Vec<LockSurface>,
+    appearance: Appearance,
+    visual_redraw_after: Option<Instant>,
     password: Password,
+    authentication_event: Arc<OwnedFd>,
+    authentication: Option<AuthenticationAttempt>,
+}
+
+struct AuthenticationAttempt {
+    receiver: Receiver<auth::AuthenticationResult>,
 }
 
 struct Output {
@@ -86,7 +161,7 @@ struct Output {
 
 struct Seat {
     global_name: u32,
-    seat: wl_seat::WlSeat,
+    proxy: wl_seat::WlSeat,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     input: KeyboardInput,
 }
@@ -117,8 +192,10 @@ struct LockSurface {
     surface: wl_surface::WlSurface,
     session_surface: ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
     buffer: Option<ShmBuffer>,
-    retired_buffers: Vec<ShmBuffer>,
+    spare_buffer: Option<ShmBuffer>,
+    retired_buffer: Option<ShmBuffer>,
     pending_configure: Option<PendingConfigure>,
+    redraw_pending: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -141,11 +218,12 @@ enum LockLifecycle {
 struct ShmBuffer {
     // The backing objects must outlive both the Wayland buffer and every use of
     // that buffer by the compositor.
-    _file: File,
+    file: File,
     pool: wl_shm_pool::WlShmPool,
     buffer: wl_buffer::WlBuffer,
     width: u32,
     height: u32,
+    byte_len: usize,
     released: bool,
 }
 
@@ -155,6 +233,8 @@ impl LockState {
         // Each seat owns a separate input context, so this temporary probe is
         // deliberately dropped immediately.
         drop(KeyboardInput::new()?);
+        let authentication_event = eventfd(0, EventfdFlags::CLOEXEC)
+            .map_err(|error| format!("could not create the authentication notifier: {error}"))?;
         Ok(Self {
             options,
             lifecycle: LockLifecycle::Requested,
@@ -167,7 +247,11 @@ impl LockState {
             outputs: Vec::new(),
             seats: Vec::new(),
             surfaces: Vec::new(),
+            appearance: Appearance::load()?,
+            visual_redraw_after: None,
             password: Password::default(),
+            authentication_event: Arc::new(authentication_event),
+            authentication: None,
         })
     }
 
@@ -236,8 +320,10 @@ impl LockState {
             surface,
             session_surface,
             buffer: None,
-            retired_buffers: Vec::new(),
+            spare_buffer: None,
+            retired_buffer: None,
             pending_configure: None,
+            redraw_pending: false,
         });
         Ok(())
     }
@@ -282,50 +368,30 @@ impl LockState {
         let Some(requested) = self.surfaces[index].pending_configure else {
             return Ok(());
         };
-        let output_global_name = self.surfaces[index].output_global_name;
-        let needs_buffer = self.surfaces[index].buffer.as_ref().is_none_or(|buffer| {
+        let needs_new_buffer = self.surfaces[index].buffer.as_ref().is_none_or(|buffer| {
             buffer.width != requested.width || buffer.height != requested.height
         });
-
-        if needs_buffer {
-            if self.surfaces[index].retired_buffers.len() >= MAX_RETIRED_BUFFERS_PER_OUTPUT {
-                return Err(
-                    "waiting for the compositor to release an older lock-surface buffer"
-                        .to_string(),
-                );
-            }
-            let shm = self
-                .shm
-                .as_ref()
-                .ok_or_else(|| "wl_shm disappeared while locking".to_string())?;
-            let new_buffer = ShmBuffer::black(
-                shm,
-                queue_handle,
-                output_global_name,
-                requested.width,
-                requested.height,
-            )?;
-            if let Some(old_buffer) = self.surfaces[index].buffer.replace(new_buffer) {
-                // A compositor can still be reading an attached buffer after a
-                // resize. Keep its backing file and pool alive until its
-                // wl_buffer.release event arrives.
-                if !old_buffer.released {
-                    self.surfaces[index].retired_buffers.push(old_buffer);
-                }
-            }
+        if self.surfaces[index]
+            .buffer
+            .as_ref()
+            .is_some_and(|buffer| !buffer.released)
+            || self.surfaces[index].retired_buffer.is_some()
+        {
+            // A Wayland buffer is immutable while the compositor is reading
+            // it. Retain the latest configure and finish it at release.
+            return Ok(());
         }
 
-        let lock_surface = &mut self.surfaces[index];
-        let buffer = lock_surface
-            .buffer
-            .as_mut()
-            .ok_or_else(|| "could not allocate the lock surface buffer".to_string())?;
-        buffer.released = false;
-        lock_surface.session_surface.ack_configure(requested.serial);
-        lock_surface.surface.attach(Some(&buffer.buffer), 0, 0);
-        lock_surface.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-        lock_surface.surface.commit();
-        lock_surface.pending_configure = None;
+        if needs_new_buffer {
+            let new_buffer =
+                self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
+            self.surfaces[index].buffer = Some(new_buffer);
+            // A released buffer is safe to drop. Old-size spares cannot be
+            // reused after a configure, so discard them with the old frame.
+            self.surfaces[index].spare_buffer = None;
+        }
+        self.paint_and_commit(index, Some(requested.serial))?;
+        self.surfaces[index].pending_configure = None;
         Ok(())
     }
 
@@ -336,16 +402,230 @@ impl LockState {
         );
     }
 
+    // Presentation is deliberately decoupled from input and authentication.
+    // Key events only record a future repaint; the main loop coalesces rapid
+    // typing and renders outside every Wayland event callback.
+    fn request_visual_redraw(&mut self) {
+        if self.visual_redraw_after.is_none() {
+            self.visual_redraw_after = Some(Instant::now() + VISUAL_REFRESH_INTERVAL);
+        }
+    }
+
+    fn request_visual_redraw_now(&mut self) {
+        self.visual_redraw_after = Some(Instant::now());
+    }
+
+    fn redraw_if_due(&mut self, queue_handle: &QueueHandle<Self>) {
+        if self
+            .visual_redraw_after
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.visual_redraw_after = None;
+            for index in 0..self.surfaces.len() {
+                if let Err(error) = self.redraw_surface(index, queue_handle) {
+                    Self::report_runtime_error(error);
+                }
+            }
+        }
+    }
+
+    fn visual_poll_timeout(&self) -> Option<Timespec> {
+        let deadline = self.visual_redraw_after?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        Some(Timespec {
+            tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(remaining.subsec_nanos()),
+        })
+    }
+
+    fn redraw_surface(
+        &mut self,
+        index: usize,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<(), String> {
+        if self.surfaces[index].buffer.is_none() {
+            return Err("cannot redraw an unconfigured lock surface".to_string());
+        }
+        if self.surfaces[index]
+            .buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.released)
+        {
+            return self.paint_and_commit(index, None);
+        }
+
+        if let Some(spare) = self.surfaces[index].spare_buffer.take() {
+            if !spare.released {
+                return Err("a reusable lock buffer was not released".to_string());
+            }
+            let active = self.surfaces[index]
+                .buffer
+                .replace(spare)
+                .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
+            self.surfaces[index].retired_buffer = Some(active);
+            return self.paint_and_commit(index, None);
+        }
+
+        if self.surfaces[index].retired_buffer.is_some() {
+            self.surfaces[index].redraw_pending = true;
+            return Ok(());
+        }
+
+        let (width, height) = self.surfaces[index]
+            .buffer
+            .as_ref()
+            .map(|buffer| (buffer.width, buffer.height))
+            .ok_or_else(|| "cannot size an unconfigured lock surface".to_string())?;
+        let replacement = self.new_surface_buffer(index, width, height, queue_handle)?;
+        let active = self.surfaces[index]
+            .buffer
+            .replace(replacement)
+            .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
+        self.surfaces[index].retired_buffer = Some(active);
+        self.paint_and_commit(index, None)
+    }
+
+    fn new_surface_buffer(
+        &self,
+        index: usize,
+        width: u32,
+        height: u32,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<ShmBuffer, String> {
+        let byte_len = checked_buffer_len(width, height)?;
+        // A new shared-memory buffer and a temporary rendered frame coexist
+        // until the frame is copied into that buffer.
+        if !graphics_budget_permits(self.graphics_bytes(), byte_len.saturating_mul(2)) {
+            return Err("lock graphics memory limit would be exceeded".to_string());
+        }
+
+        let shm = self
+            .shm
+            .as_ref()
+            .ok_or_else(|| "wl_shm disappeared while allocating a lock buffer".to_string())?;
+        let output_global_name = self.surfaces[index].output_global_name;
+        ShmBuffer::new(
+            shm,
+            queue_handle,
+            output_global_name,
+            width,
+            height,
+            byte_len,
+        )
+    }
+
+    fn paint_and_commit(
+        &mut self,
+        index: usize,
+        configure_serial: Option<u32>,
+    ) -> Result<(), String> {
+        let (width, height) = self.surfaces[index]
+            .buffer
+            .as_ref()
+            .map(|buffer| (buffer.width, buffer.height))
+            .ok_or_else(|| "cannot paint an unconfigured lock surface".to_string())?;
+        let frame = self.appearance.frame(
+            width,
+            height,
+            self.password.display_len(),
+            self.authentication.is_some(),
+        )?;
+
+        let lock_surface = &mut self.surfaces[index];
+        let buffer = lock_surface
+            .buffer
+            .as_mut()
+            .ok_or_else(|| "could not access the lock surface buffer".to_string())?;
+        buffer.write_frame(&frame)?;
+        buffer.released = false;
+        lock_surface.redraw_pending = false;
+        if let Some(serial) = configure_serial {
+            lock_surface.session_surface.ack_configure(serial);
+        }
+        lock_surface.surface.attach(Some(&buffer.buffer), 0, 0);
+        lock_surface.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+        lock_surface.surface.commit();
+        Ok(())
+    }
+
+    fn graphics_bytes(&self) -> usize {
+        self.surfaces
+            .iter()
+            .flat_map(|surface| {
+                [
+                    surface.buffer.as_ref(),
+                    surface.spare_buffer.as_ref(),
+                    surface.retired_buffer.as_ref(),
+                ]
+            })
+            .flatten()
+            .fold(0_usize, |total, buffer| {
+                total.saturating_add(buffer.byte_len)
+            })
+    }
+
     fn submit_password(&mut self) {
+        if self.authentication.is_some() {
+            return;
+        }
         let password = self.password.take();
         if password.is_empty() {
             return;
         }
 
-        // Authentication must fail closed. Do not expose PAM details on the
-        // lock screen or terminal because they can disclose policy.
-        if auth::authenticate_current_user(&password) == Ok(true) {
+        match auth::start_authentication(password, self.authentication_event.clone()) {
+            Ok(receiver) => {
+                self.authentication = Some(AuthenticationAttempt { receiver });
+                self.request_visual_redraw();
+            }
+            Err(error) => Self::report_runtime_error(error),
+        }
+    }
+
+    fn finish_authentication(&mut self) {
+        let mut counter = [0_u8; 8];
+        let read = retry_on_intr(|| io::read(self.authentication_event.as_ref(), &mut counter));
+        if !matches!(read, Ok(8)) {
+            self.authentication = None;
+            Self::report_runtime_error("could not receive the authentication result");
+            self.request_visual_redraw();
+            return;
+        }
+        let Some(attempt) = self.authentication.as_ref() else {
+            Self::report_runtime_error(
+                "received an authentication result without an active attempt",
+            );
+            return;
+        };
+        let authenticated = match attempt.receiver.try_recv() {
+            Ok(Ok(authenticated)) => authenticated,
+            Ok(Err(error)) => {
+                self.authentication = None;
+                Self::report_runtime_error(format!("authentication is unavailable: {error}"));
+                self.request_visual_redraw();
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Self::report_runtime_error("the authentication worker ended unexpectedly");
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                Self::report_runtime_error("the authentication worker signalled without a result");
+                return;
+            }
+        };
+        self.authentication = None;
+        if authenticated {
             self.unlock();
+        } else {
+            self.request_visual_redraw();
+        }
+    }
+
+    fn start_unlock_sync(&mut self, connection: &Connection, queue_handle: &QueueHandle<Self>) {
+        if self.lifecycle == LockLifecycle::UnlockAwaitingSync {
+            connection.display().sync(queue_handle, ());
+            self.lifecycle = LockLifecycle::UnlockSyncPending;
         }
     }
 
@@ -375,14 +655,14 @@ impl LockState {
 }
 
 impl ShmBuffer {
-    fn black(
+    fn new(
         shm: &wl_shm::WlShm,
         queue_handle: &QueueHandle<LockState>,
         output_global_name: u32,
         width: u32,
         height: u32,
+        byte_len: usize,
     ) -> Result<Self, String> {
-        let byte_len = checked_buffer_len(width, height)?;
         let byte_len_i32 = i32::try_from(byte_len)
             .map_err(|_| "lock surface buffer is too large for Wayland".to_string())?;
         let stride = width
@@ -390,21 +670,10 @@ impl ShmBuffer {
             .and_then(|stride| i32::try_from(stride).ok())
             .ok_or_else(|| "lock surface stride is too large".to_string())?;
 
-        let mut file = tempfile::tempfile()
+        let file = tempfile::tempfile()
             .map_err(|error| format!("could not create a private graphics buffer: {error}"))?;
         file.set_len(u64::try_from(byte_len).map_err(|_| "lock buffer is too large".to_string())?)
             .map_err(|error| format!("could not size the graphics buffer: {error}"))?;
-        let mut black_pixels = [0_u8; 4096];
-        for alpha in black_pixels.iter_mut().skip(3).step_by(4) {
-            *alpha = 0xff;
-        }
-        let mut remaining = byte_len;
-        while remaining > 0 {
-            let chunk_len = remaining.min(black_pixels.len());
-            file.write_all(&black_pixels[..chunk_len])
-                .map_err(|error| format!("could not initialise the graphics buffer: {error}"))?;
-            remaining -= chunk_len;
-        }
 
         let pool = shm.create_pool(file.as_fd(), byte_len_i32, queue_handle, ());
         let buffer = pool.create_buffer(
@@ -418,13 +687,26 @@ impl ShmBuffer {
         );
 
         Ok(Self {
-            _file: file,
+            file,
             pool,
             buffer,
             width,
             height,
+            byte_len,
             released: false,
         })
+    }
+
+    fn write_frame(&mut self, frame: &[u8]) -> Result<(), String> {
+        if frame.len() != self.byte_len {
+            return Err("lock frame has an unexpected byte length".to_string());
+        }
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| format!("could not rewind the lock buffer: {error}"))?;
+        self.file
+            .write_all(frame)
+            .map_err(|error| format!("could not paint the lock buffer: {error}"))
     }
 }
 
@@ -454,13 +736,17 @@ fn checked_buffer_len(width: u32, height: u32) -> Result<usize, String> {
     Ok(byte_len)
 }
 
-fn release_keyboard(keyboard: wl_keyboard::WlKeyboard) {
+const fn graphics_budget_permits(resident_bytes: usize, requested_bytes: usize) -> bool {
+    resident_bytes.saturating_add(requested_bytes) <= MAX_GRAPHICS_BYTES
+}
+
+fn release_keyboard(keyboard: &wl_keyboard::WlKeyboard) {
     if keyboard.version() >= 3 {
         keyboard.release();
     }
 }
 
-fn release_seat(seat: wl_seat::WlSeat) {
+fn release_seat(seat: &wl_seat::WlSeat) {
     if seat.version() >= 5 {
         seat.release();
     }
@@ -503,7 +789,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                         );
                         state.seats.push(Seat {
                             global_name: name,
-                            seat,
+                            proxy: seat,
                             keyboard: None,
                             input,
                         });
@@ -558,9 +844,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                 if let Some(index) = state.seats.iter().position(|seat| seat.global_name == name) {
                     let mut removed = state.seats.swap_remove(index);
                     if let Some(keyboard) = removed.keyboard.take() {
-                        release_keyboard(keyboard);
+                        release_keyboard(&keyboard);
                     }
-                    release_seat(removed.seat);
+                    release_seat(&removed.proxy);
                 }
                 if let Some(index) = state
                     .surfaces
@@ -607,21 +893,29 @@ impl Dispatch<wl_buffer::WlBuffer, u32> for LockState {
                 .iter()
                 .position(|surface| surface.output_global_name == *output_global_name)
         {
+            if let Some(active) = state.surfaces[index].buffer.as_mut()
+                && active.buffer == *released_buffer
             {
-                let surface = &mut state.surfaces[index];
-                if let Some(active) = surface.buffer.as_mut()
-                    && active.buffer == *released_buffer
-                {
-                    active.released = true;
-                }
-                surface
-                    .retired_buffers
-                    .retain(|buffer| buffer.buffer != *released_buffer);
+                active.released = true;
+            }
+            if state.surfaces[index]
+                .retired_buffer
+                .as_ref()
+                .is_some_and(|buffer| buffer.buffer == *released_buffer)
+                && let Some(mut released) = state.surfaces[index].retired_buffer.take()
+            {
+                released.released = true;
+                state.surfaces[index].spare_buffer = Some(released);
             }
             if state.surfaces[index].pending_configure.is_some()
                 && let Err(error) = state.render_pending_configure(index, queue_handle)
             {
                 Self::report_runtime_error(error);
+            } else if state.surfaces[index].redraw_pending {
+                // A buffer release is delivered from a Wayland callback. Only
+                // schedule the repaint here; creating/attaching a new buffer
+                // during dispatch used to interfere with keyboard delivery.
+                state.request_visual_redraw_now();
             }
         }
     }
@@ -700,7 +994,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for LockState {
         if let wl_seat::Event::Capabilities {
             capabilities: WEnum::Value(capabilities),
         } = event
-            && let Some(known_seat) = state.seats.iter_mut().find(|known| known.seat == *seat)
+            && let Some(known_seat) = state.seats.iter_mut().find(|known| known.proxy == *seat)
         {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 if known_seat.keyboard.is_none() {
@@ -708,7 +1002,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for LockState {
                         Some(seat.get_keyboard(queue_handle, known_seat.global_name));
                 }
             } else if let Some(keyboard) = known_seat.keyboard.take() {
-                release_keyboard(keyboard);
+                release_keyboard(&keyboard);
                 known_seat.input.reset();
             }
         }
@@ -784,18 +1078,24 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
             }
         };
 
-        match action {
-            Some(KeyAction::Backspace) => state.password.backspace(),
-            Some(KeyAction::Submit) => state.submit_password(),
-            Some(KeyAction::Text(text)) => state.password.push_text(&text),
-            Some(KeyAction::Ignore) | None => {}
+        if state.authentication.is_none() {
+            let redraw = !matches!(&action, Some(KeyAction::Ignore) | None);
+            match action {
+                Some(KeyAction::Backspace) => state.password.backspace(),
+                Some(KeyAction::Submit) => state.submit_password(),
+                Some(KeyAction::Text(text)) => state.password.push_text(&text),
+                Some(KeyAction::Ignore) | None => {}
+            }
+            if redraw {
+                state.request_visual_redraw();
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::checked_buffer_len;
+    use super::{MAX_GRAPHICS_BYTES, checked_buffer_len, graphics_budget_permits};
 
     #[test]
     fn rejects_zero_dimension_buffers() {
@@ -811,5 +1111,18 @@ mod tests {
     #[test]
     fn caps_unreasonable_buffers() {
         assert!(checked_buffer_len(16_384, 16_384).is_err());
+    }
+
+    #[test]
+    fn graphics_budget_accounts_for_the_replacement_peak() {
+        let buffer = 64 * 1024 * 1024;
+        assert!(graphics_budget_permits(
+            MAX_GRAPHICS_BYTES - 2 * buffer,
+            2 * buffer
+        ));
+        assert!(!graphics_budget_permits(
+            MAX_GRAPHICS_BYTES - buffer,
+            2 * buffer
+        ));
     }
 }

@@ -46,6 +46,9 @@ const LOGO: &str = concat!(
 // a user-writable directory such as ~/.local/bin cannot shadow an executable.
 const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
 const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
+const PACMAN: &str = "/usr/bin/pacman";
+const SUDO: &str = "/usr/bin/sudo";
+const RETIRED_GTKLOCK_MODULE: &str = "gtklock-runshell-module";
 
 fn restrict_command_path() {
     // SAFETY: this runs at process entry, before this program creates threads
@@ -169,6 +172,36 @@ fn run_update_command(command: &[String]) -> Result<()> {
     if !status.success() {
         bail!("System package update failed with {status}");
     }
+    Ok(())
+}
+
+/// The abandoned runshell module prevents Yay from resolving the GTKLock 5
+/// transition. Remove that one package before the normal system transaction.
+/// The actual locker stays installed until the release installer has put the
+/// root-owned Genoa Lock binary and PAM policy in place.
+fn retire_broken_gtklock_module() -> Result<()> {
+    let query = Command::new(PACMAN)
+        .args(["-Qq", RETIRED_GTKLOCK_MODULE])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to query installed packages before the system update")?;
+    if query.code() == Some(1) {
+        return Ok(());
+    }
+    if !query.success() {
+        bail!("Could not determine whether {RETIRED_GTKLOCK_MODULE} is installed ({query})");
+    }
+
+    println!("🧹 Retiring the obsolete gtklock runshell module before updating packages...");
+    let status = Command::new(SUDO)
+        .args(["pacman", "-R", "--noconfirm", RETIRED_GTKLOCK_MODULE])
+        .status()
+        .context("Failed to start Pacman while removing the obsolete gtklock module")?;
+    if !status.success() {
+        bail!("Could not remove {RETIRED_GTKLOCK_MODULE} before the system update ({status})");
+    }
+    println!("   ✅ Retired the obsolete gtklock runshell module.");
     Ok(())
 }
 
@@ -343,6 +376,7 @@ fn update_release(workspace: Option<&Path>, config: &ReleaseUpdatesConfig) -> Re
 
 fn run_worker(config: &GlobalConfig) -> Result<()> {
     println!("{LOGO}");
+    retire_broken_gtklock_module()?;
     println!("🚀 Starting system package update...");
     run_update_command(&config.updater.update_command)?;
     println!("   ✅ System packages are current.");

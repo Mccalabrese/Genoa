@@ -117,4 +117,3 @@ python-pynvim
 tectonic
 nodejs
 npm
-gtklock

@@ -37,6 +37,10 @@ impl Password {
         std::mem::take(&mut self.value)
     }
 
+    pub fn display_len(&self) -> usize {
+        self.value.chars().count()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.value.len()

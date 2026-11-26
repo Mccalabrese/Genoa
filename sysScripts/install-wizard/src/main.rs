@@ -55,7 +55,8 @@ use crate::update::{
 };
 use crate::user::{
     build_custom_apps, finalize_setup, link_dotfiles_and_copy_resources,
-    patch_waybar_sidebar_toggle_path, remove_retired_tool_sources, setup_librewolf, setup_papers,
+    migrate_gtklock_lock_commands, patch_waybar_known_genoa_commands,
+    remove_retired_gtklock_config, remove_retired_tool_sources, setup_librewolf, setup_papers,
     setup_secrets_and_geoclue, setup_waybar_configs,
 };
 
@@ -71,7 +72,6 @@ const AUR_PACKAGES: &[&str] = &[
     "pinta",
     "ttf-victor-mono",
     "pear-desktop-bin",
-    "gtklock-runshell-module",
 ];
 
 // The installer reaches sudo after running several helpers. Restrict command
@@ -86,6 +86,12 @@ const CF_TOGGLE_POLICY_PATH: &str =
     "/usr/share/polkit-1/actions/io.github.genoa.cloudflare-toggle.policy";
 const CF_TOGGLE_POLICY: &str =
     include_str!("../../cloudflare-toggle/io.github.genoa.cloudflare-toggle.policy");
+const GENOA_LOCK_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock";
+const GENOA_LOCK_PATH: &str = "/usr/local/bin/genoa-lock";
+const GENOA_LOCK_PAM_PATH: &str = "/etc/pam.d/genoa-lock";
+const GENOA_LOCK_PAM_POLICY: &str =
+    "auth include system-local-login\naccount include system-local-login\n";
+const RETIRED_GTKLOCK_PACKAGES: &[&str] = &["gtklock", "gtklock-runshell-module"];
 
 fn restrict_command_path() {
     // SAFETY: called by main before any threads or child processes exist; see
@@ -115,6 +121,52 @@ fn install_cloudflare_toggle_helper(
     sys.install_file_to_root(&source, Path::new(CF_TOGGLE_HELPER_PATH), "755")?;
     sys.create_root_dir_all(Path::new("/usr/share/polkit-1/actions"))?;
     sys.install_string_to_root_file(Path::new(CF_TOGGLE_POLICY_PATH), CF_TOGGLE_POLICY, "644")?;
+    Ok(())
+}
+
+/// Installs the experimental locker at a fixed, root-owned path.  Every
+/// desktop integration invokes this exact path so a user-writable Cargo bin
+/// directory can never decide what locks the session.
+fn install_genoa_lock(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), std::io::Error> {
+    let source = repo_root.join(GENOA_LOCK_SOURCE);
+    if !sys.path_exists(&source) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Genoa Lock was not built: {}", source.display()),
+        ));
+    }
+
+    sys.create_root_dir_all(Path::new("/usr/local/bin"))?;
+    sys.install_file_to_root(&source, Path::new(GENOA_LOCK_PATH), "755")?;
+    sys.create_root_dir_all(Path::new("/etc/pam.d"))?;
+    sys.install_string_to_root_file(Path::new(GENOA_LOCK_PAM_PATH), GENOA_LOCK_PAM_POLICY, "644")?;
+    Ok(())
+}
+
+/// Remove the retired locker only after the new root-owned locker is present
+/// and every managed active configuration has been migrated.  A custom config
+/// that still invokes gtklock leaves the old package in place rather than
+/// risking a machine without a working screen lock.
+fn retire_gtklock(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
+    if !migrate_gtklock_lock_commands(sys, home)? {
+        eprintln!(
+            "   ⚠️  Gtklock is still referenced by a custom active config; leaving it installed."
+        );
+        return Ok(());
+    }
+
+    let installed: Vec<&str> = RETIRED_GTKLOCK_PACKAGES
+        .iter()
+        .copied()
+        .filter(|package| sys.is_package_installed(package))
+        .collect();
+    if !installed.is_empty() {
+        let mut args = vec!["pacman", "-R", "--noconfirm"];
+        args.extend(installed);
+        sys.run_cmd("sudo", &args)?;
+    }
+
+    remove_retired_gtklock_config(sys, home)?;
     Ok(())
 }
 
@@ -522,6 +574,24 @@ fn main() {
             false
         }
     };
+    if custom_apps_built {
+        let mut helpers_installed = true;
+        if let Err(e) = install_cloudflare_toggle_helper(&live_sys, &repo_root) {
+            eprintln!("   ⚠️  Failed to install the Cloudflare DNS helper: {e}");
+            helpers_installed = false;
+        }
+        match install_genoa_lock(&live_sys, &repo_root) {
+            Ok(()) => match retire_gtklock(&live_sys, &home) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("   ⚠️  Failed to retire gtklock safely: {e}");
+                    helpers_installed = false;
+                }
+            },
+            Err(e) => {
+                eprintln!("   ⚠️  Failed to install Genoa Lock; keeping gtklock installed: {e}");
+                helpers_installed = false;
+            }
 
     // Re-deploy this root-owned helper on every updater pass when its most
     // recently built binary is available. This repairs ownership and traversal
@@ -535,7 +605,7 @@ fn main() {
     };
     if custom_apps_built {
         offer_signed_release_migration(&home, &repo_root, &run_options);
-        if helper_installed {
+        if helpers_installed {
             println!("   ✅ Custom Rust apps ready.");
         }
     }
@@ -618,7 +688,7 @@ fn main() {
                     eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
                 }
             }
-            patch_waybar_sidebar_toggle_path(&live_sys, &home);
+            patch_waybar_known_genoa_commands(&live_sys, &home);
 
             print_logo();
             println!(
@@ -645,7 +715,7 @@ fn main() {
             }
             setup_papers(&live_sys);
             setup_waybar_configs(&live_sys, &home);
-            patch_waybar_sidebar_toggle_path(&live_sys, &home);
+            patch_waybar_known_genoa_commands(&live_sys, &home);
             if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
                 eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
             }
@@ -679,7 +749,7 @@ fn main() {
                 eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
             }
         }
-        patch_waybar_sidebar_toggle_path(&live_sys, &home);
+        patch_waybar_known_genoa_commands(&live_sys, &home);
         if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
             eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
         }
@@ -952,6 +1022,96 @@ mod tests {
         let contents = policy.get(CF_TOGGLE_POLICY_PATH).unwrap();
         assert!(contents.contains("org.freedesktop.policykit.exec.path"));
         assert!(contents.contains("org.freedesktop.policykit.exec.argv1\">toggle"));
+    }
+
+    #[test]
+    fn gtklock_is_retired_only_after_genoa_lock_and_its_config_migration() {
+        let mut env = MockEnv::default();
+        let repo = Path::new("/repo");
+        let home = Path::new("/home/testuser");
+        let source = repo.join(GENOA_LOCK_SOURCE);
+        let sway_config = home.join(".config/sway/UserConfigs/UserKeybinds.conf");
+        let gtklock_config = home.join(".config/gtklock");
+        env.mock_files.borrow_mut().insert(
+            source.to_string_lossy().to_string(),
+            "compiled Genoa Lock".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            sway_config.to_string_lossy().to_string(),
+            "bindsym Control+Mod1+l exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d'\n"
+                .to_string(),
+        );
+        env.mock_dirs
+            .borrow_mut()
+            .insert(gtklock_config.to_string_lossy().to_string());
+        env.installed_packages.insert("gtklock".to_string());
+        env.installed_packages
+            .insert("gtklock-runshell-module".to_string());
+
+        install_genoa_lock(&env, repo).unwrap();
+        retire_gtklock(&env, home).unwrap();
+
+        let log = env.cmd_log.borrow();
+        assert!(log.iter().any(|(command, args)| {
+            command == "sudo"
+                && args
+                    == &vec![
+                        "install".to_string(),
+                        "-m".to_string(),
+                        "755".to_string(),
+                        "-o".to_string(),
+                        "root".to_string(),
+                        "-g".to_string(),
+                        "root".to_string(),
+                        source.to_string_lossy().to_string(),
+                        GENOA_LOCK_PATH.to_string(),
+                    ]
+        }));
+        assert!(log.iter().any(|(command, args)| {
+            command == "sudo"
+                && args
+                    == &vec![
+                        "pacman".to_string(),
+                        "-R".to_string(),
+                        "--noconfirm".to_string(),
+                        "gtklock".to_string(),
+                        "gtklock-runshell-module".to_string(),
+                    ]
+        }));
+        assert!(
+            env.mock_files
+                .borrow()
+                .get(&sway_config.to_string_lossy().to_string())
+                .is_some_and(|contents| contents.contains("/usr/local/bin/genoa-lock"))
+        );
+        assert!(!env.path_exists(&gtklock_config));
+        assert_eq!(
+            env.mock_files.borrow().get(GENOA_LOCK_PAM_PATH),
+            Some(&GENOA_LOCK_PAM_POLICY.to_string())
+        );
+    }
+
+    #[test]
+    fn gtklock_is_preserved_when_a_custom_active_command_needs_manual_migration() {
+        let mut env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let sway_config = home.join(".config/sway/swayidle.sh");
+        let gtklock_config = home.join(".config/gtklock");
+        env.mock_files.borrow_mut().insert(
+            sway_config.to_string_lossy().to_string(),
+            "timeout 30 'gtklock --custom-flag'\n".to_string(),
+        );
+        env.mock_dirs
+            .borrow_mut()
+            .insert(gtklock_config.to_string_lossy().to_string());
+        env.installed_packages.insert("gtklock".to_string());
+
+        retire_gtklock(&env, home).unwrap();
+
+        assert!(!env.cmd_log.borrow().iter().any(|(command, args)| {
+            command == "sudo" && args.first().is_some_and(|argument| argument == "pacman")
+        }));
+        assert!(env.path_exists(&gtklock_config));
     }
 
     #[test]

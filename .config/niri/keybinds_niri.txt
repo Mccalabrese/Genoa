@@ -17,7 +17,7 @@
 
 ## ⚙️ System & Session
 * Mod + Q         - Close Active Window
-* Super + Alt + L - Lock Screen (hyprlock)
+* Super + Alt + L - Lock Screen (Genoa Lock)
 * Mod + Alt + S   - Lock and Suspend
 * XF86Rfkill      - Toggle Airplane Mode
 * Mod + Shift + E - Quit Niri

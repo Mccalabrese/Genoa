@@ -1,6 +1,6 @@
 # Required Config Changes
 
-My updater deliberately does not overwrite your dotfiles. It only updates the managed Rust tools in `sysScripts`, so you can keep your own setup and personalization. That also means that when a config change is required, you will need to apply it yourself.
+My updater deliberately does not overwrite your dotfiles. It normally updates only the managed Rust tools in `sysScripts`, so you can keep your own setup and personalization. The GTKLock retirement below is the narrow exception: it rewrites only Genoa's former, known lock commands, and leaves GTKLock installed if it finds a custom active command it cannot safely migrate.
 
 I will keep the important changes here. This is not an exhaustive changelog; the configs in this repository are always the complete, current examples.
 
@@ -84,108 +84,23 @@ sudo pacman -Rns thunar thunar-volman tumbler
 
 ## Previous Config Changes
 
-### Idle and Lock Changes
+### Genoa Lock Replaces GTKLock
 
-**September 5, 2026 — applies to anyone who installed Genoa before this date.**
+GTKLock and its unmaintained runshell module are retired. During a normal
+Genoa refresh, the installer builds and installs the root-owned
+`/usr/local/bin/genoa-lock`, writes its dedicated PAM policy, migrates Genoa's
+known Sway and Niri commands, and removes the GTKLock packages plus
+`~/.config/gtklock`.
 
-The old Hyprland idle and lock dependencies are no longer kept and can cause issues after waking from suspend.
+It also replaces Genoa's former Waybar Hyprlock-and-suspend command with
+`/usr/local/bin/genoa-lock --suspend-after-lock`. The new command does not ask
+the shell to sleep and hope the lock is ready: Genoa Lock asks the compositor
+to establish the session lock first, then invokes suspend itself.
 
-1. Copy this repository's `.config/gtklock` directory into `~/.config`.
-
-2. In `~/.config/niri/config.kdl`, replace:
-
-   ```kdl
-   spawn-sh-at-startup "iDIR=\"$HOME/.config/swaync/images/ja.png\"; export iDIR; swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'pidof hyprlock || hyprlock &' timeout 630 'wlr-randr --output eDP-1 --off; wlr-randr --output DP-2 --off; wlr-randr --output DP-3 --off; wlr-randr --output DP-4 --off' resume 'wlr-randr --output eDP-1 --on; wlr-randr --output DP-2 --on; wlr-randr --output DP-3 --on; wlr-randr --output DP-4 --on' timeout 1200 'systemctl suspend' before-sleep 'pidof hyprlock || hyprlock &'"
-   ```
-
-   with:
-
-   ```kdl
-   spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 'flock -n /tmp/gtklock.lock gtklock -d' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep 'sh -c \"flock -n /tmp/gtklock.lock gtklock &\"'"
-   ```
-
-   Also replace:
-
-   ```kdl
-   //suspend
-   Mod+Alt+S hotkey-overlay-title="Lock and Suspend" {
-       spawn-sh "pidof hyprlock >/dev/null || hyprlock & sleep 0.5; systemctl suspend"
-   }
-   Mod+Alt+K { spawn-sh "pkill swaync && swaync"; }
-   ```
-
-   with:
-
-   ```kdl
-   //suspend
-   Mod+Alt+S hotkey-overlay-title="Lock and Suspend" {
-       spawn-sh "flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend"
-   }
-   Mod+Alt+K { spawn-sh "pkill swaync && swaync"; }
-   ```
-
-   Finally, replace:
-
-   ```kdl
-   Super+Alt+L hotkey-overlay-title="Lock the Screen: hyprlock" { spawn-sh "pidof hyprlock || hyprlock &"; }
-   ```
-
-   with:
-
-   ```kdl
-   Super+Alt+L hotkey-overlay-title="Lock the Screen: gtklock" { spawn-sh "flock -n /tmp/gtklock.lock gtklock -d"; }
-   ```
-
-3. Replace the contents of `~/.config/sway/swayidle.sh` with:
-
-   ```bash
-   #!/usr/bin/env bash
-
-   iDIR="$HOME/.config/swaync/images/ja.png"
-
-   # Kill any existing instance before starting a fresh one.
-   pkill swayidle 2>/dev/null
-
-   swayidle -w \
-     timeout 60 'brightnessctl set 0%' \
-     resume 'brightnessctl set 15%' \
-     timeout 240 'flock -n /tmp/gtklock.lock gtklock -d' \
-     timeout 270 'swaymsg "output * dpms off"' \
-     resume 'swaymsg "output * dpms on"' \
-     timeout 600 'systemctl suspend' \
-     before-sleep 'sh -c "flock -n /tmp/gtklock.lock gtklock &"'
-   ```
-
-   In `~/.config/sway/UserConfigs/UserKeybinds.conf`, replace:
-
-   ```conf
-   bindsym $mainMod+Alt+s exec sh -c 'pidof hyprlock >/dev/null || (hyprlock & sleep 0.5); systemctl suspend'
-   ```
-
-   with:
-
-   ```conf
-   bindsym $mainMod+Alt+s exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend'
-   ```
-
-   Then replace:
-
-   ```conf
-   bindsym Control+Mod1+l exec pidof hyprlock || hyprlock &
-   ```
-
-   with:
-
-   ```conf
-   bindsym Control+Mod1+l exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d'
-   ```
-
-Afterward, remove the retired Hyprland packages and config:
-
-```bash
-sudo pacman -Rns hypridle hyprlock
-rm -rf ~/.config/hypr
-```
+If it finds an active custom GTKLock command it cannot recognize, it leaves
+GTKLock installed and prints the exact file that needs manual migration. That
+is deliberate: an unknown customization is never a reason to leave a user
+without a screen locker.
 
 ### Keybind Launcher Compositor Filters
 
