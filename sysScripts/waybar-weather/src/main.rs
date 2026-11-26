@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::time::sleep;
-use zbus::{Connection, Proxy, zvariant::OwnedObjectPath};
+use zbus::{Connection, OwnedObjectPath, Proxy};
 
 const WAYBAR_CACHE_FILE: &str = ".weather_cache.json";
 const LOCKSCREEN_CACHE_FILE: &str = ".weather_cache";
