@@ -5,6 +5,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use clepsydre_eds::Manager as EdsManager;
 use clepsydre_rebind::Event;
 use clepsydre_rebind::prelude::*;
+use clepsydre_rebind::Event;
 use gtk4::gio::prelude::ListModelExtManual;
 use gtk4::prelude::*;
 use std::collections::HashSet;
@@ -115,6 +116,7 @@ fn run_calendar_query(
 
     let subscription = match manager.new_subscription(&start_dt, &end_dt) {
         Ok(subscription) => subscription,
+        Ok(sub) => sub,
         Err(e) => {
             log_command_failure(
                 "clepsydre_subscription_failed",

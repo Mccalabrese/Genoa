@@ -2,7 +2,7 @@
   <img src="logo.svg" width="200" height="200" alt="Rust Wayland Power Logo">
 </p>
 
-<h1 align="center">Arch Linux Dotfiles: Niri, Hyprland & Sway</h1>
+<h1 align="center">Arch Linux Dotfiles: GNOME, NIRI & Sway</h1>
 
 <p align="left">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License"></a>

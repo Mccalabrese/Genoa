@@ -752,6 +752,12 @@ fn release_seat(seat: &wl_seat::WlSeat) {
     }
 }
 
+fn release_output(output: wl_output::WlOutput) {
+    if output.version() >= 3 {
+        output.release();
+    }
+}
+
 impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
     fn event(
         state: &mut Self,
@@ -824,6 +830,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                         }
                     }
                 }
+                "wl_output" => eprintln!(
+                    "genoa-lock: output {name} exceeds the {MAX_OUTPUTS}-output limit; \
+                     relying on the compositor's locked-output fallback"
+                ),
                 "ext_session_lock_manager_v1" if state.lock_manager.is_none() => {
                     state.lock_manager =
                         Some(registry.bind(name, version.min(1), queue_handle, ()));
@@ -838,7 +848,6 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                     }
                     release_seat(&removed.proxy);
                 }
-                state.outputs.retain(|output| output.global_name != name);
                 if let Some(index) = state
                     .surfaces
                     .iter()
@@ -847,6 +856,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                     let removed = state.surfaces.swap_remove(index);
                     removed.session_surface.destroy();
                     removed.surface.destroy();
+                }
+                if let Some(index) = state
+                    .outputs
+                    .iter()
+                    .position(|output| output.global_name == name)
+                {
+                    let removed = state.outputs.swap_remove(index);
+                    release_output(removed.output);
                 }
             }
             _ => {}
