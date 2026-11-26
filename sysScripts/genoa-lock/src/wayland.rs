@@ -752,9 +752,127 @@ fn release_seat(seat: &wl_seat::WlSeat) {
     }
 }
 
-fn release_output(output: wl_output::WlOutput) {
+fn release_output(output: &wl_output::WlOutput) {
     if output.version() >= 3 {
         output.release();
+    }
+}
+
+impl LockState {
+    fn handle_registry_global(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        name: u32,
+        interface: &str,
+        version: u32,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        match interface {
+            "wl_compositor" if self.compositor.is_none() => {
+                self.compositor = Some(registry.bind(name, version.min(4), queue_handle, ()));
+            }
+            "wl_shm" if self.shm.is_none() => {
+                self.shm = Some(registry.bind(name, version.min(1), queue_handle, ()));
+            }
+            "wl_seat" if self.seats.len() < MAX_SEATS => {
+                self.add_seat(registry, name, version, queue_handle);
+            }
+            "wl_seat" => {
+                eprintln!("genoa-lock: ignoring seat {name}; reached the {MAX_SEATS}-seat limit");
+            }
+            "wl_output" if self.outputs.len() < MAX_OUTPUTS => {
+                self.add_output(registry, name, version, queue_handle);
+            }
+            "wl_output" => eprintln!(
+                "genoa-lock: output {name} exceeds the {MAX_OUTPUTS}-output limit; \
+                 relying on the compositor's locked-output fallback"
+            ),
+            "ext_session_lock_manager_v1" if self.lock_manager.is_none() => {
+                self.lock_manager = Some(registry.bind(name, version.min(1), queue_handle, ()));
+            }
+            _ => {}
+        }
+    }
+
+    fn add_seat(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        name: u32,
+        version: u32,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        match KeyboardInput::new() {
+            Ok(input) => {
+                let seat =
+                    registry.bind::<wl_seat::WlSeat, _, _>(name, version.min(7), queue_handle, ());
+                self.seats.push(Seat {
+                    global_name: name,
+                    proxy: seat,
+                    keyboard: None,
+                    input,
+                });
+                if self.lock.is_none() {
+                    self.failure = None;
+                }
+            }
+            Err(error) if self.lock.is_some() || !self.seats.is_empty() => {
+                Self::report_runtime_error(format!(
+                    "could not initialize input for seat {name}: {error}"
+                ));
+            }
+            Err(error) => self.failure = Some(error),
+        }
+    }
+
+    fn add_output(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        name: u32,
+        version: u32,
+        queue_handle: &QueueHandle<Self>,
+    ) {
+        let output =
+            registry.bind::<wl_output::WlOutput, _, _>(name, version.min(4), queue_handle, ());
+        self.outputs.push(Output {
+            global_name: name,
+            output,
+        });
+
+        if self.lock.is_some() {
+            let output = self.outputs.last().map(|item| item.output.clone());
+            if let Some(output) = output
+                && let Err(error) = self.add_lock_surface(name, &output, queue_handle)
+            {
+                Self::report_runtime_error(error);
+            }
+        }
+    }
+
+    fn handle_registry_remove(&mut self, name: u32) {
+        if let Some(index) = self.seats.iter().position(|seat| seat.global_name == name) {
+            let mut removed = self.seats.swap_remove(index);
+            if let Some(keyboard) = removed.keyboard.take() {
+                release_keyboard(&keyboard);
+            }
+            release_seat(&removed.proxy);
+        }
+        if let Some(index) = self
+            .surfaces
+            .iter()
+            .position(|surface| surface.output_global_name == name)
+        {
+            let removed = self.surfaces.swap_remove(index);
+            removed.session_surface.destroy();
+            removed.surface.destroy();
+        }
+        if let Some(index) = self
+            .outputs
+            .iter()
+            .position(|output| output.global_name == name)
+        {
+            let removed = self.outputs.swap_remove(index);
+            release_output(&removed.output);
+        }
     }
 }
 
@@ -772,100 +890,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for LockState {
                 name,
                 interface,
                 version,
-            } => match interface.as_str() {
-                "wl_compositor" if state.compositor.is_none() => {
-                    state.compositor = Some(registry.bind(name, version.min(4), queue_handle, ()));
-                }
-                "wl_shm" if state.shm.is_none() => {
-                    state.shm = Some(registry.bind(name, version.min(1), queue_handle, ()));
-                }
-                "wl_seat" if state.seats.len() < MAX_SEATS => match KeyboardInput::new() {
-                    Ok(input) => {
-                        let seat = registry.bind::<wl_seat::WlSeat, _, _>(
-                            name,
-                            version.min(7),
-                            queue_handle,
-                            (),
-                        );
-                        state.seats.push(Seat {
-                            global_name: name,
-                            proxy: seat,
-                            keyboard: None,
-                            input,
-                        });
-                        if state.lock.is_none() {
-                            state.failure = None;
-                        }
-                    }
-                    Err(error) => {
-                        if state.lock.is_some() || !state.seats.is_empty() {
-                            Self::report_runtime_error(format!(
-                                "could not initialize input for seat {name}: {error}"
-                            ));
-                        } else {
-                            state.failure = Some(error);
-                        }
-                    }
-                },
-                "wl_seat" => eprintln!(
-                    "genoa-lock: ignoring seat {name}; reached the {MAX_SEATS}-seat limit"
-                ),
-                "wl_output" if state.outputs.len() < MAX_OUTPUTS => {
-                    let output = registry.bind::<wl_output::WlOutput, _, _>(
-                        name,
-                        version.min(4),
-                        queue_handle,
-                        (),
-                    );
-                    state.outputs.push(Output {
-                        global_name: name,
-                        output,
-                    });
-                    if state.lock.is_some() {
-                        let output = state.outputs.last().map(|item| item.output.clone());
-                        if let Some(output) = output
-                            && let Err(error) = state.add_lock_surface(name, &output, queue_handle)
-                        {
-                            Self::report_runtime_error(error);
-                        }
-                    }
-                }
-                "wl_output" => eprintln!(
-                    "genoa-lock: output {name} exceeds the {MAX_OUTPUTS}-output limit; \
-                     relying on the compositor's locked-output fallback"
-                ),
-                "ext_session_lock_manager_v1" if state.lock_manager.is_none() => {
-                    state.lock_manager =
-                        Some(registry.bind(name, version.min(1), queue_handle, ()));
-                }
-                _ => {}
-            },
-            wl_registry::Event::GlobalRemove { name } => {
-                if let Some(index) = state.seats.iter().position(|seat| seat.global_name == name) {
-                    let mut removed = state.seats.swap_remove(index);
-                    if let Some(keyboard) = removed.keyboard.take() {
-                        release_keyboard(&keyboard);
-                    }
-                    release_seat(&removed.proxy);
-                }
-                if let Some(index) = state
-                    .surfaces
-                    .iter()
-                    .position(|surface| surface.output_global_name == name)
-                {
-                    let removed = state.surfaces.swap_remove(index);
-                    removed.session_surface.destroy();
-                    removed.surface.destroy();
-                }
-                if let Some(index) = state
-                    .outputs
-                    .iter()
-                    .position(|output| output.global_name == name)
-                {
-                    let removed = state.outputs.swap_remove(index);
-                    release_output(removed.output);
-                }
-            }
+            } => state.handle_registry_global(registry, name, &interface, version, queue_handle),
+            wl_registry::Event::GlobalRemove { name } => state.handle_registry_remove(name),
             _ => {}
         }
     }

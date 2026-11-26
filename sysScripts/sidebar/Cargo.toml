@@ -10,7 +10,7 @@ clepsydre-eds = { git = "https://gitlab.gnome.org/TitouanReal/clepsydre.git", re
 clepsydre-rebind = { git = "https://gitlab.gnome.org/TitouanReal/clepsydre.git", rev = "219974f6dbfbc63b9f85572aa76848ed6233cc6a", package = "clepsydre-rebind" }
 glib = "0.22.3"
 gtk4 = { version = "0.11.1", features = ["v4_10"] }
-gtk4-layer-shell = "0.8.0"
+gtk4-layer-shell = "0.9.0"
 libc = "0.2.183"
 serde_json = "1.0.149"
 wait-timeout = "0.2.1"
