@@ -7,7 +7,9 @@ included.
 ## Current scope
 
 - Locks every Wayland output through `ext-session-lock-v1`.
-- Draws an opaque black buffer before accepting unlock input.
+- Draws an opaque, darkened embedded wallpaper before accepting unlock input.
+- Shows a local clock, a password box with dots, and a bounded/sanitized read
+  of Genoa's existing weather cache. It never executes a weather command.
 - Authenticates only the effective user's account through the dedicated
   `genoa-lock` PAM service.
 - Supports only one optional action: `--suspend-after-lock`, which invokes the

@@ -9,6 +9,7 @@
 mod auth;
 mod input;
 mod password;
+mod visual;
 mod wayland;
 
 use std::process::ExitCode;
