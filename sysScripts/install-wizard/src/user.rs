@@ -682,16 +682,29 @@ pub fn link_dotfiles_and_copy_resources(
     Ok(())
 }
 
-/// Surgical rewrite: only updates the sidebar_toggle on-click path in ModulesCustom.
-pub fn patch_waybar_sidebar_toggle_path(sys: &impl CmdExecutor, home: &Path) {
+/// Surgical rewrite of Genoa-owned Waybar commands in ModulesCustom.
+///
+/// Users are free to keep their own modules and commands. These replacements
+/// are deliberately limited to the exact legacy command values Genoa shipped.
+pub fn patch_waybar_known_genoa_commands(sys: &impl CmdExecutor, home: &Path) {
     let modules_path = home.join(".config/waybar/ModulesCustom");
     let Ok(content) = sys.read_file_to_string(&modules_path) else {
         return;
     };
 
-    let Some(updated) = update_sidebar_toggle_path(&content) else {
+    let mut updated = content.clone();
+    let mut changed = false;
+    if let Some(patched) = update_sidebar_toggle_path(&updated) {
+        updated = patched;
+        changed = true;
+    }
+    if let Some(patched) = update_waybar_lock_command(&updated) {
+        updated = patched;
+        changed = true;
+    }
+    if !changed {
         return;
-    };
+    }
 
     let Some(modules_path_str) = modules_path.to_str() else {
         return;
@@ -699,7 +712,7 @@ pub fn patch_waybar_sidebar_toggle_path(sys: &impl CmdExecutor, home: &Path) {
 
     match sys.write_string_to_file(modules_path_str, &updated) {
         Ok(()) => println!(
-            "   ✅ Updated Waybar sidebar_toggle path in {}",
+            "   ✅ Updated known Genoa Waybar commands in {}",
             modules_path.display()
         ),
         Err(e) => eprintln!(
@@ -708,6 +721,45 @@ pub fn patch_waybar_sidebar_toggle_path(sys: &impl CmdExecutor, home: &Path) {
             e
         ),
     }
+}
+
+fn update_waybar_lock_command(content: &str) -> Option<String> {
+    const LEGACY_COMMAND: &str =
+        "pidof hyprlock >/dev/null || (hyprlock & sleep 0.5); systemctl suspend";
+    const GENOA_COMMAND: &str = "/usr/local/bin/genoa-lock --suspend-after-lock";
+
+    let entry_start = content.find("\"custom/lock\"")?;
+    let open_brace_rel = content[entry_start..].find('{')?;
+    let block_start = entry_start + open_brace_rel;
+    let mut depth = 0;
+    let mut block_end = None;
+
+    for (offset, ch) in content[block_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    block_end = Some(block_start + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let block_end = block_end?;
+    let block = &content[block_start..=block_end];
+    if !block.contains(LEGACY_COMMAND) {
+        return None;
+    }
+
+    let updated_block = block.replacen(LEGACY_COMMAND, GENOA_COMMAND, 1);
+    let mut updated = String::with_capacity(content.len() - block.len() + updated_block.len());
+    updated.push_str(&content[..block_start]);
+    updated.push_str(&updated_block);
+    updated.push_str(&content[block_end + 1..]);
+    Some(updated)
 }
 
 fn update_sidebar_toggle_path(content: &str) -> Option<String> {
@@ -1100,6 +1152,32 @@ url = https://location.services.mozilla.com/v1/geolocate
 "#;
         let updated = update_sidebar_toggle_path(original).expect("no update");
         assert!(updated.contains("$HOME/Genoa/sidebar-toggle"));
+    }
+
+    #[test]
+    fn update_waybar_lock_command_retires_the_known_hyprlock_suspend_chain() {
+        let original = r#"{
+    "custom/lock": {
+        "on-click": "pidof hyprlock >/dev/null || (hyprlock & sleep 0.5); systemctl suspend"
+    }
+}
+"#;
+
+        let updated = update_waybar_lock_command(original).expect("no update");
+        assert!(updated.contains("/usr/local/bin/genoa-lock --suspend-after-lock"));
+        assert!(!updated.contains("hyprlock"));
+    }
+
+    #[test]
+    fn update_waybar_lock_command_leaves_custom_commands_alone() {
+        let original = r#"{
+    "custom/lock": {
+        "on-click": "my-lock-command"
+    }
+}
+"#;
+
+        assert!(update_waybar_lock_command(original).is_none());
     }
 
     #[test]

@@ -15,12 +15,16 @@ included.
 - Supports only one optional action: `--suspend-after-lock`, which invokes the
   fixed executable `/usr/bin/systemctl suspend` after the compositor confirms
   the session is locked.
+- Owns a private per-session instance guard, so overlapping hotkey, sidebar,
+  Waybar, or idle requests cannot compete for keyboard focus.
+- Reuses one released shared-memory buffer per output and applies a global
+  graphics-memory budget.
 
 It deliberately has no themes, module loader, shell commands, status files,
 network access, or user-supplied executable configuration.
 
-The first prototype handles the compositor's supplied XKB layout, but does not
-yet implement compose keys, input methods, or visual password feedback.
+The first prototype handles the compositor's supplied XKB layout and visual
+password dots, but does not yet implement compose keys or input methods.
 
 ## Security status
 

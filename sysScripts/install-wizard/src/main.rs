@@ -55,9 +55,9 @@ use crate::update::{
 };
 use crate::user::{
     build_custom_apps, finalize_setup, link_dotfiles_and_copy_resources,
-    migrate_gtklock_lock_commands, patch_waybar_sidebar_toggle_path, remove_retired_gtklock_config,
-    remove_retired_tool_sources, setup_librewolf, setup_papers, setup_secrets_and_geoclue,
-    setup_waybar_configs,
+    migrate_gtklock_lock_commands, patch_waybar_known_genoa_commands,
+    remove_retired_gtklock_config, remove_retired_tool_sources, setup_librewolf, setup_papers,
+    setup_secrets_and_geoclue, setup_waybar_configs,
 };
 
 // Hardware Specific: AMD
@@ -677,7 +677,7 @@ fn main() {
                     eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
                 }
             }
-            patch_waybar_sidebar_toggle_path(&live_sys, &home);
+            patch_waybar_known_genoa_commands(&live_sys, &home);
 
             print_logo();
             println!(
@@ -704,7 +704,7 @@ fn main() {
             }
             setup_papers(&live_sys);
             setup_waybar_configs(&live_sys, &home);
-            patch_waybar_sidebar_toggle_path(&live_sys, &home);
+            patch_waybar_known_genoa_commands(&live_sys, &home);
             if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
                 eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
             }
@@ -738,7 +738,7 @@ fn main() {
                 eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
             }
         }
-        patch_waybar_sidebar_toggle_path(&live_sys, &home);
+        patch_waybar_known_genoa_commands(&live_sys, &home);
         if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
             eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
         }

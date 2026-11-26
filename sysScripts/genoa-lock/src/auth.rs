@@ -15,10 +15,12 @@ use zeroize::Zeroizing;
 
 const PAM_SERVICE: &str = "genoa-lock";
 
+pub type AuthenticationResult = Result<bool, String>;
+
 pub fn start_authentication(
     password: Zeroizing<String>,
     completion_event: Arc<OwnedFd>,
-) -> Result<Receiver<bool>, String> {
+) -> Result<Receiver<AuthenticationResult>, String> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("genoa-lock-auth".to_string())
@@ -29,12 +31,11 @@ pub fn start_authentication(
 
 fn authenticate(
     password: Zeroizing<String>,
-    sender: SyncSender<bool>,
+    sender: SyncSender<AuthenticationResult>,
     completion_event: Arc<OwnedFd>,
 ) {
     let mut completion = AuthenticationCompletion::new(sender, completion_event);
-    let authenticated = authenticate_current_user(password).unwrap_or(false);
-    completion.finish(authenticated);
+    completion.finish(authenticate_current_user(password));
 }
 
 fn authenticate_current_user(password: Zeroizing<String>) -> Result<bool, String> {
@@ -62,13 +63,13 @@ struct Credentials {
 }
 
 struct AuthenticationCompletion {
-    sender: Option<SyncSender<bool>>,
+    sender: Option<SyncSender<AuthenticationResult>>,
     completion_event: Arc<OwnedFd>,
     notified: bool,
 }
 
 impl AuthenticationCompletion {
-    const fn new(sender: SyncSender<bool>, completion_event: Arc<OwnedFd>) -> Self {
+    const fn new(sender: SyncSender<AuthenticationResult>, completion_event: Arc<OwnedFd>) -> Self {
         Self {
             sender: Some(sender),
             completion_event,
@@ -76,9 +77,9 @@ impl AuthenticationCompletion {
         }
     }
 
-    fn finish(&mut self, authenticated: bool) {
+    fn finish(&mut self, result: AuthenticationResult) {
         if let Some(sender) = self.sender.take() {
-            let _ = sender.send(authenticated);
+            let _ = sender.send(result);
         }
         self.notify();
     }
@@ -130,9 +131,9 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(1);
         let mut completion = AuthenticationCompletion::new(sender, event.clone());
 
-        completion.finish(true);
+        completion.finish(Ok(true));
 
-        assert!(receiver.recv()?);
+        assert!(receiver.recv()??);
         let mut counter = [0_u8; 8];
         assert_eq!(io::read(event.as_ref(), &mut counter)?, 8);
         assert_eq!(u64::from_ne_bytes(counter), 1);
@@ -152,6 +153,18 @@ mod tests {
         let mut counter = [0_u8; 8];
         assert_eq!(io::read(event.as_ref(), &mut counter)?, 8);
         assert_eq!(u64::from_ne_bytes(counter), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn completion_preserves_an_infrastructure_error() -> Result<(), Box<dyn std::error::Error>> {
+        let event = Arc::new(eventfd(0, EventfdFlags::CLOEXEC)?);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut completion = AuthenticationCompletion::new(sender, event);
+
+        completion.finish(Err("PAM service unavailable".to_string()));
+
+        assert_eq!(receiver.recv()?, Err("PAM service unavailable".to_string()));
         Ok(())
     }
 }

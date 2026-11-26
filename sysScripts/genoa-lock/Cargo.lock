@@ -151,6 +151,7 @@ dependencies = [
  "chrono",
  "font8x8",
  "image",
+ "libc",
  "pam-client2",
  "rustix",
  "serde",

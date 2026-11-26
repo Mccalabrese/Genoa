@@ -157,9 +157,9 @@ bindsym $mod+c mode "resize" # Enter resize mode
 #     }
 # }
 
-### Idle and Lock (Placeholders - Configure Later) ###
-# exec swayidle ...
-# set $lock exec swaylock ...
+### Idle and Lock ###
+# swayidle is launched by UserConfigs/Startup_Apps.conf. Genoa Lock is bound
+# in UserConfigs/UserKeybinds.conf.
 
 ### Include system-wide snippets if needed ###
 # include /etc/sway/config.d/*

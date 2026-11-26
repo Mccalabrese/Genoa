@@ -117,9 +117,9 @@
 
 "custom/lock": {
 	"format": "󰌾",
-	"on-click": "pidof hyprlock >/dev/null || (hyprlock & sleep 0.5); systemctl suspend",
+	"on-click": "/usr/local/bin/genoa-lock --suspend-after-lock",
 	"tooltip": true,
-	"tooltip-format": "󰷛 Screen Lock",
+	"tooltip-format": "󰷛 Lock and Suspend",
 },
 
 "custom/menu": {

@@ -17,6 +17,7 @@
 
 ## ⚙️ System & Session
 * $mod + Q       - Close Active Window
+* Ctrl + Alt + L - Lock Screen (Genoa Lock)
 * $mod + Alt + S - Lock and Suspend
 * $mod + R       - Reload Sway Config
 * $mod + Shift + E - Exit Sway (with confirmation)

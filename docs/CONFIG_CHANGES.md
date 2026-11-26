@@ -92,6 +92,11 @@ Genoa refresh, the installer builds and installs the root-owned
 known Sway and Niri commands, and removes the GTKLock packages plus
 `~/.config/gtklock`.
 
+It also replaces Genoa's former Waybar Hyprlock-and-suspend command with
+`/usr/local/bin/genoa-lock --suspend-after-lock`. The new command does not ask
+the shell to sleep and hope the lock is ready: Genoa Lock asks the compositor
+to establish the session lock first, then invokes suspend itself.
+
 If it finds an active custom GTKLock command it cannot recognize, it leaves
 GTKLock installed and prints the exact file that needs manual migration. That
 is deliberate: an unknown customization is never a reason to leave a user

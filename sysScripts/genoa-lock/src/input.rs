@@ -7,7 +7,12 @@
 
 #![allow(unsafe_code)]
 
-use std::{fs::File, io::Read, os::fd::OwnedFd, ptr::NonNull};
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    os::fd::OwnedFd,
+    ptr::NonNull,
+};
 
 use xkbcommon_dl::{
     XkbCommon, keysyms, xkb_context, xkb_context_flags, xkb_keymap, xkb_keymap_compile_flags,
@@ -24,6 +29,7 @@ pub struct KeyboardInput {
 }
 
 struct KeyboardState {
+    library: &'static XkbCommon,
     keymap: NonNull<xkb_keymap>,
     state: NonNull<xkb_state>,
     // Keep the source alive for the full keymap lifetime. libxkbcommon parses
@@ -50,15 +56,7 @@ impl KeyboardInput {
     }
 
     pub fn load_keymap(&mut self, fd: OwnedFd, size: usize) -> Result<(), String> {
-        let mut bytes = Vec::with_capacity(size);
-        let mut file = File::from(fd).take(u64::try_from(size).map_err(|_| "keymap is too large")?);
-        file.read_to_end(&mut bytes)
-            .map_err(|error| format!("could not read the keyboard layout: {error}"))?;
-        if bytes.len() != size {
-            return Err("the compositor supplied a truncated keyboard layout".to_string());
-        }
-        let source = String::from_utf8(bytes)
-            .map_err(|_| "the compositor supplied a non-UTF-8 keyboard layout".to_string())?;
+        let source = read_keymap_source(File::from(fd), size)?;
         // SAFETY: context is live for this call; `source` is valid UTF-8 and
         // retained in `KeyboardState` for at least as long as the keymap; its
         // pointer/length describe exactly that allocation.
@@ -83,6 +81,7 @@ impl KeyboardInput {
         };
 
         self.state = Some(KeyboardState {
+            library: self.library,
             keymap,
             state,
             _source: source,
@@ -160,16 +159,30 @@ impl KeyboardInput {
     }
 }
 
+fn read_keymap_source(mut file: File, size: usize) -> Result<String, String> {
+    // A Wayland keymap arrives over SCM_RIGHTS. The received descriptor can
+    // share its file-description cursor with the compositor, so it is not
+    // safe to assume that a normal `read` begins at byte zero. Starting from
+    // the advertised beginning makes later locks independent of that cursor.
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("could not seek the keyboard layout: {error}"))?;
+
+    let mut bytes = vec![0_u8; size];
+    file.read_exact(&mut bytes)
+        .map_err(|error| format!("could not read the complete keyboard layout: {error}"))?;
+    String::from_utf8(bytes)
+        .map_err(|_| "the compositor supplied a non-UTF-8 keyboard layout".to_string())
+}
+
 impl Drop for KeyboardState {
     fn drop(&mut self) {
         // Both pointers originate from libxkbcommon constructors and are owned
         // exclusively by this value. State must be released before keymap.
-        let library = xkbcommon_dl::xkbcommon_handle();
         // SAFETY: both pointers are non-null, each is owned exactly once here,
         // and the state is released before its keymap.
         unsafe {
-            (library.xkb_state_unref)(self.state.as_ptr());
-            (library.xkb_keymap_unref)(self.keymap.as_ptr());
+            (self.library.xkb_state_unref)(self.state.as_ptr());
+            (self.library.xkb_keymap_unref)(self.keymap.as_ptr());
         }
     }
 }
@@ -181,5 +194,22 @@ impl Drop for KeyboardInput {
         drop(self.state.take());
         // SAFETY: `context` is non-null and owned exactly once by this value.
         unsafe { (self.library.xkb_context_unref)(self.context.as_ptr()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Seek, SeekFrom, Write};
+
+    use super::read_keymap_source;
+
+    #[test]
+    fn keymap_reader_rewinds_the_received_descriptor() -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = tempfile::tempfile()?;
+        file.write_all(b"xkb_keymap\0")?;
+        file.seek(SeekFrom::End(0))?;
+
+        assert_eq!(read_keymap_source(file, 11)?, "xkb_keymap\0");
+        Ok(())
     }
 }

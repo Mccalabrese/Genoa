@@ -1,13 +1,15 @@
 use std::{
     fs::File,
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Seek, SeekFrom, Write},
     os::fd::{AsFd, OwnedFd},
     process::Command,
     sync::{Arc, mpsc::Receiver},
     time::{Duration, Instant},
 };
 
-use crate::{auth, input::KeyboardInput, password::Password, visual::Appearance};
+use crate::{
+    auth, input::KeyboardInput, instance::InstanceGuard, password::Password, visual::Appearance,
+};
 use rustix::{
     event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll},
     io::{self, retry_on_intr},
@@ -27,8 +29,8 @@ use zeroize::Zeroizing;
 const MAX_OUTPUTS: usize = 16;
 const MAX_SEATS: usize = 16;
 const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GRAPHICS_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KEYMAP_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RETIRED_BUFFERS_PER_OUTPUT: usize = 4;
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const VISUAL_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
 
@@ -38,6 +40,10 @@ pub struct LockOptions {
 }
 
 pub fn run(options: LockOptions) -> Result<(), String> {
+    // This must outlive the Wayland connection. A second launcher should fail
+    // before it can create another session-lock client or receive keyboard
+    // focus intended for the active locker.
+    let _instance_guard = InstanceGuard::acquire()?;
     let connection = Connection::connect_to_env()
         .map_err(|error| format!("could not connect to the Wayland session: {error}"))?;
     let mut event_queue = connection.new_event_queue();
@@ -145,7 +151,7 @@ struct LockState {
 }
 
 struct AuthenticationAttempt {
-    receiver: Receiver<bool>,
+    receiver: Receiver<auth::AuthenticationResult>,
 }
 
 struct Output {
@@ -186,7 +192,8 @@ struct LockSurface {
     surface: wl_surface::WlSurface,
     session_surface: ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
     buffer: Option<ShmBuffer>,
-    retired_buffers: Vec<ShmBuffer>,
+    spare_buffer: Option<ShmBuffer>,
+    retired_buffer: Option<ShmBuffer>,
     pending_configure: Option<PendingConfigure>,
     redraw_pending: bool,
 }
@@ -211,11 +218,12 @@ enum LockLifecycle {
 struct ShmBuffer {
     // The backing objects must outlive both the Wayland buffer and every use of
     // that buffer by the compositor.
-    _file: File,
+    file: File,
     pool: wl_shm_pool::WlShmPool,
     buffer: wl_buffer::WlBuffer,
     width: u32,
     height: u32,
+    byte_len: usize,
     released: bool,
 }
 
@@ -312,7 +320,8 @@ impl LockState {
             surface,
             session_surface,
             buffer: None,
-            retired_buffers: Vec::new(),
+            spare_buffer: None,
+            retired_buffer: None,
             pending_configure: None,
             redraw_pending: false,
         });
@@ -359,60 +368,30 @@ impl LockState {
         let Some(requested) = self.surfaces[index].pending_configure else {
             return Ok(());
         };
-        let output_global_name = self.surfaces[index].output_global_name;
-        let needs_buffer = self.surfaces[index].buffer.as_ref().is_none_or(|buffer| {
+        let needs_new_buffer = self.surfaces[index].buffer.as_ref().is_none_or(|buffer| {
             buffer.width != requested.width || buffer.height != requested.height
         });
-
-        if needs_buffer {
-            if self.surfaces[index].retired_buffers.len() >= MAX_RETIRED_BUFFERS_PER_OUTPUT {
-                return Err(
-                    "waiting for the compositor to release an older lock-surface buffer"
-                        .to_string(),
-                );
-            }
-            let shm = self
-                .shm
-                .as_ref()
-                .ok_or_else(|| "wl_shm disappeared while locking".to_string())?;
-            // Validate before allocating a frame so a malicious compositor
-            // cannot force the presentation layer to allocate unbounded RAM.
-            let _ = checked_buffer_len(requested.width, requested.height)?;
-            let frame = self.appearance.frame(
-                requested.width,
-                requested.height,
-                self.password.display_len(),
-                self.authentication.is_some(),
-            )?;
-            let new_buffer = ShmBuffer::from_frame(
-                shm,
-                queue_handle,
-                output_global_name,
-                requested.width,
-                requested.height,
-                &frame,
-            )?;
-            if let Some(old_buffer) = self.surfaces[index].buffer.replace(new_buffer) {
-                // A compositor can still be reading an attached buffer after a
-                // resize. Keep its backing file and pool alive until its
-                // wl_buffer.release event arrives.
-                if !old_buffer.released {
-                    self.surfaces[index].retired_buffers.push(old_buffer);
-                }
-            }
+        if self.surfaces[index]
+            .buffer
+            .as_ref()
+            .is_some_and(|buffer| !buffer.released)
+            || self.surfaces[index].retired_buffer.is_some()
+        {
+            // A Wayland buffer is immutable while the compositor is reading
+            // it. Retain the latest configure and finish it at release.
+            return Ok(());
         }
 
-        let lock_surface = &mut self.surfaces[index];
-        let buffer = lock_surface
-            .buffer
-            .as_mut()
-            .ok_or_else(|| "could not allocate the lock surface buffer".to_string())?;
-        buffer.released = false;
-        lock_surface.session_surface.ack_configure(requested.serial);
-        lock_surface.surface.attach(Some(&buffer.buffer), 0, 0);
-        lock_surface.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-        lock_surface.surface.commit();
-        lock_surface.pending_configure = None;
+        if needs_new_buffer {
+            let new_buffer =
+                self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
+            self.surfaces[index].buffer = Some(new_buffer);
+            // A released buffer is safe to drop. Old-size spares cannot be
+            // reused after a configure, so discard them with the old frame.
+            self.surfaces[index].spare_buffer = None;
+        }
+        self.paint_and_commit(index, Some(requested.serial))?;
+        self.surfaces[index].pending_configure = None;
         Ok(())
     }
 
@@ -464,51 +443,125 @@ impl LockState {
         index: usize,
         queue_handle: &QueueHandle<Self>,
     ) -> Result<(), String> {
-        let (output_global_name, width, height) = self.surfaces[index]
+        if self.surfaces[index].buffer.is_none() {
+            return Err("cannot redraw an unconfigured lock surface".to_string());
+        }
+        if self.surfaces[index]
             .buffer
             .as_ref()
-            .map(|buffer| {
-                (
-                    self.surfaces[index].output_global_name,
-                    buffer.width,
-                    buffer.height,
-                )
-            })
-            .ok_or_else(|| "cannot redraw an unconfigured lock surface".to_string())?;
-        if self.surfaces[index].retired_buffers.len() >= MAX_RETIRED_BUFFERS_PER_OUTPUT {
+            .is_some_and(|buffer| buffer.released)
+        {
+            return self.paint_and_commit(index, None);
+        }
+
+        if let Some(spare) = self.surfaces[index].spare_buffer.take() {
+            if !spare.released {
+                return Err("a reusable lock buffer was not released".to_string());
+            }
+            let active = self.surfaces[index]
+                .buffer
+                .replace(spare)
+                .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
+            self.surfaces[index].retired_buffer = Some(active);
+            return self.paint_and_commit(index, None);
+        }
+
+        if self.surfaces[index].retired_buffer.is_some() {
             self.surfaces[index].redraw_pending = true;
             return Ok(());
         }
 
-        let _ = checked_buffer_len(width, height)?;
+        let (width, height) = self.surfaces[index]
+            .buffer
+            .as_ref()
+            .map(|buffer| (buffer.width, buffer.height))
+            .ok_or_else(|| "cannot size an unconfigured lock surface".to_string())?;
+        let replacement = self.new_surface_buffer(index, width, height, queue_handle)?;
+        let active = self.surfaces[index]
+            .buffer
+            .replace(replacement)
+            .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
+        self.surfaces[index].retired_buffer = Some(active);
+        self.paint_and_commit(index, None)
+    }
+
+    fn new_surface_buffer(
+        &self,
+        index: usize,
+        width: u32,
+        height: u32,
+        queue_handle: &QueueHandle<Self>,
+    ) -> Result<ShmBuffer, String> {
+        let byte_len = checked_buffer_len(width, height)?;
+        // A new shared-memory buffer and a temporary rendered frame coexist
+        // until the frame is copied into that buffer.
+        if !graphics_budget_permits(self.graphics_bytes(), byte_len.saturating_mul(2)) {
+            return Err("lock graphics memory limit would be exceeded".to_string());
+        }
+
+        let shm = self
+            .shm
+            .as_ref()
+            .ok_or_else(|| "wl_shm disappeared while allocating a lock buffer".to_string())?;
+        let output_global_name = self.surfaces[index].output_global_name;
+        ShmBuffer::new(
+            shm,
+            queue_handle,
+            output_global_name,
+            width,
+            height,
+            byte_len,
+        )
+    }
+
+    fn paint_and_commit(
+        &mut self,
+        index: usize,
+        configure_serial: Option<u32>,
+    ) -> Result<(), String> {
+        let (width, height) = self.surfaces[index]
+            .buffer
+            .as_ref()
+            .map(|buffer| (buffer.width, buffer.height))
+            .ok_or_else(|| "cannot paint an unconfigured lock surface".to_string())?;
         let frame = self.appearance.frame(
             width,
             height,
             self.password.display_len(),
             self.authentication.is_some(),
         )?;
-        let shm = self
-            .shm
-            .as_ref()
-            .ok_or_else(|| "wl_shm disappeared while redrawing".to_string())?;
-        let new_buffer =
-            ShmBuffer::from_frame(shm, queue_handle, output_global_name, width, height, &frame)?;
+
         let lock_surface = &mut self.surfaces[index];
-        if let Some(old_buffer) = lock_surface.buffer.replace(new_buffer)
-            && !old_buffer.released
-        {
-            lock_surface.retired_buffers.push(old_buffer);
-        }
         let buffer = lock_surface
             .buffer
             .as_mut()
-            .ok_or_else(|| "could not redraw the lock surface".to_string())?;
+            .ok_or_else(|| "could not access the lock surface buffer".to_string())?;
+        buffer.write_frame(&frame)?;
         buffer.released = false;
         lock_surface.redraw_pending = false;
+        if let Some(serial) = configure_serial {
+            lock_surface.session_surface.ack_configure(serial);
+        }
         lock_surface.surface.attach(Some(&buffer.buffer), 0, 0);
         lock_surface.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
         lock_surface.surface.commit();
         Ok(())
+    }
+
+    fn graphics_bytes(&self) -> usize {
+        self.surfaces
+            .iter()
+            .flat_map(|surface| {
+                [
+                    surface.buffer.as_ref(),
+                    surface.spare_buffer.as_ref(),
+                    surface.retired_buffer.as_ref(),
+                ]
+            })
+            .flatten()
+            .fold(0_usize, |total, buffer| {
+                total.saturating_add(buffer.byte_len)
+            })
     }
 
     fn submit_password(&mut self) {
@@ -533,7 +586,9 @@ impl LockState {
         let mut counter = [0_u8; 8];
         let read = retry_on_intr(|| io::read(self.authentication_event.as_ref(), &mut counter));
         if !matches!(read, Ok(8)) {
+            self.authentication = None;
             Self::report_runtime_error("could not receive the authentication result");
+            self.request_visual_redraw();
             return;
         }
         let Some(attempt) = self.authentication.as_ref() else {
@@ -543,7 +598,13 @@ impl LockState {
             return;
         };
         let authenticated = match attempt.receiver.try_recv() {
-            Ok(authenticated) => authenticated,
+            Ok(Ok(authenticated)) => authenticated,
+            Ok(Err(error)) => {
+                self.authentication = None;
+                Self::report_runtime_error(format!("authentication is unavailable: {error}"));
+                self.request_visual_redraw();
+                return;
+            }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 Self::report_runtime_error("the authentication worker ended unexpectedly");
                 false
@@ -594,15 +655,14 @@ impl LockState {
 }
 
 impl ShmBuffer {
-    fn from_frame(
+    fn new(
         shm: &wl_shm::WlShm,
         queue_handle: &QueueHandle<LockState>,
         output_global_name: u32,
         width: u32,
         height: u32,
-        frame: &[u8],
+        byte_len: usize,
     ) -> Result<Self, String> {
-        let byte_len = checked_buffer_len(width, height)?;
         let byte_len_i32 = i32::try_from(byte_len)
             .map_err(|_| "lock surface buffer is too large for Wayland".to_string())?;
         let stride = width
@@ -610,15 +670,10 @@ impl ShmBuffer {
             .and_then(|stride| i32::try_from(stride).ok())
             .ok_or_else(|| "lock surface stride is too large".to_string())?;
 
-        let mut file = tempfile::tempfile()
+        let file = tempfile::tempfile()
             .map_err(|error| format!("could not create a private graphics buffer: {error}"))?;
         file.set_len(u64::try_from(byte_len).map_err(|_| "lock buffer is too large".to_string())?)
             .map_err(|error| format!("could not size the graphics buffer: {error}"))?;
-        if frame.len() != byte_len {
-            return Err("lock frame has an unexpected byte length".to_string());
-        }
-        file.write_all(frame)
-            .map_err(|error| format!("could not initialise the graphics buffer: {error}"))?;
 
         let pool = shm.create_pool(file.as_fd(), byte_len_i32, queue_handle, ());
         let buffer = pool.create_buffer(
@@ -632,13 +687,26 @@ impl ShmBuffer {
         );
 
         Ok(Self {
-            _file: file,
+            file,
             pool,
             buffer,
             width,
             height,
+            byte_len,
             released: false,
         })
+    }
+
+    fn write_frame(&mut self, frame: &[u8]) -> Result<(), String> {
+        if frame.len() != self.byte_len {
+            return Err("lock frame has an unexpected byte length".to_string());
+        }
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| format!("could not rewind the lock buffer: {error}"))?;
+        self.file
+            .write_all(frame)
+            .map_err(|error| format!("could not paint the lock buffer: {error}"))
     }
 }
 
@@ -666,6 +734,10 @@ fn checked_buffer_len(width: u32, height: u32) -> Result<usize, String> {
         .filter(|size| *size <= MAX_BUFFER_BYTES)
         .ok_or_else(|| "lock surface exceeds the 64 MiB safety limit".to_string())?;
     Ok(byte_len)
+}
+
+const fn graphics_budget_permits(resident_bytes: usize, requested_bytes: usize) -> bool {
+    resident_bytes.saturating_add(requested_bytes) <= MAX_GRAPHICS_BYTES
 }
 
 fn release_keyboard(keyboard: &wl_keyboard::WlKeyboard) {
@@ -804,16 +876,19 @@ impl Dispatch<wl_buffer::WlBuffer, u32> for LockState {
                 .iter()
                 .position(|surface| surface.output_global_name == *output_global_name)
         {
+            if let Some(active) = state.surfaces[index].buffer.as_mut()
+                && active.buffer == *released_buffer
             {
-                let surface = &mut state.surfaces[index];
-                if let Some(active) = surface.buffer.as_mut()
-                    && active.buffer == *released_buffer
-                {
-                    active.released = true;
-                }
-                surface
-                    .retired_buffers
-                    .retain(|buffer| buffer.buffer != *released_buffer);
+                active.released = true;
+            }
+            if state.surfaces[index]
+                .retired_buffer
+                .as_ref()
+                .is_some_and(|buffer| buffer.buffer == *released_buffer)
+                && let Some(mut released) = state.surfaces[index].retired_buffer.take()
+            {
+                released.released = true;
+                state.surfaces[index].spare_buffer = Some(released);
             }
             if state.surfaces[index].pending_configure.is_some()
                 && let Err(error) = state.render_pending_configure(index, queue_handle)
@@ -1003,7 +1078,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
 
 #[cfg(test)]
 mod tests {
-    use super::checked_buffer_len;
+    use super::{MAX_GRAPHICS_BYTES, checked_buffer_len, graphics_budget_permits};
 
     #[test]
     fn rejects_zero_dimension_buffers() {
@@ -1019,5 +1094,18 @@ mod tests {
     #[test]
     fn caps_unreasonable_buffers() {
         assert!(checked_buffer_len(16_384, 16_384).is_err());
+    }
+
+    #[test]
+    fn graphics_budget_accounts_for_the_replacement_peak() {
+        let buffer = 64 * 1024 * 1024;
+        assert!(graphics_budget_permits(
+            MAX_GRAPHICS_BYTES - 2 * buffer,
+            2 * buffer
+        ));
+        assert!(!graphics_budget_permits(
+            MAX_GRAPHICS_BYTES - buffer,
+            2 * buffer
+        ));
     }
 }

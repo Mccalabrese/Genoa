@@ -3,14 +3,13 @@
 use async_channel::{Receiver, Sender, unbounded};
 use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use clepsydre_eds::Manager as EdsManager;
+use clepsydre_rebind::Event;
 use clepsydre_rebind::prelude::*;
-use clepsydre_rebind::{Event, Timeframe};
 use gtk4::gio::prelude::ListModelExtManual;
 use gtk4::prelude::*;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
@@ -114,29 +113,8 @@ fn run_calendar_query(
         return Vec::new();
     };
 
-    let Ok(timeframe) = Timeframe::new(false, &start_dt, &end_dt) else {
-        log_command_failure(
-            "clepsydre_timeframe_failed",
-            "clepsydre",
-            &[],
-            "bad timeframe bounds",
-        );
-
-        return Vec::new();
-    };
-    let subscription = match manager.new_subscription(&timeframe) {
-        Ok(Some(sub)) => sub,
-        Ok(None) => {
-            log_command_failure(
-                "clepsydre_subscription_none",
-                "clepsydre",
-                &[],
-                "subscription returned None",
-            );
-
-            return Vec::new();
-        }
-
+    let subscription = match manager.new_subscription(&start_dt, &end_dt) {
+        Ok(subscription) => subscription,
         Err(e) => {
             log_command_failure(
                 "clepsydre_subscription_failed",
@@ -520,11 +498,8 @@ const TELEMETRY_ROTATED_FILE_NAME: &str = "sidebar-telemetry.log.1";
 const TELEMETRY_MAX_BYTES: u64 = 64 * 1024;
 const TELEMETRY_DETAIL_MAX_BYTES: usize = 512;
 const GENOA_LOCK: &str = "/usr/local/bin/genoa-lock";
-const LOCK_EXCLUSIVE: std::ffi::c_int = 2;
-const LOCK_NONBLOCKING: std::ffi::c_int = 4;
 
 unsafe extern "C" {
-    fn flock(fd: std::ffi::c_int, operation: std::ffi::c_int) -> std::ffi::c_int;
     fn geteuid() -> u32;
 }
 
@@ -737,7 +712,10 @@ pub fn run_command(program: &str, args: &[&str]) {
     }
 }
 
-/// Starts Genoa Lock while holding a lock that belongs to this login session.
+/// Starts Genoa Lock.
+///
+/// Genoa Lock owns the session-wide guard itself, so every caller—sidebar,
+/// Waybar, idle management, and compositor hotkeys—shares one authority.
 /// For suspend, Genoa Lock invokes its fixed systemctl command only after the
 /// Wayland session lock is active; a failed or not-yet-ready lock can never be
 /// followed by suspend.
@@ -759,11 +737,6 @@ pub fn lock_screen(suspend_after_lock: bool) {
 }
 
 fn lock_screen_inner(suspend_after_lock: bool) -> Result<(), String> {
-    let lock_path = genoa_lock_runtime_lock_path()?;
-    let lock_file = open_runtime_lock(&lock_path)?;
-    try_lock_exclusive(&lock_file)
-        .map_err(|error| format!("another lock request is already running: {error}"))?;
-
     let status = Command::new(GENOA_LOCK)
         .args(genoa_lock_args(suspend_after_lock))
         .status()
@@ -776,21 +749,6 @@ fn lock_screen_inner(suspend_after_lock: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn open_runtime_lock(lock_path: &Path) -> Result<File, String> {
-    OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(lock_path)
-        .map_err(|error| format!("could not open {}: {error}", lock_path.display()))
-}
-
-fn genoa_lock_runtime_lock_path() -> Result<PathBuf, String> {
-    Ok(genoa_runtime_directory()?.join("genoa-lock.lock"))
-}
-
 fn genoa_runtime_directory() -> Result<PathBuf, String> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -798,11 +756,6 @@ fn genoa_runtime_directory() -> Result<PathBuf, String> {
             "XDG_RUNTIME_DIR is unavailable; refusing to use /tmp for lock state".to_string()
         })?;
     genoa_runtime_directory_in(&runtime)
-}
-
-#[cfg(test)]
-fn genoa_lock_runtime_lock_path_in(runtime: &Path) -> Result<PathBuf, String> {
-    Ok(genoa_runtime_directory_in(runtime)?.join("genoa-lock.lock"))
 }
 
 fn genoa_runtime_directory_in(runtime: &Path) -> Result<PathBuf, String> {
@@ -841,18 +794,6 @@ fn ensure_private_runtime_directory(path: &Path) -> Result<(), String> {
         return Err(format!("{} is accessible by another user", path.display()));
     }
     Ok(())
-}
-
-fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
-    // SAFETY: flock operates only on this valid, open file descriptor. The
-    // operation is non-blocking, so the sidebar UI can never hang waiting for
-    // another concurrent lock request.
-    let result = unsafe { flock(file.as_raw_fd(), LOCK_EXCLUSIVE | LOCK_NONBLOCKING) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
 }
 
 fn genoa_lock_args(suspend_after_lock: bool) -> Vec<&'static str> {
@@ -978,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_lock_requires_a_private_user_directory() {
+    fn runtime_directory_requires_a_private_user_directory() {
         let unique = format!(
             "genoa-sidebar-runtime-test-{}-{}",
             std::process::id(),
@@ -991,21 +932,15 @@ mod tests {
         fs::create_dir(&runtime).unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let lock_path = genoa_lock_runtime_lock_path_in(&runtime).unwrap();
-        assert_eq!(lock_path, runtime.join("genoa/genoa-lock.lock"));
+        let genoa_runtime = genoa_runtime_directory_in(&runtime).unwrap();
+        assert_eq!(genoa_runtime, runtime.join("genoa"));
         assert_eq!(
-            fs::metadata(runtime.join("genoa"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o077,
+            fs::metadata(&genoa_runtime).unwrap().permissions().mode() & 0o077,
             0
         );
-        let lock = open_runtime_lock(&lock_path).unwrap();
-        assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o077, 0);
 
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(genoa_lock_runtime_lock_path_in(&runtime).is_err());
+        assert!(genoa_runtime_directory_in(&runtime).is_err());
 
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(runtime).unwrap();
