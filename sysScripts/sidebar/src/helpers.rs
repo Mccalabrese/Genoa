@@ -519,8 +519,7 @@ const TELEMETRY_FILE_NAME: &str = "sidebar-telemetry.log";
 const TELEMETRY_ROTATED_FILE_NAME: &str = "sidebar-telemetry.log.1";
 const TELEMETRY_MAX_BYTES: u64 = 64 * 1024;
 const TELEMETRY_DETAIL_MAX_BYTES: usize = 512;
-const GTKLOCK: &str = "/usr/bin/gtklock";
-const GTKLOCK_SUSPEND_COMMAND: &str = "/usr/bin/systemctl suspend";
+const GENOA_LOCK: &str = "/usr/local/bin/genoa-lock";
 const LOCK_EXCLUSIVE: std::ffi::c_int = 2;
 const LOCK_NONBLOCKING: std::ffi::c_int = 4;
 
@@ -738,18 +737,18 @@ pub fn run_command(program: &str, args: &[&str]) {
     }
 }
 
-/// Starts gtklock while holding a lock that belongs to this login session.
-/// For suspend, gtklock itself invokes the fixed systemctl command only after
-/// the Wayland session lock is active; a failed or not-yet-ready lock can
-/// therefore never be followed by suspend.
+/// Starts Genoa Lock while holding a lock that belongs to this login session.
+/// For suspend, Genoa Lock invokes its fixed systemctl command only after the
+/// Wayland session lock is active; a failed or not-yet-ready lock can never be
+/// followed by suspend.
 pub fn lock_screen(suspend_after_lock: bool) {
     std::thread::spawn(move || {
         if let Err(error) = lock_screen_inner(suspend_after_lock) {
             log_command_failure(
                 "lock_screen_failed",
-                GTKLOCK,
+                GENOA_LOCK,
                 if suspend_after_lock {
-                    &["--lock-command", GTKLOCK_SUSPEND_COMMAND]
+                    &["--suspend-after-lock"]
                 } else {
                     &[]
                 },
@@ -760,18 +759,18 @@ pub fn lock_screen(suspend_after_lock: bool) {
 }
 
 fn lock_screen_inner(suspend_after_lock: bool) -> Result<(), String> {
-    let lock_path = gtklock_runtime_lock_path()?;
+    let lock_path = genoa_lock_runtime_lock_path()?;
     let lock_file = open_runtime_lock(&lock_path)?;
     try_lock_exclusive(&lock_file)
         .map_err(|error| format!("another lock request is already running: {error}"))?;
 
-    let status = Command::new(GTKLOCK)
-        .args(gtklock_args(suspend_after_lock))
+    let status = Command::new(GENOA_LOCK)
+        .args(genoa_lock_args(suspend_after_lock))
         .status()
-        .map_err(|error| format!("could not start gtklock: {error}"))?;
+        .map_err(|error| format!("could not start Genoa Lock: {error}"))?;
     if !status.success() {
         return Err(format!(
-            "gtklock exited before it could lock the session: {status}"
+            "Genoa Lock exited before it could lock the session: {status}"
         ));
     }
     Ok(())
@@ -788,8 +787,8 @@ fn open_runtime_lock(lock_path: &Path) -> Result<File, String> {
         .map_err(|error| format!("could not open {}: {error}", lock_path.display()))
 }
 
-fn gtklock_runtime_lock_path() -> Result<PathBuf, String> {
-    Ok(genoa_runtime_directory()?.join("gtklock.lock"))
+fn genoa_lock_runtime_lock_path() -> Result<PathBuf, String> {
+    Ok(genoa_runtime_directory()?.join("genoa-lock.lock"))
 }
 
 fn genoa_runtime_directory() -> Result<PathBuf, String> {
@@ -802,8 +801,8 @@ fn genoa_runtime_directory() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
-fn gtklock_runtime_lock_path_in(runtime: &Path) -> Result<PathBuf, String> {
-    Ok(genoa_runtime_directory_in(runtime)?.join("gtklock.lock"))
+fn genoa_lock_runtime_lock_path_in(runtime: &Path) -> Result<PathBuf, String> {
+    Ok(genoa_runtime_directory_in(runtime)?.join("genoa-lock.lock"))
 }
 
 fn genoa_runtime_directory_in(runtime: &Path) -> Result<PathBuf, String> {
@@ -856,10 +855,10 @@ fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
     }
 }
 
-fn gtklock_args(suspend_after_lock: bool) -> Vec<&'static str> {
+fn genoa_lock_args(suspend_after_lock: bool) -> Vec<&'static str> {
     let mut args = Vec::new();
     if suspend_after_lock {
-        args.extend(["--lock-command", GTKLOCK_SUSPEND_COMMAND]);
+        args.push("--suspend-after-lock");
     }
     args
 }
@@ -974,11 +973,8 @@ mod tests {
 
     #[test]
     fn suspend_is_a_fixed_post_lock_command() {
-        assert_eq!(gtklock_args(false), Vec::<&str>::new());
-        assert_eq!(
-            gtklock_args(true),
-            ["--lock-command", "/usr/bin/systemctl suspend"]
-        );
+        assert_eq!(genoa_lock_args(false), Vec::<&str>::new());
+        assert_eq!(genoa_lock_args(true), ["--suspend-after-lock"]);
     }
 
     #[test]
@@ -995,8 +991,8 @@ mod tests {
         fs::create_dir(&runtime).unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let lock_path = gtklock_runtime_lock_path_in(&runtime).unwrap();
-        assert_eq!(lock_path, runtime.join("genoa/gtklock.lock"));
+        let lock_path = genoa_lock_runtime_lock_path_in(&runtime).unwrap();
+        assert_eq!(lock_path, runtime.join("genoa/genoa-lock.lock"));
         assert_eq!(
             fs::metadata(runtime.join("genoa"))
                 .unwrap()
@@ -1009,7 +1005,7 @@ mod tests {
         assert_eq!(lock.metadata().unwrap().permissions().mode() & 0o077, 0);
 
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(gtklock_runtime_lock_path_in(&runtime).is_err());
+        assert!(genoa_lock_runtime_lock_path_in(&runtime).is_err());
 
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         fs::remove_dir_all(runtime).unwrap();

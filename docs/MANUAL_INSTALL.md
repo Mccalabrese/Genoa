@@ -136,7 +136,7 @@ sudo pacman -S --needed --noconfirm \
   noto-fonts-emoji otf-font-awesome zsh starship ghostty tmux fzf ripgrep bat btop \
   fastfetch neovim librewolf networkmanager network-manager-applet discord tigervnc mpv gparted simple-scan \
   gnome-calculator cups system-config-printer cups-pdf avahi nss-mdns zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy wireplumber \
-  tree-sitter tree-sitter-cli luarocks lazygit fd python-pynvim tectonic nodejs npm gtklock
+  tree-sitter tree-sitter-cli luarocks lazygit fd python-pynvim tectonic nodejs npm
 ```
 <!-- PKGLIST:END -->
 

@@ -18,16 +18,20 @@ It deliberately has no themes, module loader, shell commands, status files,
 network access, or user-supplied executable configuration.
 
 The first prototype handles the compositor's supplied XKB layout, but does not
-yet implement compose keys, input methods, or visual password feedback. It is
-therefore a protocol/authentication milestone, not a replacement for the
-existing lock screen.
+yet implement compose keys, input methods, or visual password feedback.
 
 ## Security status
 
-This is a prototype and is **not yet installed or called by Genoa**. Do not
-replace a production locker until the integration test plan has covered the
-target compositors, multiple displays, hot-plugging, suspend/resume, PAM
-failures, and recovery from a compositor or locker crash.
+This is a prototype being integrated for hardware testing. Genoa's installer
+installs the release-built binary as root-owned `/usr/local/bin/genoa-lock`,
+installs its dedicated PAM policy, and then migrates the known Sway and Niri
+lock launch sites. It keeps GTKLock installed if it detects an active custom
+GTKLock command it cannot rewrite safely.
+
+Before treating it as a generally supported production locker, the integration
+test plan must still cover the target compositors, multiple displays,
+hot-plugging, suspend/resume, PAM failures, and recovery from a compositor or
+locker crash.
 
 The protocol binding is currently exposed by `wayland-protocols` as a staging
 protocol. That is another reason to keep this isolated until it has received

@@ -15,6 +15,56 @@ const RETIRED_TOOL_SOURCES: &[&str] = &[
     "sysScripts/sidebar/src/calendar_query.c",
 ];
 
+const GTKLOCK_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        ".config/sway/swayidle.sh",
+        &[
+            (
+                "flock -n /tmp/gtklock.lock gtklock -d",
+                "/usr/local/bin/genoa-lock",
+            ),
+            (
+                "before-sleep 'sh -c \"flock -n /tmp/gtklock.lock gtklock &\"'",
+                "before-sleep '/usr/local/bin/genoa-lock'",
+            ),
+        ],
+    ),
+    (
+        ".config/sway/UserConfigs/UserKeybinds.conf",
+        &[
+            (
+                "exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend'",
+                "exec /usr/local/bin/genoa-lock --suspend-after-lock",
+            ),
+            (
+                "exec sh -c 'flock -n /tmp/gtklock.lock gtklock -d'",
+                "exec /usr/local/bin/genoa-lock",
+            ),
+        ],
+    ),
+    (
+        ".config/niri/config.kdl",
+        &[
+            (
+                "spawn-sh \"flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend\"",
+                "spawn \"/usr/local/bin/genoa-lock\" \"--suspend-after-lock\"",
+            ),
+            (
+                "spawn-sh \"flock -n /tmp/gtklock.lock gtklock -d\"",
+                "spawn \"/usr/local/bin/genoa-lock\"",
+            ),
+            (
+                "before-sleep 'sh -c \\\"flock -n /tmp/gtklock.lock gtklock &\\\"'",
+                "before-sleep '/usr/local/bin/genoa-lock'",
+            ),
+            (
+                "flock -n /tmp/gtklock.lock gtklock -d",
+                "/usr/local/bin/genoa-lock",
+            ),
+        ],
+    ),
+];
+
 /// Removes source files intentionally retired by tool migrations.
 ///
 /// Cargo can clear compiled output, but a stale untracked `build.rs` is still
@@ -29,6 +79,65 @@ pub fn remove_retired_tool_sources(repo_root: &Path) -> Result<(), std::io::Erro
     }
 
     Ok(())
+}
+
+/// Rewrites Genoa's former gtklock launch sites without overwriting unrelated
+/// user changes. Returns false when a non-commented gtklock reference remains,
+/// which tells the caller to preserve the old package rather than leave the
+/// user with no working locker.
+pub fn migrate_gtklock_lock_commands(
+    sys: &impl CmdExecutor,
+    home: &Path,
+) -> Result<bool, std::io::Error> {
+    let mut safe_to_retire = true;
+
+    for (relative_path, replacements) in GTKLOCK_CONFIG_MIGRATIONS {
+        let path = home.join(relative_path);
+        if !sys.path_exists(&path) {
+            continue;
+        }
+
+        let original = sys.read_file_to_string(&path)?;
+        let mut updated = original.clone();
+        for (from, to) in *replacements {
+            updated = updated.replace(from, to);
+        }
+        if updated != original {
+            let path = path
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("Gtklock config path is not valid UTF-8"))?;
+            sys.write_string_to_file(path, &updated)?;
+        }
+        if has_active_gtklock_reference(&updated) {
+            eprintln!(
+                "   ⚠️  Active gtklock command remains in {}; manual migration is required.",
+                path.display()
+            );
+            safe_to_retire = false;
+        }
+    }
+
+    Ok(safe_to_retire)
+}
+
+/// Deletes only the retired gtklock configuration directory, after the caller
+/// has installed Genoa Lock and removed every active gtklock launch path.
+pub fn remove_retired_gtklock_config(
+    sys: &impl CmdExecutor,
+    home: &Path,
+) -> Result<(), std::io::Error> {
+    let config_dir = home.join(".config/gtklock");
+    if sys.path_is_dir(&config_dir) {
+        sys.remove_dir_all(&config_dir)?;
+    }
+    Ok(())
+}
+
+fn has_active_gtklock_reference(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#') && !line.starts_with("//") && line.contains("gtklock")
+    })
 }
 
 pub fn setup_librewolf(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
@@ -726,6 +835,57 @@ mod tests {
     use super::*;
     use crate::mock_env::MockEnv;
     use std::path::Path;
+
+    #[test]
+    fn gtklock_migration_preserves_lock_before_suspend_order() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let niri_path = home.join(".config/niri/config.kdl");
+        env.mock_files.borrow_mut().insert(
+            niri_path.to_string_lossy().to_string(),
+            "spawn-sh \"flock -n /tmp/gtklock.lock gtklock -d; systemctl suspend\"\n".to_string(),
+        );
+
+        assert!(migrate_gtklock_lock_commands(&env, home).unwrap());
+
+        let migrated = env
+            .mock_files
+            .borrow()
+            .get(&niri_path.to_string_lossy().to_string())
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            migrated,
+            "spawn \"/usr/local/bin/genoa-lock\" \"--suspend-after-lock\"\n"
+        );
+    }
+
+    #[test]
+    fn gtklock_migration_keeps_the_old_locker_for_unknown_active_commands() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let sway_path = home.join(".config/sway/swayidle.sh");
+        env.mock_files.borrow_mut().insert(
+            sway_path.to_string_lossy().to_string(),
+            "timeout 30 'gtklock --custom-flag'\n".to_string(),
+        );
+
+        assert!(!migrate_gtklock_lock_commands(&env, home).unwrap());
+    }
+
+    #[test]
+    fn retired_gtklock_config_is_removed_only_when_present() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let config_dir = home.join(".config/gtklock");
+        env.mock_dirs
+            .borrow_mut()
+            .insert(config_dir.to_string_lossy().to_string());
+
+        remove_retired_gtklock_config(&env, home).unwrap();
+
+        assert!(!env.path_exists(&config_dir));
+    }
 
     #[test]
     fn config_document_migration_removes_legacy_finnhub_key_but_preserves_stocks() {
