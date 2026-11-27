@@ -34,7 +34,10 @@ use zeroize::Zeroizing;
 const MAX_OUTPUTS: usize = 16;
 const MAX_SEATS: usize = 16;
 const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
-const MAX_GRAPHICS_BYTES: usize = 256 * 1024 * 1024;
+// Covers a worst-case repaint burst on either three 4K outputs or two 5K
+// outputs. The cap remains finite even if a compositor reports pathological
+// output geometry.
+const MAX_GRAPHICS_BYTES: usize = 512 * 1024 * 1024;
 const MAX_KEYMAP_BYTES: usize = 4 * 1024 * 1024;
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const VISUAL_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
@@ -1310,5 +1313,23 @@ mod tests {
             MAX_GRAPHICS_BYTES - buffer,
             2 * buffer
         ));
+    }
+
+    #[test]
+    fn graphics_budget_supports_high_density_multi_output_repaints() -> Result<(), String> {
+        let dci_4k = checked_buffer_len(4096, 2160)?;
+        // Per output: active shared-memory buffer, cached background, reusable
+        // working frame, and one transient replacement buffer during redraw.
+        assert!(graphics_budget_permits(0, 3 * dci_4k));
+        assert!(graphics_budget_permits(3 * dci_4k, 3 * dci_4k));
+        assert!(graphics_budget_permits(6 * dci_4k, 3 * dci_4k));
+        assert!(graphics_budget_permits(9 * dci_4k, 3 * dci_4k));
+
+        let five_k = checked_buffer_len(5120, 2880)?;
+        // Two 5K outputs can both allocate a replacement buffer while their
+        // compositor-owned active buffers are awaiting release.
+        assert!(graphics_budget_permits(0, 6 * five_k));
+        assert!(graphics_budget_permits(6 * five_k, 2 * five_k));
+        Ok(())
     }
 }
