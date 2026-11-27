@@ -112,7 +112,16 @@ fn authenticate_with_helper(password: &Zeroizing<String>) -> AuthenticationResul
         format!("could not make the PAM helper result channel nonblocking: {error}")
     })?;
     let mut response = [0_u8; 9];
-    let read = match output.read(&mut response) {
+    let read_result = loop {
+        let result = output.read(&mut response);
+        if !matches!(
+            result,
+            Err(ref error) if error.kind() == ErrorKind::Interrupted
+        ) {
+            break result;
+        }
+    };
+    let read = match read_result {
         Ok(read) => read,
         Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
         Err(error) => return Err(format!("could not read the PAM helper result: {error}")),
