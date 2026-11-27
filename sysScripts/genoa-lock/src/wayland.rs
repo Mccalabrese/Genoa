@@ -33,6 +33,7 @@ const MAX_GRAPHICS_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KEYMAP_BYTES: usize = 4 * 1024 * 1024;
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const VISUAL_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
+const AUTHENTICATION_FAILURE_DURATION: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Default)]
 pub struct LockOptions {
@@ -145,6 +146,7 @@ struct LockState {
     surfaces: Vec<LockSurface>,
     appearance: Appearance,
     visual_redraw_after: Option<Instant>,
+    authentication_failed_until: Option<Instant>,
     password: Password,
     authentication_event: Arc<OwnedFd>,
     authentication: Option<AuthenticationAttempt>,
@@ -233,6 +235,7 @@ impl LockState {
         // Each seat owns a separate input context, so this temporary probe is
         // deliberately dropped immediately.
         drop(KeyboardInput::new()?);
+        auth::ensure_helper_available()?;
         let authentication_event = eventfd(0, EventfdFlags::CLOEXEC)
             .map_err(|error| format!("could not create the authentication notifier: {error}"))?;
         Ok(Self {
@@ -249,6 +252,7 @@ impl LockState {
             surfaces: Vec::new(),
             appearance: Appearance::load()?,
             visual_redraw_after: None,
+            authentication_failed_until: None,
             password: Password::default(),
             authentication_event: Arc::new(authentication_event),
             authentication: None,
@@ -416,11 +420,18 @@ impl LockState {
     }
 
     fn redraw_if_due(&mut self, queue_handle: &QueueHandle<Self>) {
-        if self
+        let now = Instant::now();
+        let redraw_due = self
             .visual_redraw_after
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
+            .is_some_and(|deadline| deadline <= now);
+        let failure_expired = self
+            .authentication_failed_until
+            .is_some_and(|deadline| deadline <= now);
+        if redraw_due || failure_expired {
             self.visual_redraw_after = None;
+            if failure_expired {
+                self.authentication_failed_until = None;
+            }
             for index in 0..self.surfaces.len() {
                 if let Err(error) = self.redraw_surface(index, queue_handle) {
                     Self::report_runtime_error(error);
@@ -430,7 +441,11 @@ impl LockState {
     }
 
     fn visual_poll_timeout(&self) -> Option<Timespec> {
-        let deadline = self.visual_redraw_after?;
+        let deadline = match (self.visual_redraw_after, self.authentication_failed_until) {
+            (Some(redraw), Some(failure)) => redraw.min(failure),
+            (Some(deadline), None) | (None, Some(deadline)) => deadline,
+            (None, None) => return None,
+        };
         let remaining = deadline.saturating_duration_since(Instant::now());
         Some(Timespec {
             tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
@@ -529,6 +544,7 @@ impl LockState {
             height,
             self.password.display_len(),
             self.authentication.is_some(),
+            self.authentication_failed_until.is_some(),
         )?;
 
         let lock_surface = &mut self.surfaces[index];
@@ -582,6 +598,10 @@ impl LockState {
         }
     }
 
+    const fn clear_authentication_failure(&mut self) {
+        self.authentication_failed_until = None;
+    }
+
     fn finish_authentication(&mut self) {
         let mut counter = [0_u8; 8];
         let read = retry_on_intr(|| io::read(self.authentication_event.as_ref(), &mut counter));
@@ -618,7 +638,9 @@ impl LockState {
         if authenticated {
             self.unlock();
         } else {
-            self.request_visual_redraw();
+            self.authentication_failed_until =
+                Some(Instant::now() + AUTHENTICATION_FAILURE_DURATION);
+            self.request_visual_redraw_now();
         }
     }
 
@@ -1106,6 +1128,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
 
         if state.authentication.is_none() {
             let redraw = !matches!(&action, Some(KeyAction::Ignore) | None);
+            if redraw {
+                state.clear_authentication_failure();
+            }
             match action {
                 Some(KeyAction::Backspace) => state.password.backspace(),
                 Some(KeyAction::Submit) => state.submit_password(),

@@ -71,6 +71,7 @@ impl Appearance {
         height: u32,
         password_len: usize,
         authenticating: bool,
+        authentication_failed: bool,
     ) -> Result<Vec<u8>, String> {
         let pixels = pixel_len(width, height)?;
         let mut frame = vec![0_u8; pixels];
@@ -118,6 +119,8 @@ impl Appearance {
 
         let message = if authenticating {
             "AUTHENTICATING"
+        } else if authentication_failed {
+            "FAILED"
         } else if password_len == 0 {
             "PASSWORD"
         } else {
@@ -678,7 +681,7 @@ mod tests {
     #[test]
     fn embedded_appearance_renders_an_opaque_frame() -> Result<(), String> {
         let appearance = Appearance::load()?;
-        let frame = appearance.frame(64, 64, 3, false)?;
+        let frame = appearance.frame(64, 64, 3, false, false)?;
 
         assert_eq!(frame.len(), 64 * 64 * 4);
         let (pixels, remainder) = frame.as_chunks::<4>();
