@@ -1,0 +1,12 @@
+[Unit]
+Description=Genoa idle manager for Sway
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/swayidle -w timeout 60 "/usr/bin/brightnessctl set 0%%" resume "/usr/bin/brightnessctl set 15%%" timeout 240 /usr/local/bin/genoa-lock timeout 270 "/usr/bin/swaymsg \"output * dpms off\"" resume "/usr/bin/swaymsg \"output * dpms on\"" timeout 600 "/usr/bin/systemctl suspend" before-sleep /usr/local/bin/genoa-lock after-resume "/usr/bin/systemctl --user restart genoa-sway-idle.service"
+Restart=on-failure
+RestartSec=2
+PassEnvironment=DBUS_SESSION_BUS_ADDRESS SWAYSOCK WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR
+

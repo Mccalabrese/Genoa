@@ -65,30 +65,18 @@ const GTKLOCK_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-const IDLE_SERVICE_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
+const GEOCLUE_AGENT: &str = "/usr/lib/geoclue-2.0/demos/agent";
+const AUTOMATIC_TIMEZONE_MIGRATION_MARKER: &str = ".automatic-timezone-v1";
+const LOCATION_STARTUP_MIGRATIONS: &[(&str, &str, &str)] = &[
     (
         ".config/niri/config.kdl",
-        &[(
-            r#"spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 '/usr/local/bin/genoa-lock' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep '/usr/local/bin/genoa-lock'""#,
-            r#"spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user restart genoa-niri-idle.service""#,
-        )],
+        "spawn-at-startup \"/usr/lib/gsd-datetime\"",
+        "spawn-at-startup \"/usr/lib/geoclue-2.0/demos/agent\"",
     ),
     (
         ".config/sway/UserConfigs/Startup_Apps.conf",
-        &[
-            (
-                "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP",
-                "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP SWAYSOCK",
-            ),
-            (
-                "systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP",
-                "systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP SWAYSOCK",
-            ),
-            (
-                "exec_always ~/.config/sway/swayidle.sh",
-                "exec_always systemctl --user restart genoa-sway-idle.service",
-            ),
-        ],
+        "exec /usr/lib/gsd-datetime",
+        "exec /usr/lib/geoclue-2.0/demos/agent",
     ),
 ];
 
@@ -147,31 +135,73 @@ pub fn migrate_gtklock_lock_commands(
     Ok(safe_to_retire)
 }
 
-/// Moves only Genoa's known direct swayidle startup commands to the managed
-/// services. Other user idle commands remain untouched.
-pub fn migrate_idle_service_commands(
+/// Adds the GeoClue authorization agent beside Genoa's GNOME Date & Time
+/// service without replacing a user's compositor configuration. The agent is
+/// already present in current Niri configs; this migration repairs older Niri
+/// files and brings Sway to feature parity.
+pub fn migrate_location_service_startup(
     sys: &impl CmdExecutor,
     home: &Path,
 ) -> Result<(), std::io::Error> {
-    for (relative_path, replacements) in IDLE_SERVICE_CONFIG_MIGRATIONS {
+    for (relative_path, datetime_startup, agent_startup) in LOCATION_STARTUP_MIGRATIONS {
         let path = home.join(relative_path);
         if !sys.path_exists(&path) {
             continue;
         }
 
         let original = sys.read_file_to_string(&path)?;
-        let mut updated = original.clone();
-        for (from, to) in *replacements {
-            updated = updated.replace(from, to);
-        }
-        if updated != original {
-            let path = path.to_str().ok_or_else(|| {
-                std::io::Error::other("idle service config path is not valid UTF-8")
-            })?;
-            sys.write_string_to_file(path, &updated)?;
+        let Some(updated) =
+            insert_startup_command_after(&original, datetime_startup, agent_startup, GEOCLUE_AGENT)
+        else {
+            continue;
+        };
+
+        let path_string = path
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("Location config path is not valid UTF-8"))?;
+        sys.write_string_to_file(path_string, &updated)?;
+    }
+
+    Ok(())
+}
+
+fn insert_startup_command_after(
+    contents: &str,
+    datetime_startup: &str,
+    agent_startup: &str,
+    agent_path: &str,
+) -> Option<String> {
+    if has_active_command(contents, agent_path) {
+        return None;
+    }
+
+    let mut updated = String::with_capacity(contents.len() + agent_startup.len() + 1);
+    let mut inserted = false;
+
+    for line in contents.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        updated.push_str(line);
+
+        if !inserted && line_without_newline.trim() == datetime_startup {
+            if !line.ends_with('\n') {
+                updated.push('\n');
+            }
+            let indent_len = line_without_newline.len() - line_without_newline.trim_start().len();
+            updated.push_str(&line_without_newline[..indent_len]);
+            updated.push_str(agent_startup);
+            updated.push('\n');
+            inserted = true;
         }
     }
-    Ok(())
+
+    inserted.then_some(updated)
+}
+
+fn has_active_command(contents: &str, command: &str) -> bool {
+    contents.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#') && !line.starts_with("//") && line.contains(command)
+    })
 }
 
 /// Deletes only the retired gtklock configuration directory, after the caller
@@ -316,6 +346,8 @@ pub fn setup_secrets_and_geoclue(
     migrate_local_finance_config(sys, &home.join(".config/waybar-finance/config.json"))?;
 
     configure_geoclue_for_beacondb(sys)?;
+    configure_automatic_timezone(sys, &config_dir);
+    migrate_location_service_startup(sys, home)?;
 
     let wallpaper_path = home.join("Pictures/Wallpapers");
     if !sys.path_exists(&wallpaper_path) {
@@ -326,6 +358,51 @@ pub fn setup_secrets_and_geoclue(
         sys.create_dir_all(&wallpaper_path)?;
     }
     Ok(())
+}
+
+/// Sets Genoa's automatic-timezone default once, then records the migration
+/// privately so later user choices are never overwritten by an update.
+fn configure_automatic_timezone(sys: &impl CmdExecutor, config_dir: &Path) {
+    let marker = config_dir.join(AUTOMATIC_TIMEZONE_MIGRATION_MARKER);
+    if sys.path_exists(&marker) {
+        return;
+    }
+    if !sys.command_exists("gsettings") {
+        return;
+    }
+
+    let automatic_timezone_enabled = sys
+        .run_cmd(
+            "gsettings",
+            &[
+                "set",
+                "org.gnome.desktop.datetime",
+                "automatic-timezone",
+                "true",
+            ],
+        )
+        .is_ok();
+    let location_enabled = sys
+        .run_cmd(
+            "gsettings",
+            &["set", "org.gnome.system.location", "enabled", "true"],
+        )
+        .is_ok();
+
+    if !automatic_timezone_enabled || !location_enabled {
+        eprintln!(
+            "   ⚠️  Could not enable automatic timezone and location access in this session."
+        );
+        return;
+    }
+
+    if let Err(error) = sys.write_private_string_to_file(&marker, "enabled\n") {
+        eprintln!(
+            "   ⚠️  Automatic timezone is enabled, but its migration marker could not be saved: {error}"
+        );
+    } else {
+        println!("   ✅ Automatic timezone and location access enabled.");
+    }
 }
 
 /// Removes the retired Finnhub key from the app-local watchlist while retaining
@@ -941,6 +1018,100 @@ mod tests {
     use super::*;
     use crate::mock_env::MockEnv;
     use std::path::Path;
+
+    #[test]
+    fn location_startup_migration_adds_the_agent_without_touching_other_lines() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let niri_path = home.join(".config/niri/config.kdl");
+        let sway_path = home.join(".config/sway/UserConfigs/Startup_Apps.conf");
+        env.mock_files.borrow_mut().insert(
+            niri_path.to_string_lossy().to_string(),
+            "spawn-at-startup \"/usr/lib/gsd-datetime\"\nspawn-at-startup \"nm-applet\"\n"
+                .to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            sway_path.to_string_lossy().to_string(),
+            "# startup\nexec /usr/lib/gsd-datetime\nexec nm-applet\n".to_string(),
+        );
+
+        migrate_location_service_startup(&env, home).unwrap();
+
+        assert_eq!(
+            env.read_file_to_string(&niri_path).unwrap(),
+            "spawn-at-startup \"/usr/lib/gsd-datetime\"\nspawn-at-startup \"/usr/lib/geoclue-2.0/demos/agent\"\nspawn-at-startup \"nm-applet\"\n"
+        );
+        assert_eq!(
+            env.read_file_to_string(&sway_path).unwrap(),
+            "# startup\nexec /usr/lib/gsd-datetime\nexec /usr/lib/geoclue-2.0/demos/agent\nexec nm-applet\n"
+        );
+    }
+
+    #[test]
+    fn location_startup_migration_preserves_an_existing_agent() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let niri_path = home.join(".config/niri/config.kdl");
+        let original = "spawn-at-startup \"/usr/lib/gsd-datetime\"\nspawn-at-startup \"/usr/lib/geoclue-2.0/demos/agent\"\n";
+        env.mock_files.borrow_mut().insert(
+            niri_path.to_string_lossy().to_string(),
+            original.to_string(),
+        );
+
+        migrate_location_service_startup(&env, home).unwrap();
+
+        assert_eq!(env.read_file_to_string(&niri_path).unwrap(), original);
+    }
+
+    #[test]
+    fn automatic_timezone_migration_enables_both_settings_once() {
+        let mut env = MockEnv::default();
+        env.available_commands.insert("gsettings".to_string());
+        let config_dir = Path::new("/home/testuser/.config/rust-dotfiles");
+
+        configure_automatic_timezone(&env, config_dir);
+        configure_automatic_timezone(&env, config_dir);
+
+        assert_eq!(
+            *env.cmd_log.borrow(),
+            vec![
+                (
+                    "gsettings".to_string(),
+                    vec![
+                        "set".to_string(),
+                        "org.gnome.desktop.datetime".to_string(),
+                        "automatic-timezone".to_string(),
+                        "true".to_string(),
+                    ],
+                ),
+                (
+                    "gsettings".to_string(),
+                    vec![
+                        "set".to_string(),
+                        "org.gnome.system.location".to_string(),
+                        "enabled".to_string(),
+                        "true".to_string(),
+                    ],
+                ),
+            ]
+        );
+        assert_eq!(
+            env.read_file_to_string(&config_dir.join(AUTOMATIC_TIMEZONE_MIGRATION_MARKER))
+                .unwrap(),
+            "enabled\n"
+        );
+    }
+
+    #[test]
+    fn automatic_timezone_migration_retries_when_gsettings_is_unavailable() {
+        let env = MockEnv::default();
+        let config_dir = Path::new("/home/testuser/.config/rust-dotfiles");
+
+        configure_automatic_timezone(&env, config_dir);
+
+        assert!(env.cmd_log.borrow().is_empty());
+        assert!(!env.path_exists(&config_dir.join(AUTOMATIC_TIMEZONE_MIGRATION_MARKER)));
+    }
 
     #[test]
     fn gtklock_migration_preserves_lock_before_suspend_order() {
