@@ -219,8 +219,16 @@ struct LockSurface {
     buffer: Option<ShmBuffer>,
     spare_buffer: Option<ShmBuffer>,
     retired_buffer: Option<ShmBuffer>,
+    frames: Option<SurfaceFrames>,
     pending_configure: Option<PendingConfigure>,
     redraw_pending: bool,
+}
+
+/// The immutable wallpaper background and a reusable dynamic working frame
+/// for one configured output size.
+struct SurfaceFrames {
+    background: Vec<u8>,
+    working: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -238,6 +246,15 @@ enum LockLifecycle {
     UnlockSyncPending,
     Unlocked,
     EndedByCompositor,
+}
+
+impl LockLifecycle {
+    /// Password input is valid only while the compositor still considers this
+    /// an active lock. In particular, do not start another PAM transaction
+    /// after `unlock_and_destroy` has been sent but before its sync reply.
+    const fn accepts_keyboard_input(self) -> bool {
+        matches!(self, Self::Locked)
+    }
 }
 
 struct ShmBuffer {
@@ -350,6 +367,7 @@ impl LockState {
             buffer: None,
             spare_buffer: None,
             retired_buffer: None,
+            frames: None,
             pending_configure: None,
             redraw_pending: false,
         });
@@ -406,6 +424,10 @@ impl LockState {
                 return Ok(());
             }
 
+            // A resized output needs a separately scaled background and a
+            // matching reusable working frame. Release the old pair before
+            // checking the graphics-memory budget for the new size.
+            self.surfaces[index].frames = None;
             let new_buffer =
                 self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
             let old_buffer = self.surfaces[index].buffer.replace(new_buffer);
@@ -552,9 +574,15 @@ impl LockState {
         queue_handle: &QueueHandle<Self>,
     ) -> Result<ShmBuffer, String> {
         let byte_len = checked_buffer_len(width, height)?;
-        // A new shared-memory buffer and a temporary rendered frame coexist
-        // until the frame is copied into that buffer.
-        if !graphics_budget_permits(self.graphics_bytes(), byte_len.saturating_mul(2)) {
+        let surface_needs_cache = self.surfaces[index].frames.is_none();
+        // One shared-memory buffer is always needed. A newly configured output
+        // also needs its cached background and reusable working frame.
+        let additional_bytes = if surface_needs_cache {
+            byte_len.saturating_mul(3)
+        } else {
+            byte_len
+        };
+        if !graphics_budget_permits(self.graphics_bytes(), additional_bytes) {
             return Err("lock graphics memory limit would be exceeded".to_string());
         }
 
@@ -583,20 +611,29 @@ impl LockState {
             .as_ref()
             .map(|buffer| (buffer.width, buffer.height))
             .ok_or_else(|| "cannot paint an unconfigured lock surface".to_string())?;
-        let frame = self.appearance.frame(
+        let lock_surface = &mut self.surfaces[index];
+        if lock_surface.frames.is_none() {
+            let background = self.appearance.background(width, height)?;
+            lock_surface.frames = Some(SurfaceFrames {
+                working: background.clone(),
+                background,
+            });
+        }
+        let (frames, buffer) = match (&mut lock_surface.frames, &mut lock_surface.buffer) {
+            (Some(frames), Some(buffer)) => (frames, buffer),
+            (None, _) => return Err("could not access the cached lock frames".to_string()),
+            (_, None) => return Err("could not access the lock surface buffer".to_string()),
+        };
+        frames.working.copy_from_slice(&frames.background);
+        self.appearance.draw_foreground(
+            &mut frames.working,
             width,
             height,
             self.password.display_len(),
             self.authentication.is_some(),
             self.authentication_failed_until.is_some(),
         )?;
-
-        let lock_surface = &mut self.surfaces[index];
-        let buffer = lock_surface
-            .buffer
-            .as_mut()
-            .ok_or_else(|| "could not access the lock surface buffer".to_string())?;
-        buffer.write_frame(&frame)?;
+        buffer.write_frame(&frames.working)?;
         buffer.released = false;
         lock_surface.redraw_pending = false;
         if let Some(serial) = configure_serial {
@@ -622,6 +659,16 @@ impl LockState {
             .fold(0_usize, |total, buffer| {
                 total.saturating_add(buffer.byte_len)
             })
+            .saturating_add(
+                self.surfaces
+                    .iter()
+                    .filter_map(|surface| surface.frames.as_ref())
+                    .fold(0_usize, |total, frames| {
+                        total
+                            .saturating_add(frames.background.len())
+                            .saturating_add(frames.working.len())
+                    }),
+            )
     }
 
     fn submit_password(&mut self) {
@@ -1203,7 +1250,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
             }
         };
 
-        if state.authentication.is_none() {
+        if state.lifecycle.accepts_keyboard_input() && state.authentication.is_none() {
             let redraw = !matches!(&action, Some(KeyAction::Ignore) | None);
             if redraw {
                 state.clear_authentication_failure();
@@ -1224,7 +1271,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_GRAPHICS_BYTES, checked_buffer_len, graphics_budget_permits};
+    use super::{LockLifecycle, MAX_GRAPHICS_BYTES, checked_buffer_len, graphics_budget_permits};
+
+    #[test]
+    fn only_the_active_lock_accepts_password_input() {
+        assert!(LockLifecycle::Locked.accepts_keyboard_input());
+        assert!(!LockLifecycle::Requested.accepts_keyboard_input());
+        assert!(!LockLifecycle::UnlockAwaitingSync.accepts_keyboard_input());
+        assert!(!LockLifecycle::UnlockSyncPending.accepts_keyboard_input());
+        assert!(!LockLifecycle::Unlocked.accepts_keyboard_input());
+        assert!(!LockLifecycle::EndedByCompositor.accepts_keyboard_input());
+    }
 
     #[test]
     fn rejects_zero_dimension_buffers() {
