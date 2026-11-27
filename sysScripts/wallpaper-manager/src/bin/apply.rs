@@ -24,6 +24,12 @@ struct GlobalConfig {
     wallpaper_manager: WallpaperManagerConfig,
 }
 
+#[derive(Deserialize)]
+struct SwayMonitor {
+    name: String,
+    active: bool,
+}
+
 fn load_config() -> Result<GlobalConfig> {
     let config_path = dirs::home_dir()
         .context("Cannot find home dir")?
@@ -107,6 +113,56 @@ fn apply_sway_wallpaper(selected_file: &Path, monitor: &str, cache_filename: &st
     Ok(())
 }
 
+fn active_monitors(compositor: &str) -> Result<Vec<String>> {
+    match compositor {
+        "sway" => {
+            let output = Command::new("swaymsg")
+                .args(["-t", "get_outputs"])
+                .output()
+                .context("could not query Sway outputs")?;
+            if !output.status.success() {
+                anyhow::bail!("swaymsg failed while listing outputs");
+            }
+            let monitors = serde_json::from_slice::<Vec<SwayMonitor>>(&output.stdout)
+                .context("could not parse Sway output list")?;
+            Ok(monitors
+                .into_iter()
+                .filter(|monitor| monitor.active)
+                .map(|monitor| monitor.name)
+                .collect())
+        }
+        "niri" => {
+            let output = Command::new("awww")
+                .args(["query", "--namespace", "niri"])
+                .output()
+                .context("could not query Niri outputs")?;
+            if !output.status.success() {
+                anyhow::bail!("awww failed while listing Niri outputs");
+            }
+            Ok(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once(':').map(|(_, monitor)| monitor.trim()))
+                .filter(|monitor| !monitor.is_empty())
+                .map(ToOwned::to_owned)
+                .collect())
+        }
+        _ => anyhow::bail!("Compositor argument '{compositor}' is not recognized"),
+    }
+}
+
+fn apply_wallpaper(
+    selected_file: &Path,
+    compositor: &str,
+    monitor: &str,
+    config: &WallpaperManagerConfig,
+) -> Result<()> {
+    match compositor {
+        "niri" => apply_awww_wallpaper(selected_file, monitor, "niri", &config.swww_params),
+        "sway" => apply_sway_wallpaper(selected_file, monitor, &config.swaybg_cache_file),
+        _ => anyhow::bail!("Compositor argument '{compositor}' is not recognized"),
+    }
+}
+
 fn main() -> Result<()> {
     let global_config = load_config()?;
     let config = global_config.wallpaper_manager;
@@ -118,16 +174,17 @@ fn main() -> Result<()> {
 
     let wallpaper_path = PathBuf::from(wallpaper_path_str);
 
-    // Strategy Pattern: Dispatch based on the detected environment
-    match compositor.as_str() {
-        "niri" => {
-            // Niri uses the same backend (awww) but a isolated namespace
-            apply_awww_wallpaper(&wallpaper_path, monitor, "niri", &config.swww_params)?;
+    let monitors = if monitor == "--all" {
+        let monitors = active_monitors(compositor)?;
+        if monitors.is_empty() {
+            anyhow::bail!("No active outputs were reported by {compositor}");
         }
-        "sway" => {
-            apply_sway_wallpaper(&wallpaper_path, monitor, &config.swaybg_cache_file)?;
-        }
-        _ => anyhow::bail!("Compositor argument '{}' is not recognized.", compositor),
+        monitors
+    } else {
+        vec![monitor.to_string()]
+    };
+    for monitor in monitors {
+        apply_wallpaper(&wallpaper_path, compositor, &monitor, &config)?;
     }
 
     Ok(())

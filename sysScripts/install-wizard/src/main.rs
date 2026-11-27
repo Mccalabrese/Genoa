@@ -1217,11 +1217,11 @@ mod tests {
                 files.get(&destination.to_string_lossy().to_string()),
                 Some(&contents.to_string())
             );
-            assert!(contents.contains("genoa-idle-suspend --record-baseline"));
             assert!(
-                contents.contains("timeout 1200 /usr/local/bin/genoa-idle-suspend")
-                    || contents.contains("timeout 600 /usr/local/bin/genoa-idle-suspend")
+                contents
+                    .contains("ExecStartPre=/usr/local/bin/genoa-idle-suspend --record-baseline")
             );
+            assert!(contents.contains("ExecStart=%h/.cargo/bin/genoa-idle run"));
         }
         assert!(env.cmd_log.borrow().contains(&(
             "systemctl".to_string(),
