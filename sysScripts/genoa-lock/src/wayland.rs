@@ -2,8 +2,9 @@ use std::{
     fs::File,
     io::{ErrorKind, Seek, SeekFrom, Write},
     os::fd::{AsFd, OwnedFd},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, mpsc::Receiver},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -171,6 +172,7 @@ struct Seat {
 enum KeyAction {
     Ignore,
     Backspace,
+    Clear,
     Submit,
     Text(Zeroizing<String>),
 }
@@ -179,6 +181,8 @@ impl Seat {
     fn translate_key(&self, key: u32) -> KeyAction {
         if self.input.is_backspace_or_delete(key) {
             KeyAction::Backspace
+        } else if self.input.is_cancel(key) {
+            KeyAction::Clear
         } else if self.input.is_submit(key) {
             KeyAction::Submit
         } else {
@@ -672,7 +676,25 @@ impl LockState {
             return;
         }
         self.suspend_requested = true;
-        let _ = Command::new(SYSTEMCTL).arg("suspend").status();
+        let result = thread::Builder::new()
+            .name("genoa-lock-suspend".to_string())
+            .spawn(|| {
+                match Command::new(SYSTEMCTL)
+                    .arg("suspend")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => eprintln!("genoa-lock: systemctl suspend exited with {status}"),
+                    Err(error) => eprintln!("genoa-lock: could not run systemctl suspend: {error}"),
+                }
+            });
+        if let Err(error) = result {
+            self.suspend_requested = false;
+            Self::report_runtime_error(format!("could not start the suspend worker: {error}"));
+        }
     }
 }
 
@@ -1133,6 +1155,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
             }
             match action {
                 Some(KeyAction::Backspace) => state.password.backspace(),
+                Some(KeyAction::Clear) => state.password.clear(),
                 Some(KeyAction::Submit) => state.submit_password(),
                 Some(KeyAction::Text(text)) => state.password.push_text(&text),
                 Some(KeyAction::Ignore) | None => {}

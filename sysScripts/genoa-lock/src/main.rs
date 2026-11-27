@@ -15,10 +15,15 @@ mod wayland;
 
 use std::process::ExitCode;
 
+use rustix::process::{DumpableBehavior, set_dumpable_behavior};
 use wayland::LockOptions;
 
 fn main() -> ExitCode {
-    match parse_options().and_then(wayland::run) {
+    let result = set_dumpable_behavior(DumpableBehavior::NotDumpable)
+        .map_err(|error| format!("could not disable process dumps: {error}"))
+        .and_then(|()| parse_options())
+        .and_then(wayland::run);
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("genoa-lock: {error}");

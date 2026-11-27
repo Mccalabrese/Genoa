@@ -1,9 +1,16 @@
 use zeroize::{Zeroize, Zeroizing};
 
 /// A bounded password buffer. It never exposes its contents for display.
-#[derive(Default)]
 pub struct Password {
     value: Zeroizing<String>,
+}
+
+impl Default for Password {
+    fn default() -> Self {
+        Self {
+            value: Zeroizing::new(String::with_capacity(Self::MAX_BYTES)),
+        }
+    }
 }
 
 impl Password {
@@ -31,6 +38,10 @@ impl Password {
 
     pub fn backspace(&mut self) {
         let _ = self.value.pop();
+    }
+
+    pub fn clear(&mut self) {
+        self.value.zeroize();
     }
 
     pub fn take(&mut self) -> Zeroizing<String> {
@@ -72,5 +83,18 @@ mod tests {
         password.push_text("aé");
         password.backspace();
         assert_eq!(password.take().as_str(), "a");
+    }
+
+    #[test]
+    fn clear_removes_entered_text() {
+        let mut password = Password::default();
+        password.push_text("secret");
+        password.clear();
+        assert_eq!(password.display_len(), 0);
+    }
+
+    #[test]
+    fn preallocates_the_bounded_input_capacity() {
+        assert!(Password::default().value.capacity() >= Password::MAX_BYTES);
     }
 }
