@@ -491,12 +491,18 @@ impl LockState {
             if !spare.released {
                 return Err("a reusable lock buffer was not released".to_string());
             }
-            let active = self.surfaces[index]
+            let matches_active_size = self.surfaces[index]
                 .buffer
-                .replace(spare)
-                .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
-            self.surfaces[index].retired_buffer = Some(active);
-            return self.paint_and_commit(index, None);
+                .as_ref()
+                .is_some_and(|active| active.width == spare.width && active.height == spare.height);
+            if matches_active_size {
+                let active = self.surfaces[index]
+                    .buffer
+                    .replace(spare)
+                    .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
+                self.surfaces[index].retired_buffer = Some(active);
+                return self.paint_and_commit(index, None);
+            }
         }
 
         if self.surfaces[index].retired_buffer.is_some() {
@@ -989,7 +995,11 @@ impl Dispatch<wl_buffer::WlBuffer, u32> for LockState {
                 && let Some(mut released) = state.surfaces[index].retired_buffer.take()
             {
                 released.released = true;
-                state.surfaces[index].spare_buffer = Some(released);
+                if state.surfaces[index].buffer.as_ref().is_some_and(|active| {
+                    active.width == released.width && active.height == released.height
+                }) {
+                    state.surfaces[index].spare_buffer = Some(released);
+                }
             }
             if state.surfaces[index].pending_configure.is_some()
                 && let Err(error) = state.render_pending_configure(index, queue_handle)
