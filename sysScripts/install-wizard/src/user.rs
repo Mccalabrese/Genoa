@@ -1151,6 +1151,27 @@ mod tests {
     }
 
     #[test]
+    fn idle_service_migration_rewrites_only_known_niri_startup() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let niri_path = home.join(".config/niri/config.kdl");
+        let (legacy, managed) = IDLE_SERVICE_CONFIG_MIGRATIONS[0].1[0];
+        env.mock_files.borrow_mut().insert(
+            niri_path.to_string_lossy().to_string(),
+            format!("{legacy}\ncustom line\n"),
+        );
+
+        migrate_idle_service_commands(&env, home).unwrap();
+
+        assert_eq!(
+            env.mock_files
+                .borrow()
+                .get(&niri_path.to_string_lossy().to_string()),
+            Some(&format!("{managed}\ncustom line\n"))
+        );
+    }
+
+    #[test]
     fn retired_gtklock_config_is_removed_only_when_present() {
         let env = MockEnv::default();
         let home = Path::new("/home/testuser");

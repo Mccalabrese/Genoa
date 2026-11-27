@@ -20,20 +20,12 @@ impl Password {
     // A larger cap leaves room for unusual stacks while preventing input-driven
     // memory growth if a compositor sends a malicious stream of key events.
     pub fn push_text(&mut self, text: &str) {
-        let remaining = MAX_PASSWORD_BYTES.saturating_sub(self.value.len());
-        if remaining == 0 {
-            return;
-        }
-
-        let mut accepted = String::new();
         for character in text.chars().filter(|character| !character.is_control()) {
-            if accepted.len() + character.len_utf8() > remaining {
+            if self.value.len() + character.len_utf8() > MAX_PASSWORD_BYTES {
                 break;
             }
-            accepted.push(character);
+            self.value.push(character);
         }
-        self.value.push_str(&accepted);
-        accepted.zeroize();
     }
 
     pub fn backspace(&mut self) {

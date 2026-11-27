@@ -70,24 +70,36 @@ impl Appearance {
         })
     }
 
-    pub fn frame(
+    /// Renders the expensive, unchanging portion of a lock surface once.
+    ///
+    /// The caller retains this image for the lifetime of a given output size;
+    /// password entry then copies it and draws only the small dynamic overlay.
+    pub fn background(&self, width: u32, height: u32) -> Result<Vec<u8>, String> {
+        let pixels = pixel_len(width, height)?;
+        let mut frame = vec![0_u8; pixels];
+        self.draw_wallpaper(&mut frame, width, height);
+        darken(&mut frame, 96);
+        Ok(frame)
+    }
+
+    /// Draws the clock and lock controls over a cached wallpaper background.
+    pub fn draw_foreground(
         &self,
+        frame: &mut [u8],
         width: u32,
         height: u32,
         password_len: usize,
         authenticating: bool,
         authentication_failed: bool,
-    ) -> Result<Vec<u8>, String> {
-        let pixels = pixel_len(width, height)?;
-        let mut frame = vec![0_u8; pixels];
-        self.draw_wallpaper(&mut frame, width, height);
-        darken(&mut frame, 96);
-
+    ) -> Result<(), String> {
+        if frame.len() != pixel_len(width, height)? {
+            return Err("lock foreground has an unexpected byte length".to_string());
+        }
         let centre_x = i32::try_from(width / 2).map_err(|_| "lock width is too large")?;
         let height_i32 = i32::try_from(height).map_err(|_| "lock height is too large")?;
         let time = Local::now().format("%H:%M").to_string();
         draw_centered_text(
-            &mut frame,
+            frame,
             width,
             height,
             &time,
@@ -102,7 +114,7 @@ impl Appearance {
         let box_x = centre_x - box_width / 2;
         let box_y = height_i32 / 2;
         fill_rect(
-            &mut frame,
+            frame,
             width,
             height,
             box_x,
@@ -112,7 +124,7 @@ impl Appearance {
             [18, 18, 18, 190],
         );
         stroke_rect(
-            &mut frame,
+            frame,
             width,
             height,
             box_x,
@@ -133,7 +145,7 @@ impl Appearance {
         };
         if message.is_empty() {
             draw_password_dots(
-                &mut frame,
+                frame,
                 width,
                 height,
                 centre_x,
@@ -142,7 +154,7 @@ impl Appearance {
             );
         } else {
             draw_centered_text(
-                &mut frame,
+                frame,
                 width,
                 height,
                 message,
@@ -153,8 +165,8 @@ impl Appearance {
             );
         }
 
-        self.weather.draw(&mut frame, width, height);
-        Ok(frame)
+        self.weather.draw(frame, width, height);
+        Ok(())
     }
 
     fn draw_wallpaper(&self, frame: &mut [u8], width: u32, height: u32) {
@@ -682,8 +694,11 @@ fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
     }
     let offset = usize::try_from((u64::from(y) * u64::from(width) + u64::from(x)) * 4).unwrap_or(0);
     let alpha = u16::from(color[3]);
+    // Drawing primitives use readable RGBA constants. wl_shm's ARGB8888
+    // backing bytes are BGRA on the supported little-endian targets.
+    let bgra = [color[2], color[1], color[0]];
     for index in 0..3 {
-        let blended = (u16::from(color[index]) * alpha
+        let blended = (u16::from(bgra[index]) * alpha
             + u16::from(pixels[offset + index]) * (255 - alpha))
             / 255;
         pixels[offset + index] = u8::try_from(blended).unwrap_or(0);
@@ -695,19 +710,27 @@ fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
 mod tests {
     use std::{fs, os::unix::fs::symlink};
 
-    use super::{Appearance, load_weather_cache};
+    use super::{Appearance, load_weather_cache, put_pixel};
     use uzers::get_current_uid;
 
     #[test]
     fn embedded_appearance_renders_an_opaque_frame() -> Result<(), String> {
         let appearance = Appearance::load()?;
-        let frame = appearance.frame(64, 64, 3, false, false)?;
+        let mut frame = appearance.background(64, 64)?;
+        appearance.draw_foreground(&mut frame, 64, 64, 3, false, false)?;
 
         assert_eq!(frame.len(), 64 * 64 * 4);
         let (pixels, remainder) = frame.as_chunks::<4>();
         assert!(remainder.is_empty());
         assert!(pixels.iter().all(|pixel| pixel[3] == 255));
         Ok(())
+    }
+
+    #[test]
+    fn overlay_colors_are_encoded_as_little_endian_bgra() {
+        let mut pixels = [0_u8; 4];
+        put_pixel(&mut pixels, 1, 1, 0, 0, [255, 0, 0, 255]);
+        assert_eq!(pixels, [0, 0, 255, 255]);
     }
 
     #[test]
