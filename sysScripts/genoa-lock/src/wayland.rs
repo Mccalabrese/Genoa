@@ -15,6 +15,7 @@ use crate::{
     password::Password,
     visual::Appearance,
 };
+use chrono::{Local, Timelike};
 use rustix::{
     event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll},
     io::{self, retry_on_intr},
@@ -115,7 +116,7 @@ pub fn run(options: LockOptions) -> Result<(), String> {
                 PollFd::new(state.authentication_event.as_ref(), PollFlags::IN),
             ];
             let timeout = state.visual_poll_timeout();
-            retry_on_intr(|| poll(&mut fds, timeout.as_ref()))
+            retry_on_intr(|| poll(&mut fds, Some(&timeout)))
                 .map_err(|error| format!("could not wait for lock events: {error}"))?;
             let wayland_ready = fds[0]
                 .revents()
@@ -169,6 +170,7 @@ struct LockState {
     surfaces: Vec<LockSurface>,
     appearance: Appearance,
     visual_redraw_after: Option<Instant>,
+    clock_redraw_after: Instant,
     authentication_failed_until: Option<Instant>,
     password: Password,
     authentication_event: Arc<OwnedFd>,
@@ -296,6 +298,7 @@ impl LockState {
             surfaces: Vec::new(),
             appearance: Appearance::load()?,
             visual_redraw_after: None,
+            clock_redraw_after: Instant::now() + next_clock_refresh_delay(),
             authentication_failed_until: None,
             password: Password::default(),
             authentication_event: Arc::new(authentication_event),
@@ -490,10 +493,14 @@ impl LockState {
         let failure_expired = self
             .authentication_failed_until
             .is_some_and(|deadline| deadline <= now);
-        if redraw_due || failure_expired {
+        let clock_expired = self.clock_redraw_after <= now;
+        if redraw_due || failure_expired || clock_expired {
             self.visual_redraw_after = None;
             if failure_expired {
                 self.authentication_failed_until = None;
+            }
+            if clock_expired {
+                self.clock_redraw_after = now + next_clock_refresh_delay();
             }
             for index in 0..self.surfaces.len() {
                 if let Err(error) = self.redraw_surface(index, queue_handle) {
@@ -503,17 +510,19 @@ impl LockState {
         }
     }
 
-    fn visual_poll_timeout(&self) -> Option<Timespec> {
-        let deadline = match (self.visual_redraw_after, self.authentication_failed_until) {
-            (Some(redraw), Some(failure)) => redraw.min(failure),
-            (Some(deadline), None) | (None, Some(deadline)) => deadline,
-            (None, None) => return None,
-        };
+    fn visual_poll_timeout(&self) -> Timespec {
+        let mut deadline = self.clock_redraw_after;
+        if let Some(redraw) = self.visual_redraw_after {
+            deadline = deadline.min(redraw);
+        }
+        if let Some(failure) = self.authentication_failed_until {
+            deadline = deadline.min(failure);
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        Some(Timespec {
+        Timespec {
             tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
             tv_nsec: i64::from(remaining.subsec_nanos()),
-        })
+        }
     }
 
     fn redraw_surface(
@@ -778,6 +787,19 @@ impl LockState {
             Self::report_runtime_error(format!("could not start the suspend worker: {error}"));
         }
     }
+}
+
+/// Returns the wall-clock delay until the next minute boundary. Genoa Lock
+/// uses the monotonic `Instant` derived from this delay for the actual wait.
+fn next_clock_refresh_delay() -> Duration {
+    let now = Local::now();
+    clock_refresh_delay(now.second(), now.nanosecond())
+}
+
+fn clock_refresh_delay(second: u32, nanosecond: u32) -> Duration {
+    let whole_seconds = 59_u64.saturating_sub(u64::from(second));
+    let nanoseconds = 1_000_000_000_u64.saturating_sub(u64::from(nanosecond));
+    Duration::from_secs(whole_seconds) + Duration::from_nanos(nanoseconds)
 }
 
 fn suspend_now() -> Result<(), String> {
@@ -1274,7 +1296,25 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
 
 #[cfg(test)]
 mod tests {
-    use super::{LockLifecycle, MAX_GRAPHICS_BYTES, checked_buffer_len, graphics_budget_permits};
+    use std::time::Duration;
+
+    use super::{
+        LockLifecycle, MAX_GRAPHICS_BYTES, checked_buffer_len, clock_refresh_delay,
+        graphics_budget_permits,
+    };
+
+    #[test]
+    fn clock_refresh_waits_for_the_next_minute_boundary() {
+        assert_eq!(clock_refresh_delay(0, 0), Duration::from_secs(60));
+        assert_eq!(
+            clock_refresh_delay(42, 500_000_000),
+            Duration::from_millis(17_500)
+        );
+        assert_eq!(
+            clock_refresh_delay(59, 999_000_000),
+            Duration::from_millis(1)
+        );
+    }
 
     #[test]
     fn only_the_active_lock_accepts_password_input() {
