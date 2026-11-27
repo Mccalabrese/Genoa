@@ -694,8 +694,11 @@ fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
     }
     let offset = usize::try_from((u64::from(y) * u64::from(width) + u64::from(x)) * 4).unwrap_or(0);
     let alpha = u16::from(color[3]);
+    // Drawing primitives use readable RGBA constants. wl_shm's ARGB8888
+    // backing bytes are BGRA on the supported little-endian targets.
+    let bgra = [color[2], color[1], color[0]];
     for index in 0..3 {
-        let blended = (u16::from(color[index]) * alpha
+        let blended = (u16::from(bgra[index]) * alpha
             + u16::from(pixels[offset + index]) * (255 - alpha))
             / 255;
         pixels[offset + index] = u8::try_from(blended).unwrap_or(0);
@@ -707,7 +710,7 @@ fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
 mod tests {
     use std::{fs, os::unix::fs::symlink};
 
-    use super::{Appearance, load_weather_cache};
+    use super::{Appearance, load_weather_cache, put_pixel};
     use uzers::get_current_uid;
 
     #[test]
@@ -721,6 +724,13 @@ mod tests {
         assert!(remainder.is_empty());
         assert!(pixels.iter().all(|pixel| pixel[3] == 255));
         Ok(())
+    }
+
+    #[test]
+    fn overlay_colors_are_encoded_as_little_endian_bgra() {
+        let mut pixels = [0_u8; 4];
+        put_pixel(&mut pixels, 1, 1, 0, 0, [255, 0, 0, 255]);
+        assert_eq!(pixels, [0, 0, 255, 255]);
     }
 
     #[test]
