@@ -9,7 +9,11 @@ use std::{
 };
 
 use crate::{
-    auth, input::KeyboardInput, instance::InstanceGuard, password::Password, visual::Appearance,
+    auth,
+    input::KeyboardInput,
+    instance::{AcquireError, InstanceGuard},
+    password::Password,
+    visual::Appearance,
 };
 use rustix::{
     event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll},
@@ -45,14 +49,26 @@ pub fn run(options: LockOptions) -> Result<(), String> {
     // This must outlive the Wayland connection. A second launcher should fail
     // before it can create another session-lock client or receive keyboard
     // focus intended for the active locker.
-    let _instance_guard = InstanceGuard::acquire()?;
+    let instance_guard = match InstanceGuard::acquire() {
+        Ok(guard) => guard,
+        Err(AcquireError::AlreadyRunning) if options.suspend_after_lock => {
+            if !InstanceGuard::active_session_is_locked()? {
+                return Err(
+                    "another Genoa Lock is still starting; refusing to suspend before it is ready"
+                        .to_string(),
+                );
+            }
+            return suspend_now();
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let connection = Connection::connect_to_env()
         .map_err(|error| format!("could not connect to the Wayland session: {error}"))?;
     let mut event_queue = connection.new_event_queue();
     let queue_handle = event_queue.handle();
     connection.display().get_registry(&queue_handle, ());
 
-    let mut state = LockState::new(options)?;
+    let mut state = LockState::new(options, instance_guard)?;
     event_queue
         .roundtrip(&mut state)
         .map_err(|error| format!("could not discover Wayland globals: {error}"))?;
@@ -134,6 +150,9 @@ pub fn run(options: LockOptions) -> Result<(), String> {
 }
 
 struct LockState {
+    // Keep the guard alive for the complete Wayland lock lifecycle. It also
+    // records the compositor-confirmed state for a later suspend request.
+    instance_guard: InstanceGuard,
     options: LockOptions,
     lifecycle: LockLifecycle,
     suspend_requested: bool,
@@ -234,7 +253,7 @@ struct ShmBuffer {
 }
 
 impl LockState {
-    fn new(options: LockOptions) -> Result<Self, String> {
+    fn new(options: LockOptions, instance_guard: InstanceGuard) -> Result<Self, String> {
         // Fail before sending a lock request if libxkbcommon is unavailable.
         // Each seat owns a separate input context, so this temporary probe is
         // deliberately dropped immediately.
@@ -243,6 +262,7 @@ impl LockState {
         let authentication_event = eventfd(0, EventfdFlags::CLOEXEC)
             .map_err(|error| format!("could not create the authentication notifier: {error}"))?;
         Ok(Self {
+            instance_guard,
             options,
             lifecycle: LockLifecycle::Requested,
             suspend_requested: false,
@@ -699,22 +719,29 @@ impl LockState {
         let result = thread::Builder::new()
             .name("genoa-lock-suspend".to_string())
             .spawn(|| {
-                match Command::new(SYSTEMCTL)
-                    .arg("suspend")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
-                    Ok(status) if status.success() => {}
-                    Ok(status) => eprintln!("genoa-lock: systemctl suspend exited with {status}"),
-                    Err(error) => eprintln!("genoa-lock: could not run systemctl suspend: {error}"),
+                if let Err(error) = suspend_now() {
+                    eprintln!("genoa-lock: {error}");
                 }
             });
         if let Err(error) = result {
             self.suspend_requested = false;
             Self::report_runtime_error(format!("could not start the suspend worker: {error}"));
         }
+    }
+}
+
+fn suspend_now() -> Result<(), String> {
+    let status = Command::new(SYSTEMCTL)
+        .arg("suspend")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("could not run systemctl suspend: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl suspend exited with {status}"))
     }
 }
 
@@ -1044,7 +1071,11 @@ impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for LockState {
         match event {
             ext_session_lock_v1::Event::Locked => {
                 state.lifecycle = LockLifecycle::Locked;
-                state.suspend_after_lock();
+                if let Err(error) = state.instance_guard.mark_session_locked() {
+                    state.failure = Some(error);
+                } else {
+                    state.suspend_after_lock();
+                }
             }
             ext_session_lock_v1::Event::Finished => {
                 state.lifecycle = LockLifecycle::EndedByCompositor;
