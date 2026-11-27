@@ -1,0 +1,12 @@
+[Unit]
+Description=Genoa idle manager for Niri
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/swayidle -w timeout 200 "/usr/bin/brightnessctl set 0%%" resume "/usr/bin/brightnessctl set 60%%" timeout 600 /usr/local/bin/genoa-lock timeout 630 "/usr/bin/niri msg action power-off-monitors" resume "/usr/bin/niri msg action power-on-monitors" timeout 1200 "/usr/bin/systemctl suspend" before-sleep /usr/local/bin/genoa-lock after-resume "/usr/bin/systemctl --user restart genoa-niri-idle.service"
+Restart=on-failure
+RestartSec=2
+PassEnvironment=DBUS_SESSION_BUS_ADDRESS NIRI_SOCKET WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR
+
