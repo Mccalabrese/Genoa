@@ -7,7 +7,7 @@ mod protocol;
 
 use std::{
     fs::{File, OpenOptions},
-    io::{ErrorKind, Read, Write},
+    io::{Read, Write},
     os::fd::AsFd,
     process::ExitCode,
 };
@@ -48,11 +48,7 @@ fn close_inherited_descriptors() -> Result<(), ()> {
     // duplicates its private result channel. The syscall only closes this
     // process' descriptors and receives plain integer bounds.
     let result = unsafe { libc::close_range(3, u32::MAX, 0) };
-    if result == 0 || std::io::Error::last_os_error().kind() == ErrorKind::NotFound {
-        Ok(())
-    } else {
-        Err(())
-    }
+    if result == 0 { Ok(()) } else { Err(()) }
 }
 
 fn read_password() -> Result<Zeroizing<String>, ()> {

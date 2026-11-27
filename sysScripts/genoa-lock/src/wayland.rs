@@ -9,8 +9,13 @@ use std::{
 };
 
 use crate::{
-    auth, input::KeyboardInput, instance::InstanceGuard, password::Password, visual::Appearance,
+    auth,
+    input::KeyboardInput,
+    instance::{AcquireError, InstanceGuard},
+    password::Password,
+    visual::Appearance,
 };
+use chrono::{Local, Timelike};
 use rustix::{
     event::{EventfdFlags, PollFd, PollFlags, Timespec, eventfd, poll},
     io::{self, retry_on_intr},
@@ -30,7 +35,10 @@ use zeroize::Zeroizing;
 const MAX_OUTPUTS: usize = 16;
 const MAX_SEATS: usize = 16;
 const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
-const MAX_GRAPHICS_BYTES: usize = 256 * 1024 * 1024;
+// Covers a worst-case repaint burst on either three 4K outputs or two 5K
+// outputs. The cap remains finite even if a compositor reports pathological
+// output geometry.
+const MAX_GRAPHICS_BYTES: usize = 512 * 1024 * 1024;
 const MAX_KEYMAP_BYTES: usize = 4 * 1024 * 1024;
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const VISUAL_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
@@ -45,14 +53,26 @@ pub fn run(options: LockOptions) -> Result<(), String> {
     // This must outlive the Wayland connection. A second launcher should fail
     // before it can create another session-lock client or receive keyboard
     // focus intended for the active locker.
-    let _instance_guard = InstanceGuard::acquire()?;
+    let instance_guard = match InstanceGuard::acquire() {
+        Ok(guard) => guard,
+        Err(AcquireError::AlreadyRunning) if options.suspend_after_lock => {
+            if !InstanceGuard::active_session_is_locked()? {
+                return Err(
+                    "another Genoa Lock is still starting; refusing to suspend before it is ready"
+                        .to_string(),
+                );
+            }
+            return suspend_now();
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let connection = Connection::connect_to_env()
         .map_err(|error| format!("could not connect to the Wayland session: {error}"))?;
     let mut event_queue = connection.new_event_queue();
     let queue_handle = event_queue.handle();
     connection.display().get_registry(&queue_handle, ());
 
-    let mut state = LockState::new(options)?;
+    let mut state = LockState::new(options, instance_guard)?;
     event_queue
         .roundtrip(&mut state)
         .map_err(|error| format!("could not discover Wayland globals: {error}"))?;
@@ -96,7 +116,7 @@ pub fn run(options: LockOptions) -> Result<(), String> {
                 PollFd::new(state.authentication_event.as_ref(), PollFlags::IN),
             ];
             let timeout = state.visual_poll_timeout();
-            retry_on_intr(|| poll(&mut fds, timeout.as_ref()))
+            retry_on_intr(|| poll(&mut fds, Some(&timeout)))
                 .map_err(|error| format!("could not wait for lock events: {error}"))?;
             let wayland_ready = fds[0]
                 .revents()
@@ -134,6 +154,9 @@ pub fn run(options: LockOptions) -> Result<(), String> {
 }
 
 struct LockState {
+    // Keep the guard alive for the complete Wayland lock lifecycle. It also
+    // records the compositor-confirmed state for a later suspend request.
+    instance_guard: InstanceGuard,
     options: LockOptions,
     lifecycle: LockLifecycle,
     suspend_requested: bool,
@@ -147,6 +170,7 @@ struct LockState {
     surfaces: Vec<LockSurface>,
     appearance: Appearance,
     visual_redraw_after: Option<Instant>,
+    clock_redraw_after: Instant,
     authentication_failed_until: Option<Instant>,
     password: Password,
     authentication_event: Arc<OwnedFd>,
@@ -200,8 +224,16 @@ struct LockSurface {
     buffer: Option<ShmBuffer>,
     spare_buffer: Option<ShmBuffer>,
     retired_buffer: Option<ShmBuffer>,
+    frames: Option<SurfaceFrames>,
     pending_configure: Option<PendingConfigure>,
     redraw_pending: bool,
+}
+
+/// The immutable wallpaper background and a reusable dynamic working frame
+/// for one configured output size.
+struct SurfaceFrames {
+    background: Vec<u8>,
+    working: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +253,15 @@ enum LockLifecycle {
     EndedByCompositor,
 }
 
+impl LockLifecycle {
+    /// Password input is valid only while the compositor still considers this
+    /// an active lock. In particular, do not start another PAM transaction
+    /// after `unlock_and_destroy` has been sent but before its sync reply.
+    const fn accepts_keyboard_input(self) -> bool {
+        matches!(self, Self::Locked)
+    }
+}
+
 struct ShmBuffer {
     // The backing objects must outlive both the Wayland buffer and every use of
     // that buffer by the compositor.
@@ -234,7 +275,7 @@ struct ShmBuffer {
 }
 
 impl LockState {
-    fn new(options: LockOptions) -> Result<Self, String> {
+    fn new(options: LockOptions, instance_guard: InstanceGuard) -> Result<Self, String> {
         // Fail before sending a lock request if libxkbcommon is unavailable.
         // Each seat owns a separate input context, so this temporary probe is
         // deliberately dropped immediately.
@@ -243,6 +284,7 @@ impl LockState {
         let authentication_event = eventfd(0, EventfdFlags::CLOEXEC)
             .map_err(|error| format!("could not create the authentication notifier: {error}"))?;
         Ok(Self {
+            instance_guard,
             options,
             lifecycle: LockLifecycle::Requested,
             suspend_requested: false,
@@ -256,6 +298,7 @@ impl LockState {
             surfaces: Vec::new(),
             appearance: Appearance::load()?,
             visual_redraw_after: None,
+            clock_redraw_after: Instant::now() + next_clock_refresh_delay(),
             authentication_failed_until: None,
             password: Password::default(),
             authentication_event: Arc::new(authentication_event),
@@ -330,6 +373,7 @@ impl LockState {
             buffer: None,
             spare_buffer: None,
             retired_buffer: None,
+            frames: None,
             pending_configure: None,
             redraw_pending: false,
         });
@@ -386,6 +430,10 @@ impl LockState {
                 return Ok(());
             }
 
+            // A resized output needs a separately scaled background and a
+            // matching reusable working frame. Release the old pair before
+            // checking the graphics-memory budget for the new size.
+            self.surfaces[index].frames = None;
             let new_buffer =
                 self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
             let old_buffer = self.surfaces[index].buffer.replace(new_buffer);
@@ -445,10 +493,14 @@ impl LockState {
         let failure_expired = self
             .authentication_failed_until
             .is_some_and(|deadline| deadline <= now);
-        if redraw_due || failure_expired {
+        let clock_expired = self.clock_redraw_after <= now;
+        if redraw_due || failure_expired || clock_expired {
             self.visual_redraw_after = None;
             if failure_expired {
                 self.authentication_failed_until = None;
+            }
+            if clock_expired {
+                self.clock_redraw_after = now + next_clock_refresh_delay();
             }
             for index in 0..self.surfaces.len() {
                 if let Err(error) = self.redraw_surface(index, queue_handle) {
@@ -458,17 +510,19 @@ impl LockState {
         }
     }
 
-    fn visual_poll_timeout(&self) -> Option<Timespec> {
-        let deadline = match (self.visual_redraw_after, self.authentication_failed_until) {
-            (Some(redraw), Some(failure)) => redraw.min(failure),
-            (Some(deadline), None) | (None, Some(deadline)) => deadline,
-            (None, None) => return None,
-        };
+    fn visual_poll_timeout(&self) -> Timespec {
+        let mut deadline = self.clock_redraw_after;
+        if let Some(redraw) = self.visual_redraw_after {
+            deadline = deadline.min(redraw);
+        }
+        if let Some(failure) = self.authentication_failed_until {
+            deadline = deadline.min(failure);
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        Some(Timespec {
+        Timespec {
             tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
             tv_nsec: i64::from(remaining.subsec_nanos()),
-        })
+        }
     }
 
     fn redraw_surface(
@@ -532,9 +586,15 @@ impl LockState {
         queue_handle: &QueueHandle<Self>,
     ) -> Result<ShmBuffer, String> {
         let byte_len = checked_buffer_len(width, height)?;
-        // A new shared-memory buffer and a temporary rendered frame coexist
-        // until the frame is copied into that buffer.
-        if !graphics_budget_permits(self.graphics_bytes(), byte_len.saturating_mul(2)) {
+        let surface_needs_cache = self.surfaces[index].frames.is_none();
+        // One shared-memory buffer is always needed. A newly configured output
+        // also needs its cached background and reusable working frame.
+        let additional_bytes = if surface_needs_cache {
+            byte_len.saturating_mul(3)
+        } else {
+            byte_len
+        };
+        if !graphics_budget_permits(self.graphics_bytes(), additional_bytes) {
             return Err("lock graphics memory limit would be exceeded".to_string());
         }
 
@@ -563,20 +623,29 @@ impl LockState {
             .as_ref()
             .map(|buffer| (buffer.width, buffer.height))
             .ok_or_else(|| "cannot paint an unconfigured lock surface".to_string())?;
-        let frame = self.appearance.frame(
+        let lock_surface = &mut self.surfaces[index];
+        if lock_surface.frames.is_none() {
+            let background = self.appearance.background(width, height)?;
+            lock_surface.frames = Some(SurfaceFrames {
+                working: background.clone(),
+                background,
+            });
+        }
+        let (frames, buffer) = match (&mut lock_surface.frames, &mut lock_surface.buffer) {
+            (Some(frames), Some(buffer)) => (frames, buffer),
+            (None, _) => return Err("could not access the cached lock frames".to_string()),
+            (_, None) => return Err("could not access the lock surface buffer".to_string()),
+        };
+        frames.working.copy_from_slice(&frames.background);
+        self.appearance.draw_foreground(
+            &mut frames.working,
             width,
             height,
             self.password.display_len(),
             self.authentication.is_some(),
             self.authentication_failed_until.is_some(),
         )?;
-
-        let lock_surface = &mut self.surfaces[index];
-        let buffer = lock_surface
-            .buffer
-            .as_mut()
-            .ok_or_else(|| "could not access the lock surface buffer".to_string())?;
-        buffer.write_frame(&frame)?;
+        buffer.write_frame(&frames.working)?;
         buffer.released = false;
         lock_surface.redraw_pending = false;
         if let Some(serial) = configure_serial {
@@ -602,6 +671,16 @@ impl LockState {
             .fold(0_usize, |total, buffer| {
                 total.saturating_add(buffer.byte_len)
             })
+            .saturating_add(
+                self.surfaces
+                    .iter()
+                    .filter_map(|surface| surface.frames.as_ref())
+                    .fold(0_usize, |total, frames| {
+                        total
+                            .saturating_add(frames.background.len())
+                            .saturating_add(frames.working.len())
+                    }),
+            )
     }
 
     fn submit_password(&mut self) {
@@ -699,22 +778,42 @@ impl LockState {
         let result = thread::Builder::new()
             .name("genoa-lock-suspend".to_string())
             .spawn(|| {
-                match Command::new(SYSTEMCTL)
-                    .arg("suspend")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
-                    Ok(status) if status.success() => {}
-                    Ok(status) => eprintln!("genoa-lock: systemctl suspend exited with {status}"),
-                    Err(error) => eprintln!("genoa-lock: could not run systemctl suspend: {error}"),
+                if let Err(error) = suspend_now() {
+                    eprintln!("genoa-lock: {error}");
                 }
             });
         if let Err(error) = result {
             self.suspend_requested = false;
             Self::report_runtime_error(format!("could not start the suspend worker: {error}"));
         }
+    }
+}
+
+/// Returns the wall-clock delay until the next minute boundary. Genoa Lock
+/// uses the monotonic `Instant` derived from this delay for the actual wait.
+fn next_clock_refresh_delay() -> Duration {
+    let now = Local::now();
+    clock_refresh_delay(now.second(), now.nanosecond())
+}
+
+fn clock_refresh_delay(second: u32, nanosecond: u32) -> Duration {
+    let whole_seconds = 59_u64.saturating_sub(u64::from(second));
+    let nanoseconds = 1_000_000_000_u64.saturating_sub(u64::from(nanosecond));
+    Duration::from_secs(whole_seconds) + Duration::from_nanos(nanoseconds)
+}
+
+fn suspend_now() -> Result<(), String> {
+    let status = Command::new(SYSTEMCTL)
+        .arg("suspend")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("could not run systemctl suspend: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl suspend exited with {status}"))
     }
 }
 
@@ -1044,7 +1143,11 @@ impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for LockState {
         match event {
             ext_session_lock_v1::Event::Locked => {
                 state.lifecycle = LockLifecycle::Locked;
-                state.suspend_after_lock();
+                if let Err(error) = state.instance_guard.mark_session_locked() {
+                    state.failure = Some(error);
+                } else {
+                    state.suspend_after_lock();
+                }
             }
             ext_session_lock_v1::Event::Finished => {
                 state.lifecycle = LockLifecycle::EndedByCompositor;
@@ -1172,7 +1275,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
             }
         };
 
-        if state.authentication.is_none() {
+        if state.lifecycle.accepts_keyboard_input() && state.authentication.is_none() {
             let redraw = !matches!(&action, Some(KeyAction::Ignore) | None);
             if redraw {
                 state.clear_authentication_failure();
@@ -1193,7 +1296,35 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_GRAPHICS_BYTES, checked_buffer_len, graphics_budget_permits};
+    use std::time::Duration;
+
+    use super::{
+        LockLifecycle, MAX_GRAPHICS_BYTES, checked_buffer_len, clock_refresh_delay,
+        graphics_budget_permits,
+    };
+
+    #[test]
+    fn clock_refresh_waits_for_the_next_minute_boundary() {
+        assert_eq!(clock_refresh_delay(0, 0), Duration::from_secs(60));
+        assert_eq!(
+            clock_refresh_delay(42, 500_000_000),
+            Duration::from_millis(17_500)
+        );
+        assert_eq!(
+            clock_refresh_delay(59, 999_000_000),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn only_the_active_lock_accepts_password_input() {
+        assert!(LockLifecycle::Locked.accepts_keyboard_input());
+        assert!(!LockLifecycle::Requested.accepts_keyboard_input());
+        assert!(!LockLifecycle::UnlockAwaitingSync.accepts_keyboard_input());
+        assert!(!LockLifecycle::UnlockSyncPending.accepts_keyboard_input());
+        assert!(!LockLifecycle::Unlocked.accepts_keyboard_input());
+        assert!(!LockLifecycle::EndedByCompositor.accepts_keyboard_input());
+    }
 
     #[test]
     fn rejects_zero_dimension_buffers() {
@@ -1222,5 +1353,23 @@ mod tests {
             MAX_GRAPHICS_BYTES - buffer,
             2 * buffer
         ));
+    }
+
+    #[test]
+    fn graphics_budget_supports_high_density_multi_output_repaints() -> Result<(), String> {
+        let dci_4k = checked_buffer_len(4096, 2160)?;
+        // Per output: active shared-memory buffer, cached background, reusable
+        // working frame, and one transient replacement buffer during redraw.
+        assert!(graphics_budget_permits(0, 3 * dci_4k));
+        assert!(graphics_budget_permits(3 * dci_4k, 3 * dci_4k));
+        assert!(graphics_budget_permits(6 * dci_4k, 3 * dci_4k));
+        assert!(graphics_budget_permits(9 * dci_4k, 3 * dci_4k));
+
+        let five_k = checked_buffer_len(5120, 2880)?;
+        // Two 5K outputs can both allocate a replacement buffer while their
+        // compositor-owned active buffers are awaiting release.
+        assert!(graphics_budget_permits(0, 6 * five_k));
+        assert!(graphics_budget_permits(6 * five_k, 2 * five_k));
+        Ok(())
     }
 }
