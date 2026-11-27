@@ -89,7 +89,7 @@ const CF_TOGGLE_POLICY: &str =
 const GENOA_LOCK_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock";
 const GENOA_LOCK_PATH: &str = "/usr/local/bin/genoa-lock";
 const GENOA_LOCK_PAM_HELPER_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock-pam";
-const GENOA_LOCK_PAM_HELPER_PATH: &str = "/usr/local/libexec/genoa/genoa-lock-pam";
+const GENOA_LOCK_PAM_HELPER_PATH: &str = "/usr/local/lib/genoa/genoa-lock-pam";
 const GENOA_LOCK_PAM_PATH: &str = "/etc/pam.d/genoa-lock";
 const GENOA_LOCK_PAM_POLICY: &str =
     "auth include system-local-login\naccount include system-local-login\n";
@@ -141,18 +141,17 @@ fn install_genoa_lock(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), st
     if !sys.path_exists(&helper_source) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Genoa Lock PAM helper was not built: {}", helper_source.display()),
+            format!(
+                "Genoa Lock PAM helper was not built: {}",
+                helper_source.display()
+            ),
         ));
     }
 
     sys.create_root_dir_all(Path::new("/usr/local/bin"))?;
     sys.install_file_to_root(&source, Path::new(GENOA_LOCK_PATH), "755")?;
-    sys.create_root_dir_all(Path::new("/usr/local/libexec/genoa"))?;
-    sys.install_file_to_root(
-        &helper_source,
-        Path::new(GENOA_LOCK_PAM_HELPER_PATH),
-        "755",
-    )?;
+    sys.create_root_dir_all(Path::new("/usr/local/lib/genoa"))?;
+    sys.install_file_to_root(&helper_source, Path::new(GENOA_LOCK_PAM_HELPER_PATH), "755")?;
     sys.create_root_dir_all(Path::new("/etc/pam.d"))?;
     sys.install_string_to_root_file(Path::new(GENOA_LOCK_PAM_PATH), GENOA_LOCK_PAM_POLICY, "644")?;
     Ok(())

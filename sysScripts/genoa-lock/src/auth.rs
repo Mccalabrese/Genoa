@@ -164,7 +164,7 @@ fn helper_path() -> Result<PathBuf, String> {
 
 #[cfg(not(debug_assertions))]
 fn helper_path() -> PathBuf {
-    PathBuf::from("/usr/local/libexec/genoa/genoa-lock-pam")
+    PathBuf::from("/usr/local/lib/genoa/genoa-lock-pam")
 }
 
 #[cfg(not(debug_assertions))]
