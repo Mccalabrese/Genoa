@@ -100,7 +100,7 @@ spawn-at-startup "wl-paste" "--type" "image" "--watch" "cliphist" "store"
 spawn-at-startup "xwayland-satellite"
 // --- IDLE MANAGEMENT ---
 
-spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 '/usr/local/bin/genoa-lock' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep '/usr/local/bin/genoa-lock'"
+spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user restart genoa-niri-idle.service"
 
 // Hotkey Overlay
 hotkey-overlay {
