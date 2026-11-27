@@ -45,7 +45,10 @@ impl Password {
     }
 
     pub fn take(&mut self) -> Zeroizing<String> {
-        std::mem::take(&mut self.value)
+        std::mem::replace(
+            &mut self.value,
+            Zeroizing::new(String::with_capacity(MAX_PASSWORD_BYTES)),
+        )
     }
 
     pub fn display_len(&self) -> usize {
@@ -96,5 +99,15 @@ mod tests {
     #[test]
     fn preallocates_the_bounded_input_capacity() {
         assert!(Password::default().value.capacity() >= MAX_PASSWORD_BYTES);
+    }
+
+    #[test]
+    fn take_replaces_the_password_with_a_preallocated_buffer() {
+        let mut password = Password::default();
+        password.push_text("secret");
+        let submitted = password.take();
+
+        assert_eq!(submitted.as_str(), "secret");
+        assert!(password.value.capacity() >= MAX_PASSWORD_BYTES);
     }
 }
