@@ -682,13 +682,6 @@ fn main() {
         }
     }
 
-    if let Err(e) = setup_idle_services(&home, &live_sys) {
-        eprintln!("   ⚠️  Failed to deploy idle resume protection: {e}");
-    }
-    if let Err(e) = migrate_idle_service_commands(&live_sys, &home) {
-        eprintln!("   ⚠️  Failed to migrate managed idle commands: {e}");
-    }
-
     match configure_tlp(&live_sys, &repo_root) {
         Ok(()) => println!("   ✅ TLP power management ready."),
         Err(e) => eprintln!("   ❌ Failed to configure TLP power management: {}", e),
@@ -901,33 +894,6 @@ fn setup_battery_daemon(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::
     )?;
     println!("   ✅ Battery Daemon ready.");
 
-    Ok(())
-}
-
-/// Deploys the compositor-specific idle units. Startup configuration selects
-/// exactly one of them and imports that compositor's Wayland socket first.
-/// Keeping the units separate avoids guessing a compositor from a background
-/// service, and lets each `after-resume` hook restart its own timer state.
-fn setup_idle_services(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
-    let systemd_user_dir = home.join(".config/systemd/user");
-    sys.create_dir_all(&systemd_user_dir)?;
-
-    let mut changed = false;
-    for (name, contents) in IDLE_SERVICE_UNITS {
-        let destination = systemd_user_dir.join(name);
-        if sys.read_file_to_string(&destination).ok().as_deref() != Some(*contents) {
-            let destination = destination
-                .to_str()
-                .ok_or_else(|| std::io::Error::other("idle service path is not valid UTF-8"))?;
-            sys.write_string_to_file(destination, contents)?;
-            changed = true;
-        }
-    }
-
-    if changed {
-        sys.run_cmd("systemctl", &["--user", "daemon-reload"])?;
-    }
-    println!("   ✅ Idle resume protection ready.");
     Ok(())
 }
 
@@ -1348,26 +1314,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn setup_idle_services_deploys_both_compositor_units() {
-        let env = MockEnv::default();
-        let home = Path::new("/home/testuser");
-
-        setup_idle_services(home, &env).unwrap();
-
-        let files = env.mock_files.borrow();
-        for (name, contents) in IDLE_SERVICE_UNITS {
-            let destination = home.join(".config/systemd/user").join(name);
-            assert_eq!(
-                files.get(&destination.to_string_lossy().to_string()),
-                Some(&contents.to_string())
-            );
-        }
-        assert!(env.cmd_log.borrow().contains(&(
-            "systemctl".to_string(),
-            vec!["--user".to_string(), "daemon-reload".to_string()]
-        )));
-    }
     #[test]
     fn test_configure_upower() {
         let env = MockEnv::default();
