@@ -88,6 +88,8 @@ const CF_TOGGLE_POLICY: &str =
     include_str!("../../cloudflare-toggle/io.github.genoa.cloudflare-toggle.policy");
 const GENOA_LOCK_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock";
 const GENOA_LOCK_PATH: &str = "/usr/local/bin/genoa-lock";
+const GENOA_IDLE_SUSPEND_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-idle-suspend";
+const GENOA_IDLE_SUSPEND_PATH: &str = "/usr/local/bin/genoa-idle-suspend";
 const GENOA_LOCK_PAM_HELPER_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock-pam";
 const GENOA_LOCK_PAM_HELPER_PATH: &str = "/usr/local/lib/genoa/genoa-lock-pam";
 const GENOA_LOCK_PAM_PATH: &str = "/etc/pam.d/genoa-lock";
@@ -141,6 +143,7 @@ fn install_cloudflare_toggle_helper(
 /// directory can never decide what locks the session.
 fn install_genoa_lock(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), std::io::Error> {
     let source = repo_root.join(GENOA_LOCK_SOURCE);
+    let idle_suspend_source = repo_root.join(GENOA_IDLE_SUSPEND_SOURCE);
     let helper_source = repo_root.join(GENOA_LOCK_PAM_HELPER_SOURCE);
     if !sys.path_exists(&source) {
         return Err(std::io::Error::new(
@@ -157,13 +160,51 @@ fn install_genoa_lock(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), st
             ),
         ));
     }
+    if !sys.path_exists(&idle_suspend_source) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Genoa idle suspend helper was not built: {}",
+                idle_suspend_source.display()
+            ),
+        ));
+    }
 
     sys.create_root_dir_all(Path::new("/usr/local/bin"))?;
     sys.install_file_to_root(&source, Path::new(GENOA_LOCK_PATH), "755")?;
+    sys.install_file_to_root(
+        &idle_suspend_source,
+        Path::new(GENOA_IDLE_SUSPEND_PATH),
+        "755",
+    )?;
     sys.create_root_dir_all(Path::new("/usr/local/lib/genoa"))?;
     sys.install_file_to_root(&helper_source, Path::new(GENOA_LOCK_PAM_HELPER_PATH), "755")?;
     sys.create_root_dir_all(Path::new("/etc/pam.d"))?;
     sys.install_string_to_root_file(Path::new(GENOA_LOCK_PAM_PATH), GENOA_LOCK_PAM_POLICY, "644")?;
+    Ok(())
+}
+
+/// Deploys the compositor-specific idle units. Startup configuration selects
+/// exactly one unit and imports that compositor's Wayland socket first.
+fn setup_idle_services(home: &Path, sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+    let systemd_user_dir = home.join(".config/systemd/user");
+    sys.create_dir_all(&systemd_user_dir)?;
+
+    let mut changed = false;
+    for (name, contents) in IDLE_SERVICE_UNITS {
+        let destination = systemd_user_dir.join(name);
+        if sys.read_file_to_string(&destination).ok().as_deref() != Some(*contents) {
+            let destination = destination
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("idle service path is not valid UTF-8"))?;
+            sys.write_string_to_file(destination, contents)?;
+            changed = true;
+        }
+    }
+
+    if changed {
+        sys.run_cmd("systemctl", &["--user", "daemon-reload"])?;
+    }
     Ok(())
 }
 
@@ -610,17 +651,29 @@ fn main() {
     };
     if custom_apps_built {
         let mut helpers_installed = helper_installed;
+        let mut idle_protection_ready = false;
         match install_genoa_lock(&live_sys, &repo_root) {
-            Ok(()) => match retire_gtklock(&live_sys, &home) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("   ⚠️  Failed to retire gtklock safely: {e}");
-                    helpers_installed = false;
+            Ok(()) => {
+                idle_protection_ready = true;
+                match retire_gtklock(&live_sys, &home) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("   ⚠️  Failed to retire gtklock safely: {e}");
+                        helpers_installed = false;
+                    }
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("   ⚠️  Failed to install Genoa Lock; keeping gtklock installed: {e}");
                 helpers_installed = false;
+            }
+        }
+        if idle_protection_ready {
+            match setup_idle_services(&home, &live_sys)
+                .and_then(|()| migrate_idle_service_commands(&live_sys, &home))
+            {
+                Ok(()) => println!("   ✅ Idle resume protection ready."),
+                Err(e) => eprintln!("   ⚠️  Failed to deploy idle resume protection: {e}"),
             }
         }
         offer_signed_release_migration(&home, &repo_root, &run_options);
@@ -1083,12 +1136,17 @@ mod tests {
         let repo = Path::new("/repo");
         let home = Path::new("/home/testuser");
         let source = repo.join(GENOA_LOCK_SOURCE);
+        let idle_suspend_source = repo.join(GENOA_IDLE_SUSPEND_SOURCE);
         let helper_source = repo.join(GENOA_LOCK_PAM_HELPER_SOURCE);
         let sway_config = home.join(".config/sway/UserConfigs/UserKeybinds.conf");
         let gtklock_config = home.join(".config/gtklock");
         env.mock_files.borrow_mut().insert(
             source.to_string_lossy().to_string(),
             "compiled Genoa Lock".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            idle_suspend_source.to_string_lossy().to_string(),
+            "compiled Genoa idle suspend helper".to_string(),
         );
         env.mock_files.borrow_mut().insert(
             helper_source.to_string_lossy().to_string(),
@@ -1136,6 +1194,21 @@ mod tests {
                         "root".to_string(),
                         "-g".to_string(),
                         "root".to_string(),
+                        idle_suspend_source.to_string_lossy().to_string(),
+                        GENOA_IDLE_SUSPEND_PATH.to_string(),
+                    ]
+        }));
+        assert!(log.iter().any(|(command, args)| {
+            command == "sudo"
+                && args
+                    == &vec![
+                        "install".to_string(),
+                        "-m".to_string(),
+                        "755".to_string(),
+                        "-o".to_string(),
+                        "root".to_string(),
+                        "-g".to_string(),
+                        "root".to_string(),
                         helper_source.to_string_lossy().to_string(),
                         GENOA_LOCK_PAM_HELPER_PATH.to_string(),
                     ]
@@ -1162,6 +1235,32 @@ mod tests {
             env.mock_files.borrow().get(GENOA_LOCK_PAM_PATH),
             Some(&GENOA_LOCK_PAM_POLICY.to_string())
         );
+    }
+
+    #[test]
+    fn setup_idle_services_deploys_the_resume_guard_units() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+
+        setup_idle_services(home, &env).unwrap();
+
+        let files = env.mock_files.borrow();
+        for (name, contents) in IDLE_SERVICE_UNITS {
+            let destination = home.join(".config/systemd/user").join(name);
+            assert_eq!(
+                files.get(&destination.to_string_lossy().to_string()),
+                Some(&contents.to_string())
+            );
+            assert!(contents.contains("genoa-idle-suspend --record-baseline"));
+            assert!(
+                contents.contains("timeout 1200 /usr/local/bin/genoa-idle-suspend")
+                    || contents.contains("timeout 600 /usr/local/bin/genoa-idle-suspend")
+            );
+        }
+        assert!(env.cmd_log.borrow().contains(&(
+            "systemctl".to_string(),
+            vec!["--user".to_string(), "daemon-reload".to_string()]
+        )));
     }
 
     #[test]
