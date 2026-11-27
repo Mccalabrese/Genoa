@@ -1,6 +1,9 @@
 use std::{
-    ffi::{CStr, CString},
+    fs,
+    io::{ErrorKind, Read, Write},
     os::fd::OwnedFd,
+    path::PathBuf,
+    process::{Command, Stdio},
     sync::{
         Arc,
         mpsc::{self, Receiver, SyncSender},
@@ -8,14 +11,47 @@ use std::{
     thread,
 };
 
-use pam_client2::{Context, ConversationHandler, ErrorCode, Flag};
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::{self, retry_on_intr};
-use uzers::get_current_username;
 use zeroize::Zeroizing;
 
-const PAM_SERVICE: &str = "genoa-lock";
+use crate::protocol::{REQUEST_MAGIC, RESPONSE_DENY, RESPONSE_ERROR, RESPONSE_OK};
+
+#[cfg(not(debug_assertions))]
+use std::{os::unix::fs::MetadataExt, path::Path};
 
 pub type AuthenticationResult = Result<bool, String>;
+
+pub fn ensure_helper_available() -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    {
+        let path = helper_path()?;
+        fs::metadata(path.as_path()).map(|_| ()).map_err(|error| {
+            format!(
+                "could not inspect debug PAM helper {}: {error}",
+                path.display()
+            )
+        })
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let path = helper_path();
+        ensure_release_helper(&path)
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn ensure_release_helper(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect PAM helper {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("the PAM helper is not a regular file".to_string());
+    }
+    if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 || metadata.mode() & 0o111 == 0 {
+        return Err("the PAM helper does not have safe ownership or permissions".to_string());
+    }
+    validate_parent_directories(path)
+}
 
 pub fn start_authentication(
     password: Zeroizing<String>,
@@ -35,31 +71,120 @@ fn authenticate(
     completion_event: Arc<OwnedFd>,
 ) {
     let mut completion = AuthenticationCompletion::new(sender, completion_event);
-    completion.finish(authenticate_current_user(password));
+    let result = authenticate_with_helper(&password);
+    drop(password);
+    completion.finish(result);
 }
 
-fn authenticate_current_user(password: Zeroizing<String>) -> Result<bool, String> {
-    let username = effective_username()?;
-    let conversation = Credentials { password };
-    let mut client = Context::new(PAM_SERVICE, Some(&username), conversation)
-        .map_err(|_| format!("could not initialise PAM service {PAM_SERVICE:?}"))?;
-
-    if client.authenticate(Flag::NONE).is_err() || client.acct_mgmt(Flag::NONE).is_err() {
-        return Ok(false);
+fn authenticate_with_helper(password: &Zeroizing<String>) -> AuthenticationResult {
+    #[cfg(debug_assertions)]
+    let helper = helper_path()?;
+    #[cfg(not(debug_assertions))]
+    let helper = helper_path();
+    let mut child = Command::new(helper)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start the PAM helper: {error}"))?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| "could not open the PAM helper input".to_string())?;
+    let mut output = child
+        .stdout
+        .take()
+        .ok_or_else(|| "could not open the PAM helper result channel".to_string())?;
+    let write_result = write_request(&mut input, password);
+    drop(input);
+    if let Err(error) = write_result {
+        let _ = child.wait();
+        return Err(format!(
+            "could not send credentials to the PAM helper: {error}"
+        ));
     }
-    let _ = client.reinitialize_credentials(Flag::NONE);
-    Ok(true)
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not reap the PAM helper: {error}"))?;
+    let flags = fcntl_getfl(&output)
+        .map_err(|error| format!("could not inspect the PAM helper result channel: {error}"))?;
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).map_err(|error| {
+        format!("could not make the PAM helper result channel nonblocking: {error}")
+    })?;
+    let mut response = [0_u8; 9];
+    let read_result = loop {
+        let result = output.read(&mut response);
+        if !matches!(
+            result,
+            Err(ref error) if error.kind() == ErrorKind::Interrupted
+        ) {
+            break result;
+        }
+    };
+    let read = match read_result {
+        Ok(read) => read,
+        Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
+        Err(error) => return Err(format!("could not read the PAM helper result: {error}")),
+    };
+    if !status.success() || read != RESPONSE_OK.len() {
+        return Err("the PAM helper did not complete correctly".to_string());
+    }
+    if response[..RESPONSE_OK.len()] == RESPONSE_OK {
+        Ok(true)
+    } else if response[..RESPONSE_DENY.len()] == RESPONSE_DENY {
+        Ok(false)
+    } else if response[..RESPONSE_ERROR.len()] == RESPONSE_ERROR {
+        Err("the PAM helper could not complete authentication".to_string())
+    } else {
+        Err("the PAM helper returned an invalid result".to_string())
+    }
 }
 
-fn effective_username() -> Result<String, String> {
-    get_current_username()
-        .ok_or_else(|| "could not determine the effective user's account name".to_string())?
-        .into_string()
-        .map_err(|_| "effective account name is not valid UTF-8".to_string())
+fn write_request(input: &mut impl Write, password: &str) -> std::io::Result<()> {
+    let length = u16::try_from(password.len()).map_err(|_| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "password is too long for the PAM helper",
+        )
+    })?;
+    input.write_all(&REQUEST_MAGIC)?;
+    input.write_all(&length.to_be_bytes())?;
+    input.write_all(password.as_bytes())
 }
 
-struct Credentials {
-    password: Zeroizing<String>,
+#[cfg(debug_assertions)]
+fn helper_path() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate the debug PAM helper: {error}"))?;
+    executable
+        .parent()
+        .map(|parent| parent.join("genoa-lock-pam"))
+        .ok_or_else(|| "could not locate the debug PAM helper directory".to_string())
+}
+
+#[cfg(not(debug_assertions))]
+fn helper_path() -> PathBuf {
+    PathBuf::from("/usr/local/lib/genoa/genoa-lock-pam")
+}
+
+#[cfg(not(debug_assertions))]
+fn validate_parent_directories(path: &Path) -> Result<(), String> {
+    for parent in path.ancestors().skip(1) {
+        let metadata = fs::symlink_metadata(parent).map_err(|error| {
+            format!(
+                "could not inspect PAM helper directory {}: {error}",
+                parent.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err("the PAM helper directory is not safely owned".to_string());
+        }
+    }
+    Ok(())
 }
 
 struct AuthenticationCompletion {
@@ -98,20 +223,6 @@ impl Drop for AuthenticationCompletion {
         drop(self.sender.take());
         self.notify();
     }
-}
-
-impl ConversationHandler for Credentials {
-    fn prompt_echo_on(&mut self, _: &CStr) -> Result<CString, ErrorCode> {
-        Err(ErrorCode::CONV_ERR)
-    }
-
-    fn prompt_echo_off(&mut self, _: &CStr) -> Result<CString, ErrorCode> {
-        CString::new(self.password.as_bytes()).map_err(|_| ErrorCode::CONV_ERR)
-    }
-
-    fn text_info(&mut self, _: &CStr) {}
-
-    fn error_msg(&mut self, _: &CStr) {}
 }
 
 #[cfg(test)]

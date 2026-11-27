@@ -2,8 +2,9 @@ use std::{
     fs::File,
     io::{ErrorKind, Seek, SeekFrom, Write},
     os::fd::{AsFd, OwnedFd},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, mpsc::Receiver},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -33,6 +34,7 @@ const MAX_GRAPHICS_BYTES: usize = 256 * 1024 * 1024;
 const MAX_KEYMAP_BYTES: usize = 4 * 1024 * 1024;
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const VISUAL_REFRESH_INTERVAL: Duration = Duration::from_millis(80);
+const AUTHENTICATION_FAILURE_DURATION: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Default)]
 pub struct LockOptions {
@@ -145,6 +147,7 @@ struct LockState {
     surfaces: Vec<LockSurface>,
     appearance: Appearance,
     visual_redraw_after: Option<Instant>,
+    authentication_failed_until: Option<Instant>,
     password: Password,
     authentication_event: Arc<OwnedFd>,
     authentication: Option<AuthenticationAttempt>,
@@ -169,6 +172,7 @@ struct Seat {
 enum KeyAction {
     Ignore,
     Backspace,
+    Clear,
     Submit,
     Text(Zeroizing<String>),
 }
@@ -177,6 +181,8 @@ impl Seat {
     fn translate_key(&self, key: u32) -> KeyAction {
         if self.input.is_backspace_or_delete(key) {
             KeyAction::Backspace
+        } else if self.input.is_cancel(key) {
+            KeyAction::Clear
         } else if self.input.is_submit(key) {
             KeyAction::Submit
         } else {
@@ -233,6 +239,7 @@ impl LockState {
         // Each seat owns a separate input context, so this temporary probe is
         // deliberately dropped immediately.
         drop(KeyboardInput::new()?);
+        auth::ensure_helper_available()?;
         let authentication_event = eventfd(0, EventfdFlags::CLOEXEC)
             .map_err(|error| format!("could not create the authentication notifier: {error}"))?;
         Ok(Self {
@@ -249,6 +256,7 @@ impl LockState {
             surfaces: Vec::new(),
             appearance: Appearance::load()?,
             visual_redraw_after: None,
+            authentication_failed_until: None,
             password: Password::default(),
             authentication_event: Arc::new(authentication_event),
             authentication: None,
@@ -371,24 +379,38 @@ impl LockState {
         let needs_new_buffer = self.surfaces[index].buffer.as_ref().is_none_or(|buffer| {
             buffer.width != requested.width || buffer.height != requested.height
         });
+        if needs_new_buffer {
+            if self.surfaces[index].retired_buffer.is_some() {
+                // Keep only one unreleased predecessor. The release handler
+                // will render the latest retained configure when it is safe.
+                return Ok(());
+            }
+
+            let new_buffer =
+                self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
+            let old_buffer = self.surfaces[index].buffer.replace(new_buffer);
+            self.surfaces[index].spare_buffer = None;
+            if let Some(old_buffer) = old_buffer
+                && !old_buffer.released
+            {
+                // Attaching the replacement lets the compositor stop using
+                // the old scanout buffer and eventually release it.
+                self.surfaces[index].retired_buffer = Some(old_buffer);
+            }
+            self.paint_and_commit(index, Some(requested.serial))?;
+            self.surfaces[index].pending_configure = None;
+            return Ok(());
+        }
+
         if self.surfaces[index]
             .buffer
             .as_ref()
             .is_some_and(|buffer| !buffer.released)
             || self.surfaces[index].retired_buffer.is_some()
         {
-            // A Wayland buffer is immutable while the compositor is reading
-            // it. Retain the latest configure and finish it at release.
+            // A same-size repaint cannot reuse a buffer while the compositor
+            // is reading it. Retain the latest configure until a release.
             return Ok(());
-        }
-
-        if needs_new_buffer {
-            let new_buffer =
-                self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
-            self.surfaces[index].buffer = Some(new_buffer);
-            // A released buffer is safe to drop. Old-size spares cannot be
-            // reused after a configure, so discard them with the old frame.
-            self.surfaces[index].spare_buffer = None;
         }
         self.paint_and_commit(index, Some(requested.serial))?;
         self.surfaces[index].pending_configure = None;
@@ -416,11 +438,18 @@ impl LockState {
     }
 
     fn redraw_if_due(&mut self, queue_handle: &QueueHandle<Self>) {
-        if self
+        let now = Instant::now();
+        let redraw_due = self
             .visual_redraw_after
-            .is_some_and(|deadline| deadline <= Instant::now())
-        {
+            .is_some_and(|deadline| deadline <= now);
+        let failure_expired = self
+            .authentication_failed_until
+            .is_some_and(|deadline| deadline <= now);
+        if redraw_due || failure_expired {
             self.visual_redraw_after = None;
+            if failure_expired {
+                self.authentication_failed_until = None;
+            }
             for index in 0..self.surfaces.len() {
                 if let Err(error) = self.redraw_surface(index, queue_handle) {
                     Self::report_runtime_error(error);
@@ -430,7 +459,11 @@ impl LockState {
     }
 
     fn visual_poll_timeout(&self) -> Option<Timespec> {
-        let deadline = self.visual_redraw_after?;
+        let deadline = match (self.visual_redraw_after, self.authentication_failed_until) {
+            (Some(redraw), Some(failure)) => redraw.min(failure),
+            (Some(deadline), None) | (None, Some(deadline)) => deadline,
+            (None, None) => return None,
+        };
         let remaining = deadline.saturating_duration_since(Instant::now());
         Some(Timespec {
             tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX),
@@ -458,12 +491,18 @@ impl LockState {
             if !spare.released {
                 return Err("a reusable lock buffer was not released".to_string());
             }
-            let active = self.surfaces[index]
+            let matches_active_size = self.surfaces[index]
                 .buffer
-                .replace(spare)
-                .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
-            self.surfaces[index].retired_buffer = Some(active);
-            return self.paint_and_commit(index, None);
+                .as_ref()
+                .is_some_and(|active| active.width == spare.width && active.height == spare.height);
+            if matches_active_size {
+                let active = self.surfaces[index]
+                    .buffer
+                    .replace(spare)
+                    .ok_or_else(|| "could not replace the active lock buffer".to_string())?;
+                self.surfaces[index].retired_buffer = Some(active);
+                return self.paint_and_commit(index, None);
+            }
         }
 
         if self.surfaces[index].retired_buffer.is_some() {
@@ -529,6 +568,7 @@ impl LockState {
             height,
             self.password.display_len(),
             self.authentication.is_some(),
+            self.authentication_failed_until.is_some(),
         )?;
 
         let lock_surface = &mut self.surfaces[index];
@@ -582,6 +622,10 @@ impl LockState {
         }
     }
 
+    const fn clear_authentication_failure(&mut self) {
+        self.authentication_failed_until = None;
+    }
+
     fn finish_authentication(&mut self) {
         let mut counter = [0_u8; 8];
         let read = retry_on_intr(|| io::read(self.authentication_event.as_ref(), &mut counter));
@@ -618,7 +662,9 @@ impl LockState {
         if authenticated {
             self.unlock();
         } else {
-            self.request_visual_redraw();
+            self.authentication_failed_until =
+                Some(Instant::now() + AUTHENTICATION_FAILURE_DURATION);
+            self.request_visual_redraw_now();
         }
     }
 
@@ -650,7 +696,25 @@ impl LockState {
             return;
         }
         self.suspend_requested = true;
-        let _ = Command::new(SYSTEMCTL).arg("suspend").status();
+        let result = thread::Builder::new()
+            .name("genoa-lock-suspend".to_string())
+            .spawn(|| {
+                match Command::new(SYSTEMCTL)
+                    .arg("suspend")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => eprintln!("genoa-lock: systemctl suspend exited with {status}"),
+                    Err(error) => eprintln!("genoa-lock: could not run systemctl suspend: {error}"),
+                }
+            });
+        if let Err(error) = result {
+            self.suspend_requested = false;
+            Self::report_runtime_error(format!("could not start the suspend worker: {error}"));
+        }
     }
 }
 
@@ -931,7 +995,11 @@ impl Dispatch<wl_buffer::WlBuffer, u32> for LockState {
                 && let Some(mut released) = state.surfaces[index].retired_buffer.take()
             {
                 released.released = true;
-                state.surfaces[index].spare_buffer = Some(released);
+                if state.surfaces[index].buffer.as_ref().is_some_and(|active| {
+                    active.width == released.width && active.height == released.height
+                }) {
+                    state.surfaces[index].spare_buffer = Some(released);
+                }
             }
             if state.surfaces[index].pending_configure.is_some()
                 && let Err(error) = state.render_pending_configure(index, queue_handle)
@@ -1106,8 +1174,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for LockState {
 
         if state.authentication.is_none() {
             let redraw = !matches!(&action, Some(KeyAction::Ignore) | None);
+            if redraw {
+                state.clear_authentication_failure();
+            }
             match action {
                 Some(KeyAction::Backspace) => state.password.backspace(),
+                Some(KeyAction::Clear) => state.password.clear(),
                 Some(KeyAction::Submit) => state.submit_password(),
                 Some(KeyAction::Text(text)) => state.password.push_text(&text),
                 Some(KeyAction::Ignore) | None => {}

@@ -88,6 +88,8 @@ const CF_TOGGLE_POLICY: &str =
     include_str!("../../cloudflare-toggle/io.github.genoa.cloudflare-toggle.policy");
 const GENOA_LOCK_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock";
 const GENOA_LOCK_PATH: &str = "/usr/local/bin/genoa-lock";
+const GENOA_LOCK_PAM_HELPER_SOURCE: &str = "sysScripts/genoa-lock/target/release/genoa-lock-pam";
+const GENOA_LOCK_PAM_HELPER_PATH: &str = "/usr/local/lib/genoa/genoa-lock-pam";
 const GENOA_LOCK_PAM_PATH: &str = "/etc/pam.d/genoa-lock";
 const GENOA_LOCK_PAM_POLICY: &str =
     "auth include system-local-login\naccount include system-local-login\n";
@@ -129,15 +131,27 @@ fn install_cloudflare_toggle_helper(
 /// directory can never decide what locks the session.
 fn install_genoa_lock(sys: &impl CmdExecutor, repo_root: &Path) -> Result<(), std::io::Error> {
     let source = repo_root.join(GENOA_LOCK_SOURCE);
+    let helper_source = repo_root.join(GENOA_LOCK_PAM_HELPER_SOURCE);
     if !sys.path_exists(&source) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("Genoa Lock was not built: {}", source.display()),
         ));
     }
+    if !sys.path_exists(&helper_source) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "Genoa Lock PAM helper was not built: {}",
+                helper_source.display()
+            ),
+        ));
+    }
 
     sys.create_root_dir_all(Path::new("/usr/local/bin"))?;
     sys.install_file_to_root(&source, Path::new(GENOA_LOCK_PATH), "755")?;
+    sys.create_root_dir_all(Path::new("/usr/local/lib/genoa"))?;
+    sys.install_file_to_root(&helper_source, Path::new(GENOA_LOCK_PAM_HELPER_PATH), "755")?;
     sys.create_root_dir_all(Path::new("/etc/pam.d"))?;
     sys.install_string_to_root_file(Path::new(GENOA_LOCK_PAM_PATH), GENOA_LOCK_PAM_POLICY, "644")?;
     Ok(())
@@ -1025,11 +1039,16 @@ mod tests {
         let repo = Path::new("/repo");
         let home = Path::new("/home/testuser");
         let source = repo.join(GENOA_LOCK_SOURCE);
+        let helper_source = repo.join(GENOA_LOCK_PAM_HELPER_SOURCE);
         let sway_config = home.join(".config/sway/UserConfigs/UserKeybinds.conf");
         let gtklock_config = home.join(".config/gtklock");
         env.mock_files.borrow_mut().insert(
             source.to_string_lossy().to_string(),
             "compiled Genoa Lock".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            helper_source.to_string_lossy().to_string(),
+            "compiled Genoa Lock PAM helper".to_string(),
         );
         env.mock_files.borrow_mut().insert(
             sway_config.to_string_lossy().to_string(),
@@ -1060,6 +1079,21 @@ mod tests {
                         "root".to_string(),
                         source.to_string_lossy().to_string(),
                         GENOA_LOCK_PATH.to_string(),
+                    ]
+        }));
+        assert!(log.iter().any(|(command, args)| {
+            command == "sudo"
+                && args
+                    == &vec![
+                        "install".to_string(),
+                        "-m".to_string(),
+                        "755".to_string(),
+                        "-o".to_string(),
+                        "root".to_string(),
+                        "-g".to_string(),
+                        "root".to_string(),
+                        helper_source.to_string_lossy().to_string(),
+                        GENOA_LOCK_PAM_HELPER_PATH.to_string(),
                     ]
         }));
         assert!(log.iter().any(|(command, args)| {

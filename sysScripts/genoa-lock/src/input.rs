@@ -157,6 +157,10 @@ impl KeyboardInput {
             Some(keysyms::Return | keysyms::KP_Enter)
         )
     }
+
+    pub fn is_cancel(&self, wayland_key: u32) -> bool {
+        matches!(self.keysym(wayland_key), Some(keysyms::Escape))
+    }
 }
 
 fn read_keymap_source(mut file: File, size: usize) -> Result<String, String> {

@@ -4,7 +4,12 @@
 //! wallpaper is compiled into the binary; weather is a bounded, sanitized read
 //! of Genoa's existing user-owned cache.
 
-use std::{fs::File, io::Read};
+use std::{
+    fs::OpenOptions,
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
+};
 
 use chrono::Local;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
@@ -71,6 +76,7 @@ impl Appearance {
         height: u32,
         password_len: usize,
         authenticating: bool,
+        authentication_failed: bool,
     ) -> Result<Vec<u8>, String> {
         let pixels = pixel_len(width, height)?;
         let mut frame = vec![0_u8; pixels];
@@ -118,6 +124,8 @@ impl Appearance {
 
         let message = if authenticating {
             "AUTHENTICATING"
+        } else if authentication_failed {
+            "FAILED"
         } else if password_len == 0 {
             "PASSWORD"
         } else {
@@ -197,18 +205,7 @@ impl WeatherDisplay {
             return Self::empty();
         };
         let path = user.home_dir().join(".cache/.weather_cache.json");
-        let mut contents = String::new();
-        let Ok(file) = File::open(path) else {
-            return Self::empty();
-        };
-        if file
-            .take(WEATHER_CACHE_MAX_BYTES)
-            .read_to_string(&mut contents)
-            .is_err()
-        {
-            return Self::empty();
-        }
-        let Ok(cache) = serde_json::from_str::<WeatherCache>(&contents) else {
+        let Some(cache) = load_weather_cache(&path, get_current_uid()) else {
             return Self::empty();
         };
         let mut lines = cache
@@ -289,6 +286,29 @@ impl WeatherDisplay {
             );
         }
     }
+}
+
+fn load_weather_cache(path: &Path, user_id: u32) -> Option<WeatherCache> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.uid() != user_id || metadata.len() > WEATHER_CACHE_MAX_BYTES
+    {
+        return None;
+    }
+
+    let mut contents = String::new();
+    (&mut file)
+        .take(WEATHER_CACHE_MAX_BYTES.saturating_add(1))
+        .read_to_string(&mut contents)
+        .ok()?;
+    if contents.len() > usize::try_from(WEATHER_CACHE_MAX_BYTES).ok()? {
+        return None;
+    }
+    serde_json::from_str(&contents).ok()
 }
 
 fn sanitize_weather_line(line: &str) -> String {
@@ -673,17 +693,33 @@ fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
 
 #[cfg(test)]
 mod tests {
-    use super::Appearance;
+    use std::{fs, os::unix::fs::symlink};
+
+    use super::{Appearance, load_weather_cache};
+    use uzers::get_current_uid;
 
     #[test]
     fn embedded_appearance_renders_an_opaque_frame() -> Result<(), String> {
         let appearance = Appearance::load()?;
-        let frame = appearance.frame(64, 64, 3, false)?;
+        let frame = appearance.frame(64, 64, 3, false, false)?;
 
         assert_eq!(frame.len(), 64 * 64 * 4);
         let (pixels, remainder) = frame.as_chunks::<4>();
         assert!(remainder.is_empty());
         assert!(pixels.iter().all(|pixel| pixel[3] == 255));
+        Ok(())
+    }
+
+    #[test]
+    fn weather_cache_loader_rejects_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let cache = directory.path().join("weather.json");
+        fs::write(&cache, r#"{"text":"Clear","tooltip":"Clear"}"#)?;
+        let link = directory.path().join("weather-link.json");
+        symlink(&cache, &link)?;
+
+        assert!(load_weather_cache(&cache, get_current_uid()).is_some());
+        assert!(load_weather_cache(&link, get_current_uid()).is_none());
         Ok(())
     }
 }
