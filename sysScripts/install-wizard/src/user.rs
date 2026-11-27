@@ -65,6 +65,33 @@ const GTKLOCK_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+const IDLE_SERVICE_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        ".config/niri/config.kdl",
+        &[(
+            r#"spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 '/usr/local/bin/genoa-lock' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep '/usr/local/bin/genoa-lock'""#,
+            r#"spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user restart genoa-niri-idle.service""#,
+        )],
+    ),
+    (
+        ".config/sway/UserConfigs/Startup_Apps.conf",
+        &[
+            (
+                "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP",
+                "dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP SWAYSOCK",
+            ),
+            (
+                "systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP",
+                "systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP SWAYSOCK",
+            ),
+            (
+                "exec_always ~/.config/sway/swayidle.sh",
+                "exec_always systemctl --user restart genoa-sway-idle.service",
+            ),
+        ],
+    ),
+];
+
 /// Removes source files intentionally retired by tool migrations.
 ///
 /// Cargo can clear compiled output, but a stale untracked `build.rs` is still
@@ -118,6 +145,33 @@ pub fn migrate_gtklock_lock_commands(
     }
 
     Ok(safe_to_retire)
+}
+
+/// Moves only Genoa's known direct swayidle startup commands to the managed
+/// services. Other user idle commands remain untouched.
+pub fn migrate_idle_service_commands(
+    sys: &impl CmdExecutor,
+    home: &Path,
+) -> Result<(), std::io::Error> {
+    for (relative_path, replacements) in IDLE_SERVICE_CONFIG_MIGRATIONS {
+        let path = home.join(relative_path);
+        if !sys.path_exists(&path) {
+            continue;
+        }
+
+        let original = sys.read_file_to_string(&path)?;
+        let mut updated = original.clone();
+        for (from, to) in *replacements {
+            updated = updated.replace(from, to);
+        }
+        if updated != original {
+            let path = path.to_str().ok_or_else(|| {
+                std::io::Error::other("idle service config path is not valid UTF-8")
+            })?;
+            sys.write_string_to_file(path, &updated)?;
+        }
+    }
+    Ok(())
 }
 
 /// Deletes only the retired gtklock configuration directory, after the caller
@@ -923,6 +977,27 @@ mod tests {
         );
 
         assert!(!migrate_gtklock_lock_commands(&env, home).unwrap());
+    }
+
+    #[test]
+    fn idle_service_migration_rewrites_only_known_niri_startup() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+        let niri_path = home.join(".config/niri/config.kdl");
+        let (legacy, managed) = IDLE_SERVICE_CONFIG_MIGRATIONS[0].1[0];
+        env.mock_files.borrow_mut().insert(
+            niri_path.to_string_lossy().to_string(),
+            format!("{legacy}\ncustom line\n"),
+        );
+
+        migrate_idle_service_commands(&env, home).unwrap();
+
+        assert_eq!(
+            env.mock_files
+                .borrow()
+                .get(&niri_path.to_string_lossy().to_string()),
+            Some(&format!("{managed}\ncustom line\n"))
+        );
     }
 
     #[test]
