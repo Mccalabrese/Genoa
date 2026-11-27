@@ -379,24 +379,38 @@ impl LockState {
         let needs_new_buffer = self.surfaces[index].buffer.as_ref().is_none_or(|buffer| {
             buffer.width != requested.width || buffer.height != requested.height
         });
+        if needs_new_buffer {
+            if self.surfaces[index].retired_buffer.is_some() {
+                // Keep only one unreleased predecessor. The release handler
+                // will render the latest retained configure when it is safe.
+                return Ok(());
+            }
+
+            let new_buffer =
+                self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
+            let old_buffer = self.surfaces[index].buffer.replace(new_buffer);
+            self.surfaces[index].spare_buffer = None;
+            if let Some(old_buffer) = old_buffer
+                && !old_buffer.released
+            {
+                // Attaching the replacement lets the compositor stop using
+                // the old scanout buffer and eventually release it.
+                self.surfaces[index].retired_buffer = Some(old_buffer);
+            }
+            self.paint_and_commit(index, Some(requested.serial))?;
+            self.surfaces[index].pending_configure = None;
+            return Ok(());
+        }
+
         if self.surfaces[index]
             .buffer
             .as_ref()
             .is_some_and(|buffer| !buffer.released)
             || self.surfaces[index].retired_buffer.is_some()
         {
-            // A Wayland buffer is immutable while the compositor is reading
-            // it. Retain the latest configure and finish it at release.
+            // A same-size repaint cannot reuse a buffer while the compositor
+            // is reading it. Retain the latest configure until a release.
             return Ok(());
-        }
-
-        if needs_new_buffer {
-            let new_buffer =
-                self.new_surface_buffer(index, requested.width, requested.height, queue_handle)?;
-            self.surfaces[index].buffer = Some(new_buffer);
-            // A released buffer is safe to drop. Old-size spares cannot be
-            // reused after a configure, so discard them with the old frame.
-            self.surfaces[index].spare_buffer = None;
         }
         self.paint_and_commit(index, Some(requested.serial))?;
         self.surfaces[index].pending_configure = None;
