@@ -15,15 +15,12 @@ use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::{self, retry_on_intr};
 use zeroize::Zeroizing;
 
+use crate::protocol::{REQUEST_MAGIC, RESPONSE_DENY, RESPONSE_ERROR, RESPONSE_OK};
+
 #[cfg(not(debug_assertions))]
 use std::{os::unix::fs::MetadataExt, path::Path};
 
 pub type AuthenticationResult = Result<bool, String>;
-
-const REQUEST_MAGIC: [u8; 8] = *b"GNLP1REQ";
-const RESPONSE_OK: [u8; 8] = *b"GNLP1OK!";
-const RESPONSE_DENY: [u8; 8] = *b"GNLP1DEN";
-const RESPONSE_ERROR: [u8; 8] = *b"GNLP1ERR";
 
 pub fn ensure_helper_available() -> Result<(), String> {
     #[cfg(debug_assertions)]

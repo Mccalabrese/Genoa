@@ -10,6 +10,7 @@ mod auth;
 mod input;
 mod instance;
 mod password;
+mod protocol;
 mod visual;
 mod wayland;
 

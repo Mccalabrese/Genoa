@@ -2,6 +2,8 @@
 
 #[path = "../pam.rs"]
 mod pam;
+#[path = "../protocol.rs"]
+mod protocol;
 
 use std::{
     fs::{File, OpenOptions},
@@ -17,11 +19,7 @@ use rustix::{
 };
 use zeroize::Zeroizing;
 
-const REQUEST_MAGIC: [u8; 8] = *b"GNLP1REQ";
-const RESPONSE_OK: [u8; 8] = *b"GNLP1OK!";
-const RESPONSE_DENY: [u8; 8] = *b"GNLP1DEN";
-const RESPONSE_ERROR: [u8; 8] = *b"GNLP1ERR";
-const MAX_PASSWORD_BYTES: usize = 1024;
+use protocol::{MAX_PASSWORD_BYTES, REQUEST_MAGIC, RESPONSE_DENY, RESPONSE_ERROR, RESPONSE_OK};
 
 fn main() -> ExitCode {
     match run() {
