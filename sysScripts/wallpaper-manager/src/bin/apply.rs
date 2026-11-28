@@ -24,12 +24,6 @@ struct GlobalConfig {
     wallpaper_manager: WallpaperManagerConfig,
 }
 
-#[derive(Deserialize)]
-struct SwayMonitor {
-    name: String,
-    active: bool,
-}
-
 fn load_config() -> Result<GlobalConfig> {
     let config_path = dirs::home_dir()
         .context("Cannot find home dir")?
@@ -67,27 +61,21 @@ fn apply_awww_wallpaper(
     // Clean up incompatible daemons
     pkill("mpvpaper");
     pkill("swaybg");
-    // Ensure the daemon is running in the background
-    let _ = Command::new("awww-daemon")
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--format")
-        .arg("argb")
-        .spawn();
-    // Wait briefly for daemon startup race conditions
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    // Send the image command
-    Command::new("awww")
+    let status = Command::new("awww")
         .arg("img")
         .arg("--namespace")
         .arg(namespace)
-        .arg("-o")
+        .arg("--outputs")
         .arg(monitor)
         .arg(selected_file)
         .args(swww_params)
         .status()
         .context("awww img command failed")?;
-    Ok(())
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("awww img exited with {status}")
+    }
 }
 /// Applies wallpaper using `swaybg` (Solution for Sway).
 /// Swaybg is static and requires manual process management.
@@ -111,43 +99,6 @@ fn apply_sway_wallpaper(selected_file: &Path, monitor: &str, cache_filename: &st
     }
 
     Ok(())
-}
-
-fn active_monitors(compositor: &str) -> Result<Vec<String>> {
-    match compositor {
-        "sway" => {
-            let output = Command::new("swaymsg")
-                .args(["-t", "get_outputs"])
-                .output()
-                .context("could not query Sway outputs")?;
-            if !output.status.success() {
-                anyhow::bail!("swaymsg failed while listing outputs");
-            }
-            let monitors = serde_json::from_slice::<Vec<SwayMonitor>>(&output.stdout)
-                .context("could not parse Sway output list")?;
-            Ok(monitors
-                .into_iter()
-                .filter(|monitor| monitor.active)
-                .map(|monitor| monitor.name)
-                .collect())
-        }
-        "niri" => {
-            let output = Command::new("awww")
-                .args(["query", "--namespace", "niri"])
-                .output()
-                .context("could not query Niri outputs")?;
-            if !output.status.success() {
-                anyhow::bail!("awww failed while listing Niri outputs");
-            }
-            Ok(String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| line.split_once(':').map(|(_, monitor)| monitor.trim()))
-                .filter(|monitor| !monitor.is_empty())
-                .map(ToOwned::to_owned)
-                .collect())
-        }
-        _ => anyhow::bail!("Compositor argument '{compositor}' is not recognized"),
-    }
 }
 
 fn apply_wallpaper(
@@ -174,18 +125,10 @@ fn main() -> Result<()> {
 
     let wallpaper_path = PathBuf::from(wallpaper_path_str);
 
-    let monitors = if monitor == "--all" {
-        let monitors = active_monitors(compositor)?;
-        if monitors.is_empty() {
-            anyhow::bail!("No active outputs were reported by {compositor}");
-        }
-        monitors
-    } else {
-        vec![monitor.to_string()]
-    };
-    for monitor in monitors {
-        apply_wallpaper(&wallpaper_path, compositor, &monitor, &config)?;
+    if monitor == "--all" {
+        anyhow::bail!("an explicit output is required");
     }
+    apply_wallpaper(&wallpaper_path, compositor, monitor, &config)?;
 
     Ok(())
 }

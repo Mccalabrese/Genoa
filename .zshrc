@@ -115,6 +115,10 @@ if [ -f "$HOME/.oh-my-zsh/custom/aliases.zsh" ]; then
     source "$HOME/.oh-my-zsh/custom/aliases.zsh"
 fi
 
+if [ -f "$HOME/.config/genoa/idle-inhibit.zsh" ]; then
+    source "$HOME/.config/genoa/idle-inhibit.zsh"
+fi
+
 # 8. Starship Prompt
 # Initialize the Starship prompt (replaces the theme)
 if command -v starship &> /dev/null; then

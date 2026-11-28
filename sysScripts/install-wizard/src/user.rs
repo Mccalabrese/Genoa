@@ -816,6 +816,10 @@ pub fn link_dotfiles_and_copy_resources(
         (".config/mako", ".config/mako"),
         (".config/xdg-desktop-portal", ".config/xdg-desktop-portal"),
         (
+            "sysScripts/genoa-settings/data/idle-inhibit.zsh",
+            ".config/genoa/idle-inhibit.zsh",
+        ),
+        (
             "sysScripts/genoa-settings/data/io.github.genoa.Settings.desktop",
             ".local/share/applications/io.github.genoa.Settings.desktop",
         ),

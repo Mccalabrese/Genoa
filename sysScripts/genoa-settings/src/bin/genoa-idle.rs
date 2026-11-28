@@ -9,6 +9,7 @@ const SWAYIDLE: &str = "/usr/bin/swayidle";
 const GENOA_LOCK: &str = "/usr/local/bin/genoa-lock";
 const GENOA_IDLE_SUSPEND: &str = "/usr/local/bin/genoa-idle-suspend";
 const BRIGHTNESSCTL: &str = "/usr/bin/brightnessctl";
+const SYSTEMD_INHIBIT: &str = "/usr/bin/systemd-inhibit";
 const BRIGHTNESS_STATE: &str = "idle-brightness";
 
 #[derive(Clone, Copy)]
@@ -62,7 +63,7 @@ fn run() -> Result<(), String> {
     let mut arguments = env::args();
     let _program = arguments.next();
     let command = arguments.next().ok_or_else(|| {
-        "usage: genoa-idle <run|dim|restore|lock|suspend|before-sleep>".to_string()
+        "usage: genoa-idle <run|dim|restore|lock|suspend|before-sleep|inhibit-suspend>".to_string()
     })?;
 
     match command.as_str() {
@@ -80,7 +81,66 @@ fn run() -> Result<(), String> {
         "lock" if arguments.next().is_none() => spawn_lock(&[]),
         "suspend" if arguments.next().is_none() => suspend_when_locked(),
         "before-sleep" if arguments.next().is_none() => lock_before_sleep(),
-        _ => Err("usage: genoa-idle <run|dim|restore|lock|suspend|before-sleep>".to_string()),
+        "inhibit-suspend" => {
+            let activity = arguments.next().ok_or_else(|| {
+                "usage: genoa-idle inhibit-suspend <building|updating> <command> [arguments...]"
+                    .to_string()
+            })?;
+            let command = arguments.collect::<Vec<_>>();
+            inhibit_suspend(&activity, &command)
+        }
+        _ => Err(
+            "usage: genoa-idle <run|dim|restore|lock|suspend|before-sleep|inhibit-suspend>"
+                .to_string(),
+        ),
+    }
+}
+
+fn inhibit_suspend(activity: &str, command: &[String]) -> Result<(), String> {
+    let settings = IdleSettings::load_or_default(IdleSettings::default()).0;
+    let (enabled, reason) = match activity {
+        "building" => (
+            settings.inhibit_suspend_while_building,
+            "Genoa is compiling code",
+        ),
+        "updating" => (
+            settings.inhibit_suspend_while_updating,
+            "Genoa is updating the system",
+        ),
+        _ => {
+            return Err(
+                "usage: genoa-idle inhibit-suspend <building|updating> <command> [arguments...]"
+                    .to_string(),
+            );
+        }
+    };
+    let (program, arguments) = command
+        .split_first()
+        .ok_or_else(|| "an inhibited command is required".to_string())?;
+    let mut process = if enabled {
+        let mut process = Command::new(SYSTEMD_INHIBIT);
+        process.args([
+            "--what=sleep",
+            "--mode=block",
+            "--who=Genoa",
+            "--why",
+            reason,
+            "--",
+        ]);
+        process.arg(program).args(arguments);
+        process
+    } else {
+        let mut process = Command::new(program);
+        process.args(arguments);
+        process
+    };
+    let status = process
+        .status()
+        .map_err(|error| format!("could not start {program}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} exited with {status}"))
     }
 }
 

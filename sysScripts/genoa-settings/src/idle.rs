@@ -30,12 +30,16 @@ impl IdleProfile {
                 lock_after_seconds: 600,
                 display_off_after_seconds: 660,
                 suspend_after_seconds: 1_200,
+                inhibit_suspend_while_building: true,
+                inhibit_suspend_while_updating: true,
             },
             Self::Sway => IdleSettings {
                 dim_after_seconds: 60,
                 lock_after_seconds: 240,
                 display_off_after_seconds: 300,
                 suspend_after_seconds: 600,
+                inhibit_suspend_while_building: true,
+                inhibit_suspend_while_updating: true,
             },
         }
     }
@@ -48,6 +52,8 @@ pub struct IdleSettings {
     pub lock_after_seconds: u32,
     pub display_off_after_seconds: u32,
     pub suspend_after_seconds: u32,
+    pub inhibit_suspend_while_building: bool,
+    pub inhibit_suspend_while_updating: bool,
 }
 
 impl Default for IdleSettings {

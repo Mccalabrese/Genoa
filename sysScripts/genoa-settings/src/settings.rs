@@ -9,7 +9,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, DropDown, FlowBox, Label,
     Orientation, Picture, ScrolledWindow, SearchEntry, Stack, StackSidebar, StringList,
-    StringObject, gdk, glib,
+    StringObject, Switch, gdk, glib,
 };
 
 const MAX_VISIBLE_WALLPAPERS: usize = 72;
@@ -434,8 +434,18 @@ fn lock_and_sleep_page(settings: &IdleSettings, load_warning: Option<&str>) -> G
     ));
     page.append(&section(
         "Builds and updates",
-        "Build and update protection needs an explicit command wrapper so it cannot mistake an unrelated process for your work or leave idle management paused after a crash. This will be added as a separate, testable integration for Ghostty and Genoa's updater.",
+        "These controls prevent only system suspend. Your display may dim and the session may lock normally while a build or update runs.",
     ));
+    let build_inhibit = suspend_inhibit_control(
+        "Prevent suspend while compiling",
+        settings.inhibit_suspend_while_building,
+    );
+    let update_inhibit = suspend_inhibit_control(
+        "Prevent suspend during Genoa updates",
+        settings.inhibit_suspend_while_updating,
+    );
+    page.append(&build_inhibit.row);
+    page.append(&update_inhibit.row);
 
     let save = Button::with_label("Save lock and sleep settings");
     save.add_css_class("suggested-action");
@@ -453,12 +463,16 @@ fn lock_and_sleep_page(settings: &IdleSettings, load_warning: Option<&str>) -> G
     let lock_value = lock.selector;
     let display_off_value = display_off.selector;
     let suspend_value = suspend.selector;
+    let build_inhibit_value = build_inhibit.switch;
+    let update_inhibit_value = update_inhibit.switch;
     save.connect_clicked(move |_| {
         let settings = IdleSettings {
             dim_after_seconds: timeout_value(&dim_value),
             lock_after_seconds: timeout_value(&lock_value),
             display_off_after_seconds: timeout_value(&display_off_value),
             suspend_after_seconds: timeout_value(&suspend_value),
+            inhibit_suspend_while_building: build_inhibit_value.is_active(),
+            inhibit_suspend_while_updating: update_inhibit_value.is_active(),
         };
         match settings.save() {
             Ok(()) => match restart_active_idle_service() {
@@ -516,6 +530,28 @@ fn timeout_value(control: &DropDown) -> u32 {
         .copied()
         .unwrap_or(TIMEOUT_MINUTES[0])
         .saturating_mul(60)
+}
+
+struct SuspendInhibitControl {
+    row: GtkBox,
+    switch: Switch,
+}
+
+fn suspend_inhibit_control(label: &str, active: bool) -> SuspendInhibitControl {
+    let row = GtkBox::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(18)
+        .hexpand(true)
+        .build();
+    let label = Label::builder()
+        .label(label)
+        .xalign(0.0)
+        .hexpand(true)
+        .build();
+    let switch = Switch::builder().active(active).build();
+    row.append(&label);
+    row.append(&switch);
+    SuspendInhibitControl { row, switch }
 }
 
 fn restart_active_idle_service() -> Result<&'static str, String> {
