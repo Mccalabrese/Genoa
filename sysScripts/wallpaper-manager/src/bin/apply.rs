@@ -61,27 +61,21 @@ fn apply_awww_wallpaper(
     // Clean up incompatible daemons
     pkill("mpvpaper");
     pkill("swaybg");
-    // Ensure the daemon is running in the background
-    let _ = Command::new("awww-daemon")
-        .arg("--namespace")
-        .arg(namespace)
-        .arg("--format")
-        .arg("argb")
-        .spawn();
-    // Wait briefly for daemon startup race conditions
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    // Send the image command
-    Command::new("awww")
+    let status = Command::new("awww")
         .arg("img")
         .arg("--namespace")
         .arg(namespace)
-        .arg("-o")
+        .arg("--outputs")
         .arg(monitor)
         .arg(selected_file)
         .args(swww_params)
         .status()
         .context("awww img command failed")?;
-    Ok(())
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("awww img exited with {status}")
+    }
 }
 /// Applies wallpaper using `swaybg` (Solution for Sway).
 /// Swaybg is static and requires manual process management.
@@ -107,6 +101,19 @@ fn apply_sway_wallpaper(selected_file: &Path, monitor: &str, cache_filename: &st
     Ok(())
 }
 
+fn apply_wallpaper(
+    selected_file: &Path,
+    compositor: &str,
+    monitor: &str,
+    config: &WallpaperManagerConfig,
+) -> Result<()> {
+    match compositor {
+        "niri" => apply_awww_wallpaper(selected_file, monitor, "niri", &config.swww_params),
+        "sway" => apply_sway_wallpaper(selected_file, monitor, &config.swaybg_cache_file),
+        _ => anyhow::bail!("Compositor argument '{compositor}' is not recognized"),
+    }
+}
+
 fn main() -> Result<()> {
     let global_config = load_config()?;
     let config = global_config.wallpaper_manager;
@@ -118,17 +125,10 @@ fn main() -> Result<()> {
 
     let wallpaper_path = PathBuf::from(wallpaper_path_str);
 
-    // Strategy Pattern: Dispatch based on the detected environment
-    match compositor.as_str() {
-        "niri" => {
-            // Niri uses the same backend (awww) but a isolated namespace
-            apply_awww_wallpaper(&wallpaper_path, monitor, "niri", &config.swww_params)?;
-        }
-        "sway" => {
-            apply_sway_wallpaper(&wallpaper_path, monitor, &config.swaybg_cache_file)?;
-        }
-        _ => anyhow::bail!("Compositor argument '{}' is not recognized.", compositor),
+    if monitor == "--all" {
+        anyhow::bail!("an explicit output is required");
     }
+    apply_wallpaper(&wallpaper_path, compositor, monitor, &config)?;
 
     Ok(())
 }

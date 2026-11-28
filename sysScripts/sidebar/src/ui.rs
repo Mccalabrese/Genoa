@@ -146,11 +146,11 @@ pub fn build_ui(app: &Application) {
     let btn_air = helpers::make_icon_button("airplane-mode-symbolic", "Airplane Mode");
     let btn_dns = helpers::make_icon_button("weather-overcast-symbolic", "Cloudflare DNS");
     let btn_mute = helpers::make_icon_button("audio-volume-muted-symbolic", "Mute Audio");
-    let btn_wall = helpers::make_icon_button("image-x-generic-symbolic", "Change Wallpaper");
+    let btn_settings = helpers::make_icon_button("preferences-system-symbolic", "Genoa Settings");
     let btn_hint = helpers::make_icon_button("emoji-objects-symbolic", "Show Keyhints");
 
     row_toggles.append(&btn_radio);
-    row_toggles.append(&btn_wall);
+    row_toggles.append(&btn_settings);
     row_toggles.append(&btn_dns);
     row_toggles.append(&btn_update);
     row_toggles.append(&btn_air);
@@ -591,7 +591,7 @@ pub fn build_ui(app: &Application) {
     });
 
     // Launchers
-    btn_wall.connect_clicked(move |_| helpers::run_home_bin("wp-select", &[]));
+    btn_settings.connect_clicked(move |_| helpers::run_home_bin("genoa-settings", &[]));
     btn_hint.connect_clicked(move |_| helpers::run_home_bin("kb-launcher", &[]));
     btn_radio.connect_clicked(move |_| helpers::run_home_bin("radio-menu", &[]));
 

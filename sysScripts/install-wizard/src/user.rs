@@ -162,8 +162,8 @@ pub fn migrate_gtklock_lock_commands(
     Ok(safe_to_retire)
 }
 
-/// Moves only Genoa's known direct swayidle startup commands to the managed
-/// service. Other user idle commands remain untouched.
+/// Moves Genoa's known direct swayidle startup commands to the managed user
+/// services without changing unrelated user idle configuration.
 pub fn migrate_idle_service_commands(
     sys: &impl CmdExecutor,
     home: &Path,
@@ -815,6 +815,14 @@ pub fn link_dotfiles_and_copy_resources(
         (".config/environment.d", ".config/environment.d"),
         (".config/mako", ".config/mako"),
         (".config/xdg-desktop-portal", ".config/xdg-desktop-portal"),
+        (
+            "sysScripts/genoa-settings/data/idle-inhibit.zsh",
+            ".config/genoa/idle-inhibit.zsh",
+        ),
+        (
+            "sysScripts/genoa-settings/data/io.github.genoa.Settings.desktop",
+            ".local/share/applications/io.github.genoa.Settings.desktop",
+        ),
     ];
 
     for (src, dest) in links {

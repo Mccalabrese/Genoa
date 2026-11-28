@@ -9,6 +9,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use rustix::{
@@ -71,6 +73,24 @@ impl InstanceGuard {
         Self::active_session_is_locked_in(&runtime)
     }
 
+    /// Waits briefly for a locker that is already starting to receive the
+    /// compositor's `locked` event. This is used only by the sleep hook, where
+    /// proceeding before that event could suspend an exposed desktop.
+    pub fn wait_until_locked(timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if Self::active_session_is_locked()? {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "the compositor did not confirm the lock before the sleep deadline".to_string(),
+                );
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Records that the compositor has confirmed this session is locked.
     pub fn mark_session_locked(&mut self) -> Result<(), String> {
         self.file
@@ -126,11 +146,15 @@ impl InstanceGuard {
     fn active_session_is_locked_in(runtime: &Path) -> Result<bool, String> {
         let directory = private_runtime_directory(runtime)?;
         let lock_path = directory.join(LOCK_FILE_NAME);
-        let mut file = OpenOptions::new()
+        let mut file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&lock_path)
-            .map_err(|error| format!("could not open {}: {error}", lock_path.display()))?;
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("could not open {}: {error}", lock_path.display())),
+        };
         ensure_private_regular_file(&file, &lock_path)?;
 
         let length = file

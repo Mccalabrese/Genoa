@@ -79,6 +79,8 @@ const AUR_PACKAGES: &[&str] = &[
 // shadowed by an executable in a user-writable PATH directory.
 const TRUSTED_SYSTEM_PATH: &str = "/usr/bin:/bin";
 const SYSTEM_RUSTUP: &str = "/usr/bin/rustup";
+const SYSTEMD_INHIBIT: &str = "/usr/bin/systemd-inhibit";
+const IDLE_INHIBITED_ARGUMENT: &str = "--genoa-idle-inhibited";
 const CF_TOGGLE_HELPER_SOURCE: &str =
     "sysScripts/cloudflare-toggle/target/release/cf-toggle-helper";
 const CF_TOGGLE_HELPER_PATH: &str = "/usr/libexec/genoa/cf-toggle-helper";
@@ -111,6 +113,56 @@ fn restrict_command_path() {
     // SAFETY: called by main before any threads or child processes exist; see
     // Rust 2024's environment-mutation safety requirement.
     unsafe { std::env::set_var("PATH", TRUSTED_SYSTEM_PATH) };
+}
+
+fn update_suspend_protection_enabled(home: &Path) -> bool {
+    let path = home.join(".config/genoa/idle.toml");
+    let Ok(contents) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(document) = contents.parse::<toml_edit::DocumentMut>() else {
+        return true;
+    };
+    document
+        .get("inhibit_suspend_while_updating")
+        .and_then(toml_edit::Item::as_bool)
+        .unwrap_or(true)
+}
+
+fn run_with_suspend_protection(home: &Path, arguments: &[String]) -> Option<i32> {
+    if arguments
+        .iter()
+        .any(|argument| argument == IDLE_INHIBITED_ARGUMENT)
+        || !update_suspend_protection_enabled(home)
+    {
+        return None;
+    }
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            eprintln!("   ⚠️  Could not enable suspend protection: {error}");
+            return None;
+        }
+    };
+    let mut command = Command::new(SYSTEMD_INHIBIT);
+    command.args([
+        "--what=sleep",
+        "--mode=block",
+        "--who=Genoa",
+        "--why=Genoa is updating the system",
+        "--",
+    ]);
+    command
+        .arg(executable)
+        .args(arguments.iter().skip(1))
+        .arg(IDLE_INHIBITED_ARGUMENT);
+    match command.status() {
+        Ok(status) => Some(status.code().unwrap_or(1)),
+        Err(error) => {
+            eprintln!("   ⚠️  Could not enable suspend protection: {error}");
+            None
+        }
+    }
 }
 
 /// Deploys the only privileged portion of the DNS toggle outside the
@@ -318,6 +370,9 @@ fn main() {
     }
     // 0. Parse Arguments
     let args: Vec<String> = std::env::args().collect();
+    if let Some(exit_code) = run_with_suspend_protection(&home, &args) {
+        std::process::exit(exit_code);
+    }
     let run_options = parse_run_options(&args);
     let refresh_mode = run_options.refresh_mode;
     if run_options.release_root && !refresh_mode {
@@ -1217,11 +1272,11 @@ mod tests {
                 files.get(&destination.to_string_lossy().to_string()),
                 Some(&contents.to_string())
             );
-            assert!(contents.contains("genoa-idle-suspend --record-baseline"));
             assert!(
-                contents.contains("timeout 1200 /usr/local/bin/genoa-idle-suspend")
-                    || contents.contains("timeout 600 /usr/local/bin/genoa-idle-suspend")
+                contents
+                    .contains("ExecStartPre=/usr/local/bin/genoa-idle-suspend --record-baseline")
             );
+            assert!(contents.contains("ExecStart=%h/.cargo/bin/genoa-idle run"));
         }
         assert!(env.cmd_log.borrow().contains(&(
             "systemctl".to_string(),

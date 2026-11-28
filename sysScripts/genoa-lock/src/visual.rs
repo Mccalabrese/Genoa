@@ -1,24 +1,30 @@
 //! The intentionally small, local-only lock-screen presentation.
 //!
-//! This module never runs a command or reads executable configuration. The
-//! wallpaper is compiled into the binary; weather is a bounded, sanitized read
-//! of Genoa's existing user-owned cache.
+//! This module never runs a command or reads executable configuration. It
+//! renders either Genoa's embedded wallpaper or a bounded, user-owned selected
+//! image; weather is a bounded, sanitized read of Genoa's existing cache.
 
 use std::{
-    fs::OpenOptions,
-    io::Read,
+    env,
+    fs::{self, OpenOptions},
+    io::{Cursor, Read},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
 };
 
 use chrono::Local;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
-use image::ImageFormat;
+use image::{ImageFormat, ImageReader, Limits};
 use serde::Deserialize;
 use uzers::{get_current_uid, get_user_by_uid, os::unix::UserExt};
 
 const WALLPAPER: &[u8] = include_bytes!("../../../wallpapers/comp1.jpg");
 const WEATHER_CACHE_MAX_BYTES: u64 = 4 * 1024;
+const LOCK_WALLPAPER_SETTING_MAX_BYTES: u64 = 4 * 1024;
+const LOCK_WALLPAPER_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const LOCK_WALLPAPER_MAX_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+const LOCK_WALLPAPER_MAX_DIMENSION: u32 = 8_192;
+const LOCK_WALLPAPER_MAX_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_WEATHER_LINES: usize = 9;
 const MAX_WEATHER_LINE_CHARS: usize = 58;
 
@@ -57,15 +63,15 @@ struct WeatherDisplay {
 
 impl Appearance {
     pub fn load() -> Result<Self, String> {
-        let image = image::load_from_memory_with_format(WALLPAPER, ImageFormat::Jpeg)
-            .map_err(|error| format!("could not decode the embedded lock wallpaper: {error}"))?
-            .to_rgba8();
+        let wallpaper = match load_selected_wallpaper() {
+            Ok(wallpaper) => wallpaper,
+            Err(error) => {
+                eprintln!("genoa-lock: ignoring configured lock wallpaper: {error}");
+                embedded_wallpaper()?
+            }
+        };
         Ok(Self {
-            wallpaper: Wallpaper {
-                width: image.width(),
-                height: image.height(),
-                rgba: image.into_raw(),
-            },
+            wallpaper,
             weather: WeatherDisplay::load(),
         })
     }
@@ -209,6 +215,108 @@ impl Appearance {
             }
         }
     }
+}
+
+fn embedded_wallpaper() -> Result<Wallpaper, String> {
+    let image = image::load_from_memory_with_format(WALLPAPER, ImageFormat::Jpeg)
+        .map_err(|error| format!("could not decode the embedded lock wallpaper: {error}"))?
+        .to_rgba8();
+    Ok(Wallpaper {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
+}
+
+fn load_selected_wallpaper() -> Result<Wallpaper, String> {
+    let Some(path) = configured_lock_wallpaper_path()? else {
+        return embedded_wallpaper();
+    };
+    let bytes = read_owned_regular_file(&path, LOCK_WALLPAPER_MAX_BYTES)?;
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("could not identify {}: {error}", path.display()))?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(LOCK_WALLPAPER_MAX_DIMENSION);
+    limits.max_image_height = Some(LOCK_WALLPAPER_MAX_DIMENSION);
+    limits.max_alloc = Some(LOCK_WALLPAPER_MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|error| format!("could not decode {} safely: {error}", path.display()))?;
+    if u64::from(image.width()) * u64::from(image.height()) > LOCK_WALLPAPER_MAX_PIXELS {
+        return Err(format!(
+            "{} exceeds Genoa's 16-megapixel lock wallpaper limit",
+            path.display()
+        ));
+    }
+    let image = image.to_rgba8();
+    Ok(Wallpaper {
+        width: image.width(),
+        height: image.height(),
+        rgba: image.into_raw(),
+    })
+}
+
+fn configured_lock_wallpaper_path() -> Result<Option<std::path::PathBuf>, String> {
+    let Some(user) = get_user_by_uid(get_current_uid()) else {
+        return Ok(None);
+    };
+    let config_home = match env::var_os("XDG_CONFIG_HOME") {
+        Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
+        _ => user.home_dir().join(".config"),
+    };
+    let config = config_home.join("genoa/lock-wallpaper");
+    if let Err(error) = fs::symlink_metadata(&config) {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(format!("could not inspect {}: {error}", config.display()));
+    }
+    let bytes = read_owned_regular_file(&config, LOCK_WALLPAPER_SETTING_MAX_BYTES)?;
+    let path = std::str::from_utf8(&bytes)
+        .map_err(|_| "the lock wallpaper setting is not valid UTF-8".to_string())?
+        .trim();
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = std::path::PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("the lock wallpaper setting must contain an absolute path".to_string());
+    }
+    Ok(Some(path))
+}
+
+fn read_owned_regular_file(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| format!("could not open {}: {error}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if !metadata.is_file()
+        || metadata.uid() != get_current_uid()
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() > maximum_bytes
+    {
+        return Err(format!(
+            "{} is not a safe Genoa wallpaper file",
+            path.display()
+        ));
+    }
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| format!("{} is too large", path.display()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    (&mut file)
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum_bytes {
+        return Err(format!("{} is too large", path.display()));
+    }
+    Ok(bytes)
 }
 
 impl WeatherDisplay {
@@ -710,7 +818,7 @@ fn put_pixel(pixels: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: 
 mod tests {
     use std::{fs, os::unix::fs::symlink};
 
-    use super::{Appearance, load_weather_cache, put_pixel};
+    use super::{Appearance, load_weather_cache, put_pixel, read_owned_regular_file};
     use uzers::get_current_uid;
 
     #[test]
@@ -743,6 +851,19 @@ mod tests {
 
         assert!(load_weather_cache(&cache, get_current_uid()).is_some());
         assert!(load_weather_cache(&link, get_current_uid()).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn lock_wallpaper_reader_rejects_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let wallpaper = directory.path().join("wallpaper.png");
+        fs::write(&wallpaper, b"not an image")?;
+        let link = directory.path().join("wallpaper-link.png");
+        symlink(&wallpaper, &link)?;
+
+        assert!(read_owned_regular_file(&wallpaper, 1_024).is_ok());
+        assert!(read_owned_regular_file(&link, 1_024).is_err());
         Ok(())
     }
 }

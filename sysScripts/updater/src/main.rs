@@ -399,9 +399,19 @@ fn run_launcher(config: &GlobalConfig) -> Result<()> {
     }
 
     let current_exe = std::env::current_exe().context("Failed to locate sys-update")?;
-    let status = Command::new(&config.global.terminal)
+    let idle_helper = dirs::home_dir()
+        .map(|home| home.join(".cargo/bin/genoa-idle"))
+        .filter(|path| path.is_file());
+    let mut terminal = Command::new(&config.global.terminal);
+    terminal
         .arg(format!("--title={}", config.updater.window_title))
-        .arg("-e")
+        .arg("-e");
+    if let Some(idle_helper) = idle_helper {
+        terminal
+            .arg(idle_helper)
+            .args(["inhibit-suspend", "updating"]);
+    }
+    let status = terminal
         .arg(current_exe)
         .arg("--worker")
         .arg("--pause-on-exit")
