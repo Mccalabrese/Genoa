@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Genoa Settings
+Comment=Configure Genoa's lock, sleep, wallpaper, and package preferences
+Exec=genoa-settings
+Icon=preferences-system-symbolic
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+Keywords=Genoa;Settings;Lock;Sleep;Wallpaper;Packages;
+StartupNotify=true
